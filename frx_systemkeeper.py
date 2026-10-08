@@ -736,7 +736,7 @@ def migrate_legacy_layout() -> bool:
 # Бэкапы старой раскладки (modules/loaded/... вместо modules/..., без assets/) тоже восстанавливаются.
 
 # кэши, которые восстановятся сами (скачанные файлы и аватарки BotChat) — в резервную копию не кладём
-CACHE_DIRS = ('data/botchat/media/', 'data/botchat/avatars/')
+CACHE_DIRS = ('data/botchat/media/', 'data/botchat/avatars/', 'data/bin/')     # кэш BotChat и скачанный cloudflared (десятки МБ) — не данные
 
 
 def _user_roots() -> list:
@@ -762,7 +762,7 @@ def _iter_user_files() -> list:
             parts = rel.split('/')
             if parts[0] == 'data' and len(parts) > 1 and parts[1] in ('backup', 'keeper'):
                 continue
-            if rel.startswith(CACHE_DIRS):          # кэш файлов BotChat — не данные, а копии с серверов Telegram
+            if rel.startswith(CACHE_DIRS):          # кэш BotChat (копии с серверов Telegram) и программы из data/bin — не данные
                 continue
             if '__pycache__' in parts or rel.endswith(('-journal', '-wal', '-shm', '.pyc')):
                 continue
@@ -893,6 +893,8 @@ def _replace_dir(src: Path, dst: Path, keep=()) -> None:
             continue
         rmtree(child)
     for child in src.iterdir():
+        if child.name in keep and (dst / child.name).exists():     # то, что сохранили на месте, бэкапом не перетираем
+            continue
         if child.is_dir():
             shutil.copytree(child, dst / child.name)
         else:
@@ -905,7 +907,7 @@ def _apply_user_dir(src: Path) -> None:
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src / 'config.json', CONFIG_PATH)
     if (src / 'data').is_dir():
-        _replace_dir(src / 'data', DATA_DIR, keep=('backup', 'keeper'))
+        _replace_dir(src / 'data', DATA_DIR, keep=('backup', 'keeper', 'bin'))     # bin — работающий cloudflared не трогаем
     if (src / 'modules').is_dir():
         _replace_dir(src / 'modules', MODULES_DIR)
     if (src / 'assets').is_dir() and USER_ASSETS_DIR is not None:
@@ -1644,10 +1646,15 @@ class TunnelManager:
         self._next_try = 0.0
         self._tail = []
         self._fails = 0
+        self._attempt = 0                      # номер попытки с момента включения — юзербот показывает его владельцу
         self.provider = 'cloudflare'
 
+    CONNECT_TIMEOUT = 40                       # адрес выдан, но соединения с Cloudflare нет столько секунд — новая попытка
+
     def state(self, **kw):
-        data = {'ts': time.time(), **kw}
+        data = {'ts': time.time(), 'attempt': self._attempt, 'provider': self.provider, **kw}
+        if kw.get('status') == 'error' and self._next_try:
+            data['next_try'] = self._next_try
         try:
             write_json(TUNNEL_STATE_FILE, data)
         except OSError:
@@ -1683,15 +1690,16 @@ class TunnelManager:
                 self._check()
             except Exception as e:
                 log(f"Туннель: {e}")
-                self.state(status='error', error=str(e), port=self.port)
                 self._kill()
                 self._next_try = time.time() + self.RETRY
+                self.state(status='error', error=str(e), port=self.port)
             self._quit.wait(1.0)
 
     def _tick(self):
         req = read_json(TUNNEL_REQUEST_FILE) or {}
         want = bool(req.get('enable'))
         if not want:
+            self._attempt = 0
             if self.proc is not None:
                 self._kill()
                 log("Туннель выключен")
@@ -1704,6 +1712,8 @@ class TunnelManager:
         alive = self.proc is not None and self.proc.poll() is None
         if port != self.port or renew != self.renew:          # новый порт или «новый адрес» — пробуем сразу
             self._next_try, self._streak = 0.0, 0
+            if renew != self.renew:
+                self._attempt = 0
         if alive and (port != self.port or renew != self.renew):
             self._kill()
             alive = False
@@ -1716,8 +1726,7 @@ class TunnelManager:
             self._fails += 1
             self._streak = getattr(self, '_streak', 0) + 1
             log(f"Туннель ({self.provider}): процесс завершился (код {code}) {last}")
-            self.state(status='error', error=f"{self.provider}: процесс завершился (код {code}). {last}".strip(), port=port,
-                       provider=self.provider)
+            err = f"{self.provider}: процесс завершился (код {code}). {last}".strip()
             if self._fails >= 2 and shutil.which('ssh'):
                 self.provider = 'localhost.run' if self.provider == 'cloudflare' else 'cloudflare'
                 self._fails = 0
@@ -1725,10 +1734,12 @@ class TunnelManager:
                 self._next_try = time.time() + 2
             else:
                 self._next_try = time.time() + min(300, self.RETRY * 2 ** min(6, self._streak - 1))
+            self.state(status='error', error=err, port=port)
             return
         if time.time() < self._next_try:
             return
         self.port, self.renew = port, renew
+        self._attempt += 1
         if self.provider == 'cloudflare':
             exe = find_cloudflared()
             if not exe:
@@ -1791,18 +1802,18 @@ class TunnelManager:
 
     def _check(self):
         st = read_json(TUNNEL_STATE_FILE) or {}
-        if st.get('status') == 'connecting' and self.proc is not None and time.time() - float(st.get('ts', 0)) > 90:
+        if st.get('status') == 'connecting' and self.proc is not None and time.time() - float(st.get('ts', 0)) > self.CONNECT_TIMEOUT:
             last = self._tail[-1] if self._tail else ''
-            log(f"Туннель: адрес выдан, но соединиться с Cloudflare не удалось за 90 с — перезапускаю. {last}")
+            log(f"Туннель: адрес выдан, но соединиться с Cloudflare не удалось за {self.CONNECT_TIMEOUT} с — перезапускаю. {last}")
             self._kill()
             self._streak = getattr(self, '_streak', 0) + 1
             self._fails += 1
-            self.state(status='error', error=f"нет соединения с Cloudflare (порт 7844 закрыт?). {last}".strip(),
-                       port=self.port, provider=self.provider)
-            self._next_try = time.time() + self.RETRY
+            self._next_try = time.time() + 3
             if self._fails >= 2 and shutil.which('ssh'):
                 self.provider, self._fails, self._next_try = 'localhost.run', 0, time.time() + 2
                 log("Туннель: пробую localhost.run")
+            self.state(status='error', error=f"нет соединения с Cloudflare за {self.CONNECT_TIMEOUT} с (порт 7844 закрыт?). {last}".strip(),
+                       port=self.port)
             return
         if st.get('status') != 'up' or not st.get('url') or self.proc is None:
             return

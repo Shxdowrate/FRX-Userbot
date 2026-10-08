@@ -378,10 +378,8 @@ async function filesView(T) {
 
   async function download(f) {
     await act(async () => {
-      const url = await flBlobUrl(f, true);
-      const a = h('a', { href: url, download: f.name });
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      const r = await api('/files/link', flKey(f));
+      frxDownload(location.origin + r.url, r.name, r.size);
     });
   }
 

@@ -139,6 +139,16 @@ async def _shutdown(core: Core, work, bot):
         except Exception:
             pass
 
+    if bot is not None and core.exit_code not in (42, 43):
+        # юзербот выключается насовсем (.exit, Ctrl+C) — туннель умрёт вместе с keeper'ом, кнопка «Сайт» в боте
+        # вела бы в никуда: возвращаем обычную кнопку меню (при следующем запуске модуль Web поставит её снова)
+        try:
+            if await core.db.get('web_panel:menu_button_url') and core._owner_id:
+                from aiogram.types import MenuButtonDefault
+                await asyncio.wait_for(bot.set_chat_menu_button(chat_id=core._owner_id, menu_button=MenuButtonDefault()), 8)
+                await core.db.set('web_panel:menu_button_url', None)
+        except Exception:
+            pass
     if bot is not None:
         try:
             await asyncio.wait_for(bot.session.close(), 10)

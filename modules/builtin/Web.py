@@ -235,7 +235,7 @@ async def _remember_url(url):
 
 def _sync_tunnel(want, renew=False, hold=True):
     """Просит keeper включить/выключить туннель. Возвращает текст ошибки или None."""
-    _WATCH['hold'] = time.time() + 120 if (want and hold) else 0.0
+    _WATCH['hold'] = time.time() + 160 if (want and hold) else 0.0
     try:
         if want or engine.web.tunnel_wanted():
             engine.web.request_tunnel(bool(want), renew=renew)
@@ -251,6 +251,59 @@ async def _minutes_text() -> str:
     return visual.field("автовыключение", f"через {limit // 60} мин простоя")
 
 
+# ------------------------------------------------------------------ #
+# Ход подключения публичного адреса: Cloudflare иногда отвечает не с первой попытки — keeper пробует снова сам,
+# а владелец видит, какая идёт попытка и что происходит, вместо «зависшего» сообщения.
+# ------------------------------------------------------------------ #
+
+def _tunnel_step(st) -> tuple:
+    """(номер попытки, сервис, что сейчас происходит, ошибка прошлой попытки | '')."""
+    status = st.get('status')
+    att = int(st.get('attempt') or 1)
+    svc = 'Cloudflare' if (st.get('provider') or 'cloudflare') == 'cloudflare' else 'localhost.run (запасной)'
+    err = ''
+    if status == 'downloading':
+        step = 'скачиваю cloudflared — один раз, до минуты'
+    elif status == 'connecting':
+        step = f'адрес получен, жду соединения с {svc}'
+    elif status == 'error':
+        nt = st.get('next_try')
+        left = int(nt - time.time()) if nt else 0
+        step = f'не вышло — следующая попытка через {left} с' if left > 0 else 'не вышло — пробую снова'
+        err = str(st.get('error') or '')[:160]
+    else:
+        step = f'запускаю туннель ({svc})'
+    return att, svc, step, err
+
+
+def _tunnel_progress_text(st, elapsed) -> str:
+    att, svc, step, err = _tunnel_step(st)
+    lines = [visual.wait(f"Поднимаю публичный адрес сайта… {int(elapsed)} с"),
+             visual.field("попытка", f"{att} · {svc}", code=False),
+             visual.item(_esc(step))]
+    if err:
+        lines.append(visual.hint(_esc(err)))
+    lines.append(visual.hint("обычно 5–30 с; если Cloudflare не отвечает, FRX сам пробует снова (до 2,5 мин)"))
+    return "\n".join(lines)
+
+
+def _progress_editor(show):
+    """on_progress для wait_tunnel: правит сообщение, только когда изменилось, и не чаще раза в 4 с (лимиты Telegram)."""
+    last = {'key': None, 't': 0.0}
+
+    async def on_progress(st, elapsed):
+        att, _svc, step, _err = _tunnel_step(st)
+        key = (st.get('status'), att, st.get('provider'))
+        now = time.monotonic()
+        if key == last['key'] and now - last['t'] < 10:       # то же состояние — только счётчик секунд, раз в 10 с
+            return
+        if now - last['t'] < 4:
+            return
+        last.update(key=key, t=now)
+        await show(st, elapsed)
+    return on_progress
+
+
 async def _ensure_tunnel(event):
     """Если туннель включён в настройках — дождаться адреса. Возвращает (url | None, ошибка | None)."""
     if not await _cfg('tunnel'):
@@ -260,8 +313,9 @@ async def _ensure_tunnel(event):
         return None, err
     st = engine.web.tunnel_state()
     if st.get('status') != 'up':
-        await engine.answer(event, visual.wait("Поднимаю публичный адрес сайта… (первый раз скачивается cloudflared — до минуты)"))
-        st = await engine.web.wait_tunnel(90)
+        await engine.answer(event, _tunnel_progress_text(st, 0))
+        st = await engine.web.wait_tunnel(150, on_progress=_progress_editor(
+            lambda s_, e_: engine.answer(event, _tunnel_progress_text(s_, e_))))
     if st.get('status') == 'up':
         await _remember_url(st['url'])
         return st['url'], None
@@ -372,12 +426,14 @@ async def web_cmd(event):
             await engine.answer(event, visual.ok("Публичный адрес выключен") + "\n"
                                 + visual.hint("сайт снова доступен только с этой машины и по SSH"))
             return
-        await engine.answer(event, visual.wait("Поднимаю публичный адрес… (первый раз скачивается cloudflared — до минуты)"))
-        st = await engine.web.wait_tunnel(90)
+        await engine.answer(event, _tunnel_progress_text(engine.web.tunnel_state(), 0))
+        st = await engine.web.wait_tunnel(150, on_progress=_progress_editor(
+            lambda s_, e_: engine.answer(event, _tunnel_progress_text(s_, e_))))
         if st.get('status') != 'up':
-            await engine.answer(event, visual.err("Публичный адрес не поднялся") + "\n"
+            await engine.answer(event, visual.err("Публичный адрес пока не поднялся") + "\n"
                                 + visual.hint(_esc(st.get('error') or 'нет ответа от cloudflared'))
-                                + "\n" + visual.hint("проверьте выход в интернет; повторить — .web tunnel new"))
+                                + "\n" + visual.hint("FRX продолжает пробовать сам — как только адрес заработает, ссылка придёт в ЛС; "
+                                                     "или .web tunnel new"))
             return
         if not engine.web.running:
             await engine.web.start()
@@ -445,13 +501,16 @@ async def _panel_text(private: bool, note: str = '') -> str:
     elif status == 'up':
         lines.append(visual.field("публичный адрес", _esc(st['url']) if private else "работает (адрес — в ЛС от бота)",
                                   code=private))
+    elif status == 'error' and st.get('next_try'):
+        att, svc, step, _err = _tunnel_step(st)
+        lines.append(visual.field("публичный адрес", f"попытка {att} — {step}", code=False))
     elif status == 'error':
         lines.append(visual.field("публичный адрес", "ошибка", code=False))
         if st.get('error'):
             lines.append(visual.item(f"<i>{_esc(str(st['error'])[:180])}</i>", 1))
     else:
-        lines.append(visual.field("публичный адрес", {'downloading': 'скачивается cloudflared…',
-                                                       'connecting': 'подключается к Cloudflare…'}.get(status, 'запускается…'), code=False))
+        att, svc, step, _err = _tunnel_step(st)
+        lines.append(visual.field("публичный адрес", f"попытка {att} — {step}", code=False))
     if getattr(engine, '_aiogram_bot', None) is not None:
         if not await _cfg('menu_button'):
             lines.append(visual.field("кнопка в боте", "выключена", code=False))
@@ -508,14 +567,18 @@ async def _open_panel(event, note=''):
             t.cancel()
 
         async def go():
-            st = await engine.web.wait_tunnel(90)
+            async def show(st_, el_):
+                att, svc, step, err = _tunnel_step(st_)
+                await redraw(f"поднимаю публичный адрес · попытка {att} ({svc}) · {step} · {int(el_)} с"
+                             + (f" · прошлая: {err[:90]}" if err else ''))
+            st = await engine.web.wait_tunnel(150, on_progress=_progress_editor(show))
             if st.get('status') == 'up':
                 await _remember_url(st['url'])
                 await _sync_menu_button()
                 sent = await _open_login_and_send(st['url'])
                 await redraw(f"публичный адрес работает · ссылка и код — {sent}")
             else:
-                await redraw("публичный адрес не поднялся — см. ошибку выше; повторить — «Новый адрес»")
+                await redraw("публичный адрес пока не поднялся — FRX пробует дальше сам, ссылка придёт в ЛС; или «Новый адрес»")
         state['watch'] = asyncio.ensure_future(go())
 
     @form.on_click(data_startswith='wp:')

@@ -67,6 +67,7 @@
   // Telegram Mini App: данные запуска приходят во фрагменте адреса (#tgWebAppData=…)
   const init = new URLSearchParams(location.hash.slice(1)).get('tgWebAppData');
   if (init) {
+    try { sessionStorage.setItem('frx_tg', '1'); } catch (e) { /* без хранилища — сайт узнает Telegram по его мосту */ }
     show('lg-tg');
     call('telegram', { init_data: init }).then(enter).catch((e) => { msg(e.message, true); refresh(); });
   } else {

@@ -180,11 +180,13 @@ class WebPanel:
             TUNNEL_REQUEST_FILE.parent.mkdir(parents=True, exist_ok=True)
             TUNNEL_REQUEST_FILE.write_text(json.dumps(data), encoding='utf-8')
 
-    async def wait_tunnel(self, timeout: float = 90) -> dict:
-        """Ждёт, пока туннель поднимется (или сломается). Возвращает состояние."""
+    async def wait_tunnel(self, timeout: float = 150, on_progress=None) -> dict:
+        """Ждёт, пока туннель поднимется. keeper между попытками сам перезапускает cloudflared (и пробует запасной
+        localhost.run), поэтому ошибка одной попытки — не конец: ждём до timeout. on_progress(state, elapsed) —
+        async-колбэк, вызывается примерно раз в секунду (юзербот показывает владельцу, какая идёт попытка)."""
         started = time.monotonic()
         deadline = started + timeout
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1.0)
         while time.monotonic() < deadline:
             st = self.tunnel_state()
             status = st.get('status')
@@ -192,10 +194,16 @@ class WebPanel:
                 return st
             if status == 'off' and not self.tunnel_wanted():
                 return st
-            if status == 'error' and time.monotonic() - started > 45:     # keeper успел попробовать и запасной вариант
-                return st
-            await asyncio.sleep(0.5)
-        return self.tunnel_state() or {'status': 'error', 'error': 'туннель не поднялся вовремя'}
+            if on_progress is not None:
+                try:
+                    await on_progress(st, time.monotonic() - started)
+                except Exception:
+                    pass
+            await asyncio.sleep(1.0)
+        st = self.tunnel_state() or {}
+        if st.get('status') != 'up':
+            st = {**st, 'status': 'error', 'error': st.get('error') or f'туннель не поднялся за {int(timeout)} с'}
+        return st
 
     def public_url(self):
         st = self.tunnel_state()
@@ -482,7 +490,7 @@ class WebPanel:
             origin = request.headers.get('Origin')
             if origin and (urlparse(origin).hostname or '').lower() not in allowed:
                 return web.json_response({'error': 'forbidden origin'}, status=403)
-        if path != '/' and not path.startswith('/static/') and path not in PUBLIC_PATHS and not self.authed(request):
+        if path != '/' and not path.startswith(('/static/', '/dl/')) and path not in PUBLIC_PATHS and not self.authed(request):   # /dl/ — пропуск в самой ссылке
             return web.json_response({'error': 'нужно войти', 'auth': True}, status=401)
         if path.startswith('/api/'):
             if self._sleeping:                           # юзербот перезагружается

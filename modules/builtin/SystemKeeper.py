@@ -192,9 +192,15 @@ async def exit_cmd(event):
     dst = keeper.TMP_DIR / f"frx_backup_v{version}_{time.strftime('%Y%m%d_%H%M%S')}.zip"
     backup_note = ""
     try:
-        info = await asyncio.wait_for(asyncio.to_thread(keeper.make_user_backup, dst, version), 120)
+        if getattr(engine, '_aiogram_bot', None) is None:
+            raise RuntimeError("стационарного бота нет — бэкап некуда отправить")
+        info = await asyncio.wait_for(asyncio.to_thread(keeper.make_user_backup, dst, version), 90)
         if info['size'] > 49 * 1024 * 1024:     # лимит Bot API на файл — 50 МБ
             raise ValueError(f"архив {_fmt_size(info['size'])} больше лимита бота (50 МБ)")
+        try:
+            await engine.answer(event, visual.wait(f"Отправляю резервную копию в ЛС от бота ({_fmt_size(info['size'])})…"))
+        except Exception:
+            pass
         caption = "\n".join([
             visual.title("FRX backup", sub="перед .exit"),
             visual.field("версия", _esc(version)),
@@ -204,7 +210,8 @@ async def exit_cmd(event):
             f"{visual.visual('security')} {visual.hint('содержит сессии и токен — не пересылайте')}",
             visual.item("восстановление: ответьте <code>.restorebackup</code> на этот файл"),
         ])
-        await asyncio.wait_for(engine.bot_send_to_owner(caption, file=str(dst)), 300)
+        # не дольше 3 минут: .exit не должен «висеть», если сеть медленная — тогда выключаемся без бэкапа
+        await asyncio.wait_for(engine.bot_send_to_owner(caption, file=str(dst)), 180)
         backup_note = visual.ok("Резервная копия отправлена в ЛС от бота") + f"  <code>{_fmt_size(info['size'])}</code>\n"
     except Exception as e:
         reason = 'превышено время ожидания' if isinstance(e, asyncio.TimeoutError) else str(e)

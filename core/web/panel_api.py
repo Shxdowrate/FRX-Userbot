@@ -18,6 +18,7 @@ core/web/panel_api.py
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import time
 from pathlib import Path
@@ -51,6 +52,8 @@ def register(panel, router):
     r.add_post('/api/logs/clear', panel.api(api.logs_clear))
     r.add_get('/api/files', panel.api(api.files))
     r.add_get('/api/files/raw', api.files_raw)
+    r.add_post('/api/files/link', panel.api(api.files_link))
+    r.add_get('/dl/{token}/{name}', api.files_dl)                   # скачивание обычной ссылкой (см. files_link)
     r.add_get('/api/files/text', panel.api(api.files_text))
     r.add_post('/api/files/upload', panel.api(api.files_upload))
     r.add_post('/api/files/delete', panel.api(api.files_delete))
@@ -446,6 +449,38 @@ class PanelApi:
                 mime = 'text/plain'
         resp = web.FileResponse(p, headers=headers)
         resp.content_type = mime if not mime.startswith('text/') else mime + '; charset=utf-8'
+        return resp
+
+    # Скачивание — обычной ссылкой, а не fetch → blob: браузер сразу показывает загрузку с прогрессом (через туннель
+    # большой файл идёт не мгновенно), на телефоне и в Telegram Mini App это единственный рабочий способ. Ссылку
+    # выдаёт POST /api/files/link (сессия + X-FRX), она живёт DL_TTL секунд и ведёт ровно на один файл; токен в ней
+    # сам по себе пропуск — так файл может скачать и загрузчик Telegram, у которого нет cookie сайта.
+    DL_TTL = 10 * 60
+
+    async def files_link(self, request):
+        b = await self.panel._json(request)
+        p, name = await self._resolve(str(b.get('src', '')), str(b.get('id', '')))
+        links = self.__dict__.setdefault('_dl_links', {})
+        now = time.time()
+        for k in [k for k, v in links.items() if v['until'] < now]:
+            links.pop(k, None)
+        token = secrets.token_urlsafe(24)
+        links[token] = {'path': str(p), 'name': name, 'until': now + self.DL_TTL}
+        return {'url': f'/dl/{token}/{quote(name)}', 'name': name, 'size': p.stat().st_size}
+
+    async def files_dl(self, request):
+        link = self.__dict__.get('_dl_links', {}).get(request.match_info.get('token', ''))
+        if not link or link['until'] < time.time():
+            return web.Response(status=410, text='Ссылка на файл устарела — нажмите «скачать» на сайте ещё раз.',
+                                content_type='text/plain', charset='utf-8')
+        p = Path(link['path'])
+        if not p.is_file():
+            return web.Response(status=404, text='Файла больше нет', content_type='text/plain', charset='utf-8')
+        name = link['name']
+        headers = {'Content-Disposition': "attachment; filename*=UTF-8''" + quote(name),
+                   'Content-Security-Policy': "default-src 'none'; sandbox", 'X-Content-Type-Options': 'nosniff'}
+        resp = web.FileResponse(p, headers=headers)
+        resp.content_type = 'application/octet-stream'
         return resp
 
     async def files_text(self, request):

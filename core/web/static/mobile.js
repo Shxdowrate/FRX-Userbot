@@ -100,3 +100,43 @@ function mFab(label, onClick, title) {
 
 // песочница на весь экран (sandbox.js) — при уходе со страницы флаг снимаем
 window.addEventListener('hashchange', () => document.documentElement.classList.remove('sb-open'));
+
+/* ---------- Telegram Mini App и скачивание файлов ----------
+   Сайт открыт внутри Telegram (кнопка «Сайт» / «Открыть в Telegram»)? Telegram передаёт #tgWebAppData при запуске —
+   запоминаем на время вкладки. Скачать файл из Mini App можно только через сам Telegram (событие
+   web_app_request_file_download, Telegram 8.0+) или открыв ссылку во внешнем браузере (web_app_open_link). */
+const FRX_IN_TG = (() => {
+  try {
+    if (/tgWebAppData=/.test(location.hash)) sessionStorage.setItem('frx_tg', '1');
+    return sessionStorage.getItem('frx_tg') === '1' || !!window.TelegramWebviewProxy;
+  } catch (e) { return !!window.TelegramWebviewProxy; }
+})();
+
+function tgPostEvent(type, data) {
+  const body = JSON.stringify(data || {});
+  try {
+    if (window.TelegramWebviewProxy && window.TelegramWebviewProxy.postEvent) { window.TelegramWebviewProxy.postEvent(type, body); return true; }
+    if (window.parent && window.parent !== window) { window.parent.postMessage(JSON.stringify({ eventType: type, eventData: data || {} }), '*'); return true; }
+  } catch (e) { /* не в Telegram */ }
+  return false;
+}
+
+function frxFmtSize(n) {
+  if (!n && n !== 0) return '';
+  const u = ['Б', 'КБ', 'МБ', 'ГБ']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(n < 10 ? 1 : 0) : n) + ' ' + u[i];
+}
+
+function frxDownload(url, name, size) {
+  if (FRX_IN_TG) {                                   // внутри Telegram обычная ссылка ничего не скачает
+    mActions('Скачать «' + name + '»' + (size ? ' · ' + frxFmtSize(size) : ''), [
+      { icon: '⬇', label: 'Скачать через Telegram', hint: 'файл придёт в загрузки Telegram (нужна свежая версия приложения)', run: () => tgPostEvent('web_app_request_file_download', { url, file_name: name }) },
+      { icon: '↗', label: 'Открыть в браузере', hint: 'ссылка живёт 10 минут, вход не нужен', run: () => { if (!tgPostEvent('web_app_open_link', { url })) window.open(url, '_blank'); } },
+    ]);
+    return;
+  }
+  const a = h('a', { href: url, download: name, rel: 'noopener' });
+  document.body.appendChild(a); a.click(); a.remove();
+  toast('загрузка началась' + (size ? ` · ${frxFmtSize(size)}` : '') + ' — прогресс в загрузках браузера', 'ok');
+}
