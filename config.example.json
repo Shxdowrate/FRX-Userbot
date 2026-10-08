@@ -1,0 +1,11 @@
+{
+  "api_id": 0,
+  "api_hash": "",
+  "aiogram_token": "",
+  "prefix": ".",
+  "web_port": 8878,
+  "web_sentinel": true,
+  "web_hosts": [],
+  "hibernate_probe_seconds": 7,
+  "hibernate_after_seconds": 30
+}

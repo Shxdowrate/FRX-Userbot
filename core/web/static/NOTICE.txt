@@ -1,0 +1,8 @@
+font.woff2 — подмножество (латиница + кириллица), начертание Bold, шрифта Jost
+(Owen Earl / indestructible type*). Copyright 2020 The Jost Project Authors.
+Лицензия — SIL Open Font License 1.1, полный текст — OFL.txt в этой папке
+(источник: https://github.com/google/fonts/tree/main/ofl/jost).
+
+Геометрический гротеск — самая близкая свободная замена Century Gothic Bold (сам Century Gothic
+проприетарный и не распространяется с проектом). Если на компьютере установлен настоящий
+Century Gothic Bold, сайт использует его (local() в style.css).

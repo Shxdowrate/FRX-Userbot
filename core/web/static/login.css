@@ -1,0 +1,20 @@
+/* FRX — страница входа на сайт (login.html, login.js) */
+.lg { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px 16px; }
+.lg-box { width: 100%; max-width: 420px; padding: 34px 32px 28px; text-align: center; }
+.lg-word { font-size: 64px; line-height: 1; letter-spacing: .08em; padding-left: .08em;
+  background: linear-gradient(180deg, #fff 0%, #f0f0f3 40%, #9d9da6 64%, #ececf0 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent; }
+.lg-sub { color: var(--ink-2); font-size: 14px; margin: 10px 0 24px; padding-top: 12px; position: relative; }
+.lg-sub::before { content: ''; position: absolute; left: 30%; right: 30%; top: 0; height: 3px; background: var(--acc-grad); box-shadow: 0 0 16px rgba(255, 70, 20, .65); }
+.lg-step { display: flex; flex-direction: column; gap: 14px; align-items: stretch; }
+.lg-step[hidden] { display: none; }
+.lg-note { color: var(--ink-2); font-size: 14px; }
+.lg-wide { width: 100%; justify-content: center; padding-top: 11px; padding-bottom: 11px; }
+.lg-input { text-align: center; font-family: var(--mono); font-size: 34px; letter-spacing: .45em; padding-left: .45em; }
+.lg-again { align-self: center; font-size: 13px; color: var(--ink-2); background: none; border: 0; cursor: pointer; font-family: inherit; }
+.lg-msg { min-height: 20px; margin-top: 14px; font-size: 14px; color: var(--ink-2); }
+.lg-msg.err { color: var(--danger); }
+.lg-title { font-size: 22px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink); }
+.lg-lock { width: 46px; height: 40px; margin: 4px auto 0; position: relative; border-radius: 3px; background: var(--acc-grad); box-shadow: 0 0 22px rgba(255, 70, 20, .45); }
+.lg-lock::before { content: ''; position: absolute; left: 9px; right: 9px; top: -20px; height: 24px; border: 4px solid rgba(255, 255, 255, .85); border-bottom: 0; border-radius: 14px 14px 0 0; }
+.lg-left { font-size: 12px; color: var(--ink-3); }

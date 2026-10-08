@@ -1,0 +1,39 @@
+/* FRX — вкладка «доступ» и алиасы (access.js) */
+.tag.ac-danger { color: var(--danger); border-color: rgba(255, 155, 143, .5); cursor: help; }
+.ac-has { color: var(--ink-2); font-size: 13px; }
+
+.veil .glass.ac-wide { max-width: 760px; max-height: calc(100vh - 40px); display: flex; flex-direction: column; }
+.veil .glass.ac-wide > .stack, .veil .glass.ac-wide > div:not(.actions) { overflow-y: auto; min-height: 0; }
+.ac-pick { overflow-y: auto; max-height: 62vh; padding-right: 4px; }
+.ac-pick .h2 { padding: 12px 0 0; }
+.ac-pick .row, .veil .ac-wide .glass .row { padding-top: 10px; padding-bottom: 10px; }
+.veil .ac-wide .glass { background: transparent; padding: 0 2px; border: 0; box-shadow: none; animation: none; max-width: none; }
+.ac-group { border-top: 1px solid var(--line); }
+.ac-group > .row.ac-mod { border-top: 0; }
+.ac-cmd { padding-left: 24px !important; }
+.ac-cmd .name { font-size: 15px; }
+.ac-warn { color: var(--danger); font-size: 13px; padding: 2px 0 8px; }
+
+.ac-confirm { border: 1px solid rgba(255, 155, 143, .45); border-radius: 2px; padding: 16px 18px; }
+.ac-confirm.calm { border-color: var(--line); }
+.ac-confirm > .name { color: var(--danger); font-size: 17px; }
+.ac-confirm.calm > .name { color: var(--ink); }
+.ac-confirm ul { margin: 8px 0; padding-left: 20px; color: var(--ink-2); font-size: 14px; }
+.ac-confirm-what { margin-top: 6px; }
+
+.ac-fields { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.ac-fields label { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 12px; }
+.ac-fields label > span { color: var(--ink-2); font-size: 14px; }
+.ac-fields > .faint { margin: -2px 0 6px 122px; }
+textarea.field.ac-desc { resize: vertical; min-height: 44px; font: inherit; }
+
+.ac-steps { margin-bottom: 6px; }
+.ac-steps .chip:disabled { opacity: .45; cursor: default; }
+.ac-preview { margin-top: 10px; font-size: 16px; }
+.ac-preview .faint { margin-top: 6px; }
+
+@media (max-width: 640px) {
+  .ac-cmd { padding-left: 10px !important; }
+  .ac-fields label { grid-template-columns: 1fr; gap: 2px; }
+  .ac-fields > .faint { margin-left: 0; }
+}

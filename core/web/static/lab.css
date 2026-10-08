@@ -1,0 +1,141 @@
+/* FRX WebIDE Lab. Конструктор модулей: палитра по категориям, скрипты, блоки в стиле инструкций Mindustry. */
+
+.lab-hint { margin: -4px 0 14px 6px; max-width: 900px; }
+.lab-layout { display: grid; grid-template-columns: 290px minmax(0, 1fr) 390px; gap: 16px; align-items: start; }
+.lab-palwrap { position: sticky; top: 66px; padding: 12px; max-height: calc(100vh - 90px); display: flex; flex-direction: column; overflow: hidden; }
+.lab-pal { display: flex; flex-direction: column; gap: 10px; min-height: 0; flex: 1; }
+.lab-search { width: 100%; box-sizing: border-box; }
+.lab-cats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.lab-cat { display: flex; align-items: center; gap: 6px; text-align: left; font: inherit; font-size: 12px; font-weight: 400; color: var(--ink-2); background: rgba(255, 255, 255, .06); border: 1px solid transparent; border-left: 3px solid var(--c); border-radius: 2px; padding: 5px 7px; cursor: pointer; min-width: 0; transition: background .2s var(--ease), color .2s var(--ease); }
+.lab-cat:hover { background: var(--hover); color: var(--ink); }
+.lab-cat.on { background: rgba(255, 255, 255, .22); color: var(--ink); border-color: var(--line-2); border-left-color: var(--c); }
+.lab-cat .i { width: 14px; text-align: center; color: var(--c); font-weight: 700; flex: none; }
+.lab-cat .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.lab-cat .n { font-size: 10px; color: var(--ink-3); flex: none; }
+.lab-pallist { overflow-y: auto; display: flex; flex-direction: column; gap: 4px; min-height: 120px; padding-right: 2px; scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, .28) transparent; }
+.lab-pal-h { font-size: 12px; color: var(--ink-3); padding: 2px 2px 4px; text-transform: uppercase; letter-spacing: .04em; }
+.lab-pi { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 13px; font-weight: 400; padding: 6px 10px; border-radius: 2px; background: rgba(255, 255, 255, .04); border-left: 4px solid var(--c); cursor: grab; user-select: none; transition: transform .15s var(--ease), background .2s var(--ease), opacity .2s var(--ease); }
+.lab-pi:hover { background: rgba(255, 84, 32, .12); transform: translateX(2px); }
+.lab-pi:active { cursor: grabbing; }
+.lab-pi.dim { opacity: .38; }
+.lab-pi-c { font-size: 10px; color: var(--ink-3); flex: none; }
+
+/* рабочая область */
+.lab-center { min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.lab-ws { display: flex; flex-direction: column; gap: 14px; }
+.lab-banner { padding: 10px 14px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; font-weight: 400; background: rgba(255, 190, 80, .16); }
+.lab-banner[hidden] { display: none; }
+.lab-addscript { font: inherit; font-size: 14px; color: var(--ink-2); background: transparent; border: 1px dashed var(--line-2); border-radius: 2px; padding: 14px; cursor: pointer; transition: background .2s var(--ease), color .2s var(--ease); }
+.lab-addscript:hover { background: var(--hover); color: var(--ink); }
+.ls { background: rgba(21, 18, 17, 0.918); border-radius: 2px; padding: 10px 12px 12px; -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); transition: box-shadow .3s var(--ease); }
+.ls.flash, .lb.flash { box-shadow: 0 0 0 2px rgba(255, 255, 255, .75); }
+.ls-head { display: flex; align-items: center; gap: 10px; padding: 2px 2px 8px; flex-wrap: wrap; }
+.ls-hat { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: #170c08; background: var(--acc-grad); border-radius: 2px; padding: 2px 10px; }
+.ls-side { font-size: 11px; color: var(--ink-3); border: 1px solid var(--line); border-radius: 2px; padding: 0 8px; font-weight: 400; }
+.ls-sum { font-size: 14px; }
+.ls.collapsed { padding-bottom: 6px; }
+.ls.collapsed .ls-head { padding-bottom: 2px; }
+.lb-list { display: flex; flex-direction: column; gap: 6px; min-height: 28px; border-radius: 2px; transition: background .15s var(--ease), box-shadow .15s var(--ease); }
+.lb-list.drop-in { background: rgba(255, 255, 255, .1); box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .5); }
+.lb-empty { font-size: 12px; font-weight: 400; color: var(--ink-3); padding: 8px 10px; border: 1px dashed var(--line); border-radius: 2px; text-align: center; }
+
+/* блок */
+.lb { position: relative; border-radius: 2px; background: rgb(27, 23, 22); border-left: 5px solid var(--c); box-shadow: 0 1px 0 rgba(255, 255, 255, .06) inset; transition: box-shadow .2s var(--ease), opacity .2s var(--ease), transform .15s var(--ease); }
+.lb:hover { box-shadow: 0 0 0 1px rgba(255, 255, 255, .22); }
+.lb.sel { box-shadow: 0 0 0 2px rgba(255, 255, 255, .85); background: rgb(31, 26, 25); }
+.lb.off { opacity: .45; }
+.lb.off .lb-title { text-decoration: line-through; }
+.lb.dragging { opacity: .4; }
+.lb.bad { box-shadow: 0 0 0 2px rgba(255, 130, 150, .85); }
+.lb.drop-before::before, .lb.drop-after::after { content: ''; position: absolute; left: 0; right: 0; height: 4px; border-radius: 2px; background: #fff; box-shadow: 0 0 8px rgba(255, 255, 255, .8); z-index: 2; pointer-events: none; }
+.lb.drop-before::before { top: -5px; }
+.lb.drop-after::after { bottom: -5px; }
+.lb-head { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; flex-wrap: wrap; }
+.lb-grip { cursor: grab; color: var(--ink-3); font-size: 14px; line-height: 26px; letter-spacing: -2px; user-select: none; flex: none; padding: 0 2px; }
+.lb-ico { width: 20px; line-height: 26px; text-align: center; color: var(--c); font-weight: 700; flex: none; }
+.lb-title { line-height: 26px; font-size: 14px; flex: none; }
+.lb-fields { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: flex-start; flex: 1; min-width: 160px; }
+.lb-fld { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.lb-fld.wide { flex-basis: 100%; align-items: flex-start; flex-direction: column; gap: 3px; }
+.lb-lab { font-size: 12px; color: var(--ink-3); font-weight: 400; white-space: nowrap; }
+.lb-f { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.lb-f.wide { display: flex; width: 100%; }
+.lb-textf { position: relative; }
+.lb-in { font: inherit; font-size: 13px; font-weight: 400; color: var(--ink); background: rgba(0, 0, 0, .35); border: 1px solid var(--line); border-radius: 2px; padding: 3px 8px; outline: none; min-width: 70px; width: 140px; box-sizing: border-box; transition: border-color .2s var(--ease), background .2s var(--ease); }
+.lb-in:focus { border-color: var(--line-2); background: rgba(0, 0, 0, .55); }
+.lb-in.multi { width: 100%; min-width: 220px; resize: vertical; line-height: 1.4; overflow: hidden; }
+.lb-in.lines { min-height: 70px; overflow: auto; }
+.lb-fld.wide > .lb-textf { display: flex; width: 100%; }
+.lb-fld.wide > .lb-textf .lb-in { flex: 1; }
+.lb-var { width: 112px; }
+.lb-var.out { border-color: rgba(255, 224, 138, .45); }
+.lb-var.in { border-color: rgba(255, 138, 0, .5); }
+.lb-sel { width: auto; min-width: 90px; padding-right: 4px; cursor: pointer; }
+.lb-sel option { color: #fff; background: #141417; }
+.lb-sel.join { min-width: 54px; font-weight: 600; }
+.lb-pick { font: inherit; font-size: 11px; font-weight: 600; color: var(--ink-2); background: rgba(255, 255, 255, .1); border: 1px solid var(--line); border-radius: 2px; padding: 2px 6px; cursor: pointer; flex: none; height: 24px; }
+.lb-pick:hover { background: var(--hover); color: var(--ink); }
+.lb-check { gap: 6px; font-size: 13px; font-weight: 400; cursor: pointer; }
+.lb-head:has(.lb-fld.wide) .lb-fields { flex-basis: 100%; order: 3; }
+.lb-head:has(.lb-fld.wide) .lb-tools { order: 2; }
+.lb-tools { display: flex; gap: 1px; margin-left: auto; flex: none; opacity: 0; transition: opacity .15s var(--ease); }
+.lb:hover > .lb-head > .lb-tools, .lb.sel > .lb-head > .lb-tools, .lb-tools.always { opacity: 1; }
+.lb-x { font: inherit; font-size: 12px; color: var(--ink-2); background: transparent; border: 0; border-radius: 2px; width: 24px; height: 24px; cursor: pointer; flex: none; padding: 0; }
+.lb-x:hover { background: var(--hover); color: var(--ink); }
+.lb-x.bad:hover { color: var(--danger); }
+.lb-add { font: inherit; font-size: 12px; color: var(--ink-2); background: transparent; border: 1px dashed var(--line-2); border-radius: 2px; padding: 2px 10px; cursor: pointer; align-self: flex-start; }
+.lb-add:hover { background: var(--hover); color: var(--ink); }
+.lb-err { font-size: 12px; font-weight: 400; color: #ffd3d9; background: rgba(255, 120, 140, .2); padding: 4px 12px 4px 36px; }
+.lb-slot { margin: 0 8px 8px 22px; padding-left: 10px; border-left: 2px solid rgba(255, 255, 255, .14); }
+.lb-slot-t { font-size: 11px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .05em; margin: 2px 0 5px; }
+.lb.unknown { background: rgba(255, 120, 140, .18); }
+
+/* условия */
+.lb-conds { display: flex; flex-direction: column; gap: 5px; width: 100%; }
+.lb-cond { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.lb-cond .lb-in { width: 150px; }
+.lb-cond .lb-sel { width: auto; }
+.lb-cond .lb-sel { width: auto; }
+
+/* форма как в Telegram */
+.lb-tgbox { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: 480px; }
+.lb-tg { display: flex; flex-direction: column; gap: 4px; background: rgba(0, 0, 0, .3); border-radius: 2px; padding: 8px; }
+.lb-tged { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.lb-tged .lb-in { width: 120px; }
+
+/* правая колонка */
+.lab-right { position: sticky; top: 66px; padding: 8px 12px 12px; max-height: calc(100vh - 90px); display: flex; flex-direction: column; overflow: hidden; }
+.lab-rbody { flex: 1; min-height: 0; overflow: auto; padding-top: 8px; scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, .28) transparent; }
+.lab-badge { margin-left: 6px; font-size: 11px; font-weight: 600; color: #fff; background: rgb(250, 93, 54); border-radius: 2px; padding: 0 6px; }
+.lab-badge[hidden] { display: none; }
+.lab-code { font-family: var(--mono); font-weight: 400; font-size: 12px; line-height: 1.55; color: #d4d4d4; background: rgb(21, 18, 17); border-radius: 2px; padding: 8px 0; overflow: auto; }
+.lc { display: flex; white-space: pre; padding-right: 12px; }
+.lc .n { flex: none; width: 36px; text-align: right; padding-right: 10px; color: var(--ink-3); user-select: none; }
+.lc.lk { cursor: pointer; }
+.lc.lk:hover { background: rgba(255, 255, 255, .07); }
+.lab-errrow { display: flex; gap: 8px; align-items: flex-start; text-align: left; width: 100%; font: inherit; font-size: 13px; font-weight: 400; color: var(--ink); background: rgba(255, 120, 140, .12); border: 0; border-radius: 2px; padding: 7px 10px; margin-bottom: 6px; cursor: pointer; }
+.lab-errrow:hover { background: rgba(255, 120, 140, .22); }
+.lab-errrow .bad { color: var(--danger); flex: none; }
+.lab-ok { font-size: 13px; font-weight: 400; color: var(--ok); padding: 8px 4px; }
+.lab-vs { margin-bottom: 12px; }
+.lab-bi { font-size: 12px; padding: 2px 0; }
+.lab-bi code { font-family: var(--mono); color: #ff9e5e; }
+
+/* меню переменных */
+.lab-picker { position: fixed; z-index: 80; width: 290px; max-height: 270px; overflow: auto; padding: 6px; animation: wiDrop .18s var(--ease) both; }
+.lab-pk-h { font-size: 11px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .05em; padding: 6px 10px 2px; }
+.lab-pk { display: flex; flex-direction: column; gap: 0; width: 100%; text-align: left; font: inherit; font-size: 13px; color: var(--ink); background: transparent; border: 0; border-radius: 2px; padding: 4px 10px; cursor: pointer; }
+.lab-pk:hover { background: var(--hover); }
+.lab-pk code { font-family: var(--mono); color: #ff9e5e; }
+.lab-cfgs { display: flex; flex-direction: column; gap: 12px; }
+.lab-cfg { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--line); border-radius: 2px; padding: 10px; }
+.lab-examples .snip { text-align: left; }
+.lab-plain { padding: 24px; max-width: 560px; }
+
+@media (max-width: 1250px) { .lab-layout { grid-template-columns: 250px minmax(0, 1fr); } .lab-right { grid-column: 1 / -1; position: static; max-height: 420px; } }
+@media (max-width: 800px) { .lab-layout { grid-template-columns: minmax(0, 1fr); } .lab-palwrap { position: static; max-height: 360px; } }
+@media (prefers-reduced-motion: reduce) { .lab-picker { animation: none; } }
+.lab-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.lab-chips .chip { cursor: pointer; transition: background .2s var(--ease), transform .18s var(--ease); }
+.lab-chips .chip:active { transform: scale(.94); }
+.lb-fld[hidden] { display: none; }

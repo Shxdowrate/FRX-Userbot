@@ -1,0 +1,249 @@
+/* ===================================================================== *
+ * Акцентный слой FRX: подчёркивания, кромки, кнопки, переключатели.
+ * Цвета и скругления остальных файлов уже переведены на месте; новые стили пишите сразу в этой гамме:
+ * фон панелей var(--glass), акцент var(--acc) / var(--acc-2) / var(--acc-grad), скругления 0–2px.
+ * Акцент — градиент красный -> оранжевый; углы острые; блики и
+ * «свет по зеркалу» сохранены, на тёмном они читаются ярче.
+ * ===================================================================== */
+:root * { scrollbar-color: rgba(255, 100, 40, .45) transparent; }
+body { background: #050506; }
+
+/* фон: чёрное пространство, тёплое свечение по краям, тонкая диагональная штриховка и «разрез» света */
+:root ::selection { background: rgba(255, 80, 25, .45); color: #fff; }
+:root :focus-visible { outline: 1px solid var(--acc-2); outline-offset: 3px; border-radius: 0; }
+
+/* шапка */
+:root .nav { background: rgba(7, 7, 9, .86); border-bottom: 1px solid rgba(255, 255, 255, .07); box-shadow: 0 1px 0 rgba(255, 70, 25, .35); }
+:root .brand { letter-spacing: .06em; }
+:root .brand small { color: var(--acc-2); }
+:root .tab { text-transform: lowercase; letter-spacing: .04em; }
+:root .tab.on { color: #fff; }
+
+/* подчёркивания — везде акцентным градиентом, линия толще */
+:root .btn::after, :root .chip::after, :root .tab::after, :root .top .back::after, :root .link::after, :root .home .fact::after {
+  background: var(--acc-grad); height: 2px; border-radius: 0;
+}
+:root .tab.on::after { height: 3px; box-shadow: 0 0 14px rgba(255, 80, 20, .7); }
+:root .row.click .name { background-image: var(--acc-grad); }
+:root .row.click:hover .name { color: #fff; }
+:root .field { background-image: var(--acc-grad); border-bottom-color: rgba(255, 255, 255, .16); }
+:root .field:focus { border-bottom-color: rgba(255, 100, 40, .5); }
+:root select.field option, :root .wi-field option { color: #fff; background: #141417; }
+
+/* заголовки — капсом, с акцентной меткой */
+:root .top h1 { text-transform: uppercase; letter-spacing: .05em; position: relative; padding-left: 18px; }
+:root .top h1::before { content: ''; position: absolute; left: 0; top: 12%; bottom: 12%; width: 5px; background: var(--acc-grad); transform: skewX(-14deg); }
+:root .h2 { color: var(--acc-2); text-transform: uppercase; letter-spacing: .16em; font-size: 12px; }
+:root .veil h2 { text-transform: uppercase; letter-spacing: .05em; }
+
+/* панели: тёмное «железо» с акцентной кромкой слева */
+:root .glass {
+  background: var(--glass); border: 1px solid rgba(255, 255, 255, .07);
+  box-shadow: inset 3px 0 0 var(--acc), 0 18px 50px rgba(0, 0, 0, .45);
+  -webkit-backdrop-filter: blur(18px) saturate(1.05); backdrop-filter: blur(18px) saturate(1.05);
+}
+:root .row { border-top-color: rgba(255, 255, 255, .07); }
+:root .tag, :root .check, :root .home .ver { border-color: rgba(255, 110, 45, .45); color: rgba(255, 196, 160, .9); }
+:root code { background: rgba(255, 255, 255, .08); }
+
+/* кнопки */
+:root .btn { border-color: rgba(255, 255, 255, .16); letter-spacing: .03em; }
+:root .btn:hover { background: rgba(255, 84, 32, .12); border-color: rgba(255, 112, 52, .7); }
+:root .btn.primary { background: var(--acc-grad); border-color: transparent; color: #fff; box-shadow: 0 6px 22px rgba(255, 60, 20, .28); }
+:root .btn.primary:hover { background: var(--acc-grad); filter: brightness(1.12); border-color: transparent; }
+:root .btn.primary::after { background: rgba(255, 255, 255, .85); }
+:root .btn.danger { color: var(--danger); border-color: rgba(255, 140, 120, .45); }
+:root .btn.danger:hover { background: rgba(255, 70, 40, .16); }
+
+/* чипы, точки, переключатели */
+:root .chip { border-color: rgba(255, 255, 255, .14); }
+:root .chip:hover { border-color: rgba(255, 112, 52, .7); }
+:root .chip.on { background: rgba(255, 80, 25, .2); border-color: var(--acc-2); color: #fff; }
+:root .dots i.on { background: var(--acc-2); box-shadow: 0 0 10px rgba(255, 110, 30, .8); }
+:root .toggle { border-color: rgba(255, 255, 255, .28); }
+:root .toggle::after { border-radius: 1px; background: rgba(255, 255, 255, .7); }
+:root .toggle.on { background: var(--acc-grad); border-color: transparent; box-shadow: 0 0 16px rgba(255, 70, 20, .45); }
+:root .toggle.on::after { background: #fff; }
+:root .live { background: var(--acc-2); box-shadow: 0 0 0 0 rgba(255, 120, 40, .6); }
+:root .emu-status.busy::before { background: var(--acc-2); }
+
+/* окна, тосты, «сайт выключен» */
+:root .veil { background: rgba(0, 0, 0, .62); }
+:root .veil .glass { background: rgba(16, 16, 19, .97); box-shadow: inset 0 3px 0 var(--acc), 0 30px 90px rgba(0, 0, 0, .7); }
+:root .toast { background: rgba(14, 14, 17, .95); box-shadow: inset 3px 0 0 var(--acc), 0 10px 30px rgba(0, 0, 0, .5); }
+:root #off { background: rgba(0, 0, 0, .72); }
+:root body.drag::after { background: rgba(255, 70, 20, .12); border-color: var(--acc-2); }
+
+/* главная */
+:root .home .word { text-shadow: 0 0 70px rgba(255, 80, 20, .35); }
+
+/* Emulate / BotChat / Sandbox: исходящие сообщения — тёплым тоном */
+:root .emu-in, :root .bc-bub.out { background: rgba(255, 84, 32, .22); }
+:root .emu-msg, :root .bc-bub { box-shadow: inset 2px 0 0 rgba(255, 110, 45, .35); }
+:root .bc-bub.out { box-shadow: inset -2px 0 0 rgba(255, 110, 45, .6); }
+
+/* ссылки в тексте */
+:root .rm-view a, :root .sb-text a { color: #ffb48a; }
+
+/* выбранные пункты меню, сегменты и вкладки панелей — акцентом */
+:root .wi-pop-i:hover, :root .wi-pop-i:focus-visible { background: rgba(255, 84, 32, .16); }
+:root .wi-pop-i.on { background: rgba(255, 84, 32, .3); color: #fff; box-shadow: inset 3px 0 0 var(--acc); }
+:root .wi-pop, :root .veil .glass.wi-pop { box-shadow: inset 0 2px 0 var(--acc), 0 20px 60px rgba(0, 0, 0, .6); }
+:root .wi-seg button.on, :root .wi-tabs button.on, :root .sb-tabs button.on { background: var(--acc-grad); color: #fff; }
+
+
+/* ===================================================================== *
+ * Глитч появления, «стопка» при прокрутке
+ * ===================================================================== */
+
+/* Глитч: всё, что ПОЯВЛЯЕТСЯ (страницы, строки, окна, карточки, тосты, сообщения), собирается из красно-оранжевых срезов.
+ * Те же имена анимаций, что и раньше, — переопределены здесь (последнее объявление @keyframes побеждает). Плавными остаются:
+ * наведение, переключатели, раскрытие по высоте, выпадающие меню (wiDrop / wiPopIn), блики, прокрутка. */
+@keyframes rise {
+  0% { opacity: 0; clip-path: inset(44% 0 50% 0); transform: translateX(-16px); filter: drop-shadow(-5px 0 0 #ff2a1c) drop-shadow(5px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  10% { opacity: 1; clip-path: inset(6% 0 72% 0); transform: translateX(12px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(3px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  20% { opacity: 1; clip-path: inset(64% 0 8% 0); transform: translateX(-8px) skewX(-6deg); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(4px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  30% { opacity: 0.85; clip-path: inset(22% 0 38% 0); transform: translateX(6px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  42% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(-3px); filter: drop-shadow(-2px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  52% { opacity: 1; clip-path: inset(50% 0 41% 0); transform: translateX(5px); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(1px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  60% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(0); filter: drop-shadow(-1.5px 0 0 #ff2a1c) drop-shadow(1.5px 0 0 #ff8a00); animation-timing-function: cubic-bezier(.2, .9, .2, 1); }
+  100% { opacity: 1; clip-path: none; transform: none; filter: none; }
+}
+@keyframes fade {
+  0% { opacity: 0; clip-path: inset(44% 0 50% 0); transform: translateX(-16px); filter: drop-shadow(-5px 0 0 #ff2a1c) drop-shadow(5px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  10% { opacity: 1; clip-path: inset(6% 0 72% 0); transform: translateX(12px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(3px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  20% { opacity: 1; clip-path: inset(64% 0 8% 0); transform: translateX(-8px) skewX(-6deg); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(4px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  30% { opacity: 0.85; clip-path: inset(22% 0 38% 0); transform: translateX(6px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  42% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(-3px); filter: drop-shadow(-2px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  52% { opacity: 1; clip-path: inset(50% 0 41% 0); transform: translateX(5px); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(1px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  60% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(0); filter: drop-shadow(-1.5px 0 0 #ff2a1c) drop-shadow(1.5px 0 0 #ff8a00); animation-timing-function: cubic-bezier(.2, .9, .2, 1); }
+  100% { opacity: 1; clip-path: none; transform: none; filter: none; }
+}
+@keyframes popin {
+  0% { opacity: 0; clip-path: inset(44% 0 50% 0); transform: translateX(-16px); filter: drop-shadow(-5px 0 0 #ff2a1c) drop-shadow(5px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  10% { opacity: 1; clip-path: inset(6% 0 72% 0); transform: translateX(12px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(3px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  20% { opacity: 1; clip-path: inset(64% 0 8% 0); transform: translateX(-8px) skewX(-6deg); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(4px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  30% { opacity: 0.85; clip-path: inset(22% 0 38% 0); transform: translateX(6px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  42% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(-3px); filter: drop-shadow(-2px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  52% { opacity: 1; clip-path: inset(50% 0 41% 0); transform: translateX(5px); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(1px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  60% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(0); filter: drop-shadow(-1.5px 0 0 #ff2a1c) drop-shadow(1.5px 0 0 #ff8a00); animation-timing-function: cubic-bezier(.2, .9, .2, 1); }
+  100% { opacity: 1; clip-path: none; transform: none; filter: none; }
+}
+@keyframes pop {
+  0% { opacity: 0; clip-path: inset(44% 0 50% 0); transform: translateX(-16px); filter: drop-shadow(-5px 0 0 #ff2a1c) drop-shadow(5px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  10% { opacity: 1; clip-path: inset(6% 0 72% 0); transform: translateX(12px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(3px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  20% { opacity: 1; clip-path: inset(64% 0 8% 0); transform: translateX(-8px) skewX(-6deg); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(4px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  30% { opacity: 0.85; clip-path: inset(22% 0 38% 0); transform: translateX(6px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  42% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(-3px); filter: drop-shadow(-2px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  52% { opacity: 1; clip-path: inset(50% 0 41% 0); transform: translateX(5px); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(1px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  60% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(0); filter: drop-shadow(-1.5px 0 0 #ff2a1c) drop-shadow(1.5px 0 0 #ff8a00); animation-timing-function: cubic-bezier(.2, .9, .2, 1); }
+  100% { opacity: 1; clip-path: none; transform: none; filter: none; }
+}
+@keyframes hbIn {
+  0% { opacity: 0; clip-path: inset(44% 0 50% 0); transform: translateX(-16px); filter: drop-shadow(-5px 0 0 #ff2a1c) drop-shadow(5px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  10% { opacity: 1; clip-path: inset(6% 0 72% 0); transform: translateX(12px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(3px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  20% { opacity: 1; clip-path: inset(64% 0 8% 0); transform: translateX(-8px) skewX(-6deg); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(4px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  30% { opacity: 0.85; clip-path: inset(22% 0 38% 0); transform: translateX(6px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  42% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(-3px); filter: drop-shadow(-2px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  52% { opacity: 1; clip-path: inset(50% 0 41% 0); transform: translateX(5px); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(1px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  60% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(0); filter: drop-shadow(-1.5px 0 0 #ff2a1c) drop-shadow(1.5px 0 0 #ff8a00); animation-timing-function: cubic-bezier(.2, .9, .2, 1); }
+  100% { opacity: 1; clip-path: none; transform: none; filter: none; }
+}
+@keyframes hdIn {
+  0% { opacity: 0; clip-path: inset(44% 0 50% 0); transform: translateX(-16px); filter: drop-shadow(-5px 0 0 #ff2a1c) drop-shadow(5px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  10% { opacity: 1; clip-path: inset(6% 0 72% 0); transform: translateX(12px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(3px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  20% { opacity: 1; clip-path: inset(64% 0 8% 0); transform: translateX(-8px) skewX(-6deg); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(4px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  30% { opacity: 0.85; clip-path: inset(22% 0 38% 0); transform: translateX(6px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  42% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(-3px); filter: drop-shadow(-2px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  52% { opacity: 1; clip-path: inset(50% 0 41% 0); transform: translateX(5px); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(1px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  60% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(0); filter: drop-shadow(-1.5px 0 0 #ff2a1c) drop-shadow(1.5px 0 0 #ff8a00); animation-timing-function: cubic-bezier(.2, .9, .2, 1); }
+  100% { opacity: 1; clip-path: none; transform: none; filter: none; }
+}
+@keyframes sbIn {
+  0% { opacity: 0; clip-path: inset(44% 0 50% 0); transform: translateX(-16px); filter: drop-shadow(-5px 0 0 #ff2a1c) drop-shadow(5px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  10% { opacity: 1; clip-path: inset(6% 0 72% 0); transform: translateX(12px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(3px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  20% { opacity: 1; clip-path: inset(64% 0 8% 0); transform: translateX(-8px) skewX(-6deg); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(4px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  30% { opacity: 0.85; clip-path: inset(22% 0 38% 0); transform: translateX(6px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  42% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(-3px); filter: drop-shadow(-2px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  52% { opacity: 1; clip-path: inset(50% 0 41% 0); transform: translateX(5px); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(1px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  60% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(0); filter: drop-shadow(-1.5px 0 0 #ff2a1c) drop-shadow(1.5px 0 0 #ff8a00); animation-timing-function: cubic-bezier(.2, .9, .2, 1); }
+  100% { opacity: 1; clip-path: none; transform: none; filter: none; }
+}
+@keyframes sbPane {
+  0% { opacity: 0; clip-path: inset(44% 0 50% 0); transform: translateX(-16px); filter: drop-shadow(-5px 0 0 #ff2a1c) drop-shadow(5px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  10% { opacity: 1; clip-path: inset(6% 0 72% 0); transform: translateX(12px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(3px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  20% { opacity: 1; clip-path: inset(64% 0 8% 0); transform: translateX(-8px) skewX(-6deg); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(4px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  30% { opacity: 0.85; clip-path: inset(22% 0 38% 0); transform: translateX(6px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  42% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(-3px); filter: drop-shadow(-2px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  52% { opacity: 1; clip-path: inset(50% 0 41% 0); transform: translateX(5px); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(1px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  60% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(0); filter: drop-shadow(-1.5px 0 0 #ff2a1c) drop-shadow(1.5px 0 0 #ff8a00); animation-timing-function: cubic-bezier(.2, .9, .2, 1); }
+  100% { opacity: 1; clip-path: none; transform: none; filter: none; }
+}
+@keyframes sbPop {
+  0% { opacity: 0; clip-path: inset(44% 0 50% 0); transform: translateX(-16px); filter: drop-shadow(-5px 0 0 #ff2a1c) drop-shadow(5px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  10% { opacity: 1; clip-path: inset(6% 0 72% 0); transform: translateX(12px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(3px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  20% { opacity: 1; clip-path: inset(64% 0 8% 0); transform: translateX(-8px) skewX(-6deg); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(4px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  30% { opacity: 0.85; clip-path: inset(22% 0 38% 0); transform: translateX(6px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  42% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(-3px); filter: drop-shadow(-2px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  52% { opacity: 1; clip-path: inset(50% 0 41% 0); transform: translateX(5px); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(1px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  60% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(0); filter: drop-shadow(-1.5px 0 0 #ff2a1c) drop-shadow(1.5px 0 0 #ff8a00); animation-timing-function: cubic-bezier(.2, .9, .2, 1); }
+  100% { opacity: 1; clip-path: none; transform: none; filter: none; }
+}
+@keyframes wiFldIn {
+  0% { opacity: 0; clip-path: inset(44% 0 50% 0); transform: translateX(-16px); filter: drop-shadow(-5px 0 0 #ff2a1c) drop-shadow(5px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  10% { opacity: 1; clip-path: inset(6% 0 72% 0); transform: translateX(12px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(3px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  20% { opacity: 1; clip-path: inset(64% 0 8% 0); transform: translateX(-8px) skewX(-6deg); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(4px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  30% { opacity: 0.85; clip-path: inset(22% 0 38% 0); transform: translateX(6px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  42% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(-3px); filter: drop-shadow(-2px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  52% { opacity: 1; clip-path: inset(50% 0 41% 0); transform: translateX(5px); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(1px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  60% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(0); filter: drop-shadow(-1.5px 0 0 #ff2a1c) drop-shadow(1.5px 0 0 #ff8a00); animation-timing-function: cubic-bezier(.2, .9, .2, 1); }
+  100% { opacity: 1; clip-path: none; transform: none; filter: none; }
+}
+@keyframes wiFoundIn {
+  0% { opacity: 0; clip-path: inset(44% 0 50% 0); transform: translateX(-16px); filter: drop-shadow(-5px 0 0 #ff2a1c) drop-shadow(5px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  10% { opacity: 1; clip-path: inset(6% 0 72% 0); transform: translateX(12px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(3px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  20% { opacity: 1; clip-path: inset(64% 0 8% 0); transform: translateX(-8px) skewX(-6deg); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(4px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  30% { opacity: 0.85; clip-path: inset(22% 0 38% 0); transform: translateX(6px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  42% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(-3px); filter: drop-shadow(-2px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  52% { opacity: 1; clip-path: inset(50% 0 41% 0); transform: translateX(5px); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(1px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  60% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(0); filter: drop-shadow(-1.5px 0 0 #ff2a1c) drop-shadow(1.5px 0 0 #ff8a00); animation-timing-function: cubic-bezier(.2, .9, .2, 1); }
+  100% { opacity: 1; clip-path: none; transform: none; filter: none; }
+}
+@keyframes trIn {
+  0% { opacity: 0; clip-path: inset(44% 0 50% 0); transform: translateX(-16px); filter: drop-shadow(-5px 0 0 #ff2a1c) drop-shadow(5px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  10% { opacity: 1; clip-path: inset(6% 0 72% 0); transform: translateX(12px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(3px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  20% { opacity: 1; clip-path: inset(64% 0 8% 0); transform: translateX(-8px) skewX(-6deg); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(4px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  30% { opacity: 0.85; clip-path: inset(22% 0 38% 0); transform: translateX(6px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  42% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(-3px); filter: drop-shadow(-2px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  52% { opacity: 1; clip-path: inset(50% 0 41% 0); transform: translateX(5px); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(1px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  60% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(0); filter: drop-shadow(-1.5px 0 0 #ff2a1c) drop-shadow(1.5px 0 0 #ff8a00); animation-timing-function: cubic-bezier(.2, .9, .2, 1); }
+  100% { opacity: 1; clip-path: none; transform: none; filter: none; }
+}
+@keyframes sbJ {
+  0% { opacity: 0; clip-path: inset(44% 0 50% 0); transform: translateX(-16px); filter: drop-shadow(-5px 0 0 #ff2a1c) drop-shadow(5px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  10% { opacity: 1; clip-path: inset(6% 0 72% 0); transform: translateX(12px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(3px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  20% { opacity: 1; clip-path: inset(64% 0 8% 0); transform: translateX(-8px) skewX(-6deg); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(4px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  30% { opacity: 0.85; clip-path: inset(22% 0 38% 0); transform: translateX(6px); filter: drop-shadow(-4px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  42% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(-3px); filter: drop-shadow(-2px 0 0 #ff2a1c) drop-shadow(2px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  52% { opacity: 1; clip-path: inset(50% 0 41% 0); transform: translateX(5px); filter: drop-shadow(-3px 0 0 #ff2a1c) drop-shadow(1px 0 0 #ff8a00); animation-timing-function: steps(1, end); }
+  60% { opacity: 1; clip-path: inset(0 0 0 0); transform: translateX(0); filter: drop-shadow(-1.5px 0 0 #ff2a1c) drop-shadow(1.5px 0 0 #ff8a00); animation-timing-function: cubic-bezier(.2, .9, .2, 1); }
+  100% { opacity: 1; clip-path: none; transform: none; filter: none; }
+}
+
+/* глитч длится дольше прежних «подъёмов», иначе срезы не успевают читаться */
+.veil .glass { animation-duration: .46s; }
+.toast { animation-duration: .42s; }
+
+/* красный разрез при смене страницы */
+.fx-scan { position: fixed; left: 0; right: 0; top: 0; height: 3px; z-index: 9000; pointer-events: none; opacity: 0;
+  background: var(--acc-grad); box-shadow: 0 0 24px 4px rgba(255, 60, 20, .65), 0 0 2px #fff; }
+
+/* стопка: строки списков становятся «карточками» с тем же фоном, что и панель, чтобы наезжать поверх друг друга */
+html.fx-stack .fx-unit { position: relative; will-change: transform, opacity, filter; transform-origin: 50% 0; }   /* все блоки в одном слое — позже в DOM = поверх */
+/* сплошной фон строке нужен только пока она в движении (закреплена или наезжает) — в покое всё как в дизайне, кромка панели видна */
+html.fx-stack .fx-row.fx-pin, html.fx-stack .fx-row.fx-cover { background-color: rgb(17, 17, 20); }
+html.fx-stack .glass > .fx-row.fx-pin, html.fx-stack .glass > .fx-row.fx-cover { margin-left: -25px; margin-right: -28px; padding-left: 25px; padding-right: 28px; }
+html.fx-stack .fx-cover {
+  box-shadow: 0 -1px 0 var(--acc), 0 -2px 18px rgba(255, 60, 20, .35), 0 -30px 60px rgba(0, 0, 0, .55); }
+html.fx-stack .fx-row.fx-cover { box-shadow: inset 3px 0 0 var(--acc), 0 -1px 0 var(--acc), 0 -2px 18px rgba(255, 60, 20, .35), 0 -30px 60px rgba(0, 0, 0, .55); }
+@media (prefers-reduced-motion: reduce) { .fx-scan { display: none; } }

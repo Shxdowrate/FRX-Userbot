@@ -1,0 +1,4 @@
+telethon>=1.36
+aiogram>=3.4,<4.0
+aiohttp>=3.9            # сайт .web, нейросети; aiogram и так тянет aiohttp
+imageio-ffmpeg>=0.5.1   # ffmpeg для кружков и голосовых в BotChat; не нужен, если ffmpeg уже есть в PATH

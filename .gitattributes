@@ -1,0 +1,3 @@
+# Скрипты запуска: .bat — с переводами строк Windows, .sh — Unix (иначе не запустятся)
+*.bat text eol=crlf
+*.sh text eol=lf

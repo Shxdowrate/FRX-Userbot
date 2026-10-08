@@ -1,0 +1,154 @@
+/* ===================================================================== *
+ * FRX web — режим «3D» (тест, переключатель «3d» в шапке; depth.js).
+ * Мотив — ролик assets/experience/experience_1.mp4: хромированные заголовки со слэшем и счётчиком «03 / 08»,
+ * панели в перспективе с огненной кромкой и бликом, наклон за курсором, страницы прилетают из глубины.
+ * Всё живёт под html.d3 — без класса сайт выглядит как раньше. Рабочие поверхности (WebIDE, Lab, BotChat,
+ * Emulate, Sandbox) не наклоняются: depth.js ставит .d3-ok только страницам-спискам.
+ * ===================================================================== */
+
+/* ---------- пространство ---------- */
+.d3 #bg {
+  background:
+    radial-gradient(ellipse 50% 38% at 8% 100%, rgba(255, 40, 16, .20), transparent 70%),
+    radial-gradient(ellipse 46% 40% at 100% 0%, rgba(255, 120, 20, .13), transparent 72%),
+    radial-gradient(ellipse 90% 70% at 50% 40%, #0b0b0d, #030304 78%);
+  overflow: hidden;
+}
+/* пол-сетка, уходящая за горизонт */
+.d3 #bg::before {
+  content: ''; position: absolute; left: -50%; right: -50%; bottom: -8%; height: 62%;
+  background:
+    repeating-linear-gradient(90deg, rgba(255, 90, 30, .26) 0 1px, transparent 1px 90px),
+    repeating-linear-gradient(0deg, rgba(255, 90, 30, .2) 0 1px, transparent 1px 90px);
+  transform: perspective(520px) rotateX(72deg); transform-origin: 50% 100%;
+  -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent 82%); mask-image: linear-gradient(to top, rgba(0, 0, 0, .9), transparent 82%);
+  animation: d3floor 9s linear infinite;
+}
+@keyframes d3floor { to { background-position: 0 90px, 0 90px; } }
+
+/* ---------- заголовки: хром, огромный слэш, огненная черта, счётчик ---------- */
+.d3 .top { min-height: 64px; margin-bottom: 34px; padding-top: 16px; align-items: flex-end; }
+.d3 .top h1 {
+  font-size: clamp(30px, 4.6vw, 64px); line-height: 1; letter-spacing: .02em; padding: 0 0 14px 34px;
+  background: linear-gradient(180deg, #ffffff 0%, #f1f1f4 38%, #a9a9b2 62%, #e6e6ea 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  filter: drop-shadow(0 6px 22px rgba(0, 0, 0, .8));
+}
+.d3 .top h1::before {
+  top: 0; bottom: 14px; width: 9px; left: 4px;
+  background: linear-gradient(180deg, #ff8a00, #ff2a1c 70%, #c4130a);
+  transform: skewX(-20deg); box-shadow: 0 0 22px rgba(255, 60, 20, .55);
+}
+.d3 .top h1::after {
+  content: ''; position: absolute; left: 34px; right: 0; bottom: 0; height: 3px;
+  background: var(--acc-grad); box-shadow: 0 0 16px rgba(255, 70, 20, .65);
+  transform-origin: 0 50%; animation: d3line .9s var(--ease) both .15s;
+}
+@keyframes d3line { from { transform: scaleX(0); opacity: 0; } }
+.d3 .top .back { padding-bottom: 14px; }
+.d3 .top .sep { align-self: flex-end; margin-bottom: 14px; }
+.d3 .top .side { padding-bottom: 10px; }
+.d3-idx { display: none; }           /* счётчик раздела — только в режиме 3d */
+.d3 .d3-idx {
+  display: inline;
+  position: absolute; left: 36px; top: -22px; font-size: 12px; letter-spacing: .32em; color: var(--acc-2);
+  -webkit-text-fill-color: var(--acc-2); filter: none; text-shadow: 0 0 12px rgba(255, 110, 30, .5);
+}
+.d3 .top h1 .d3-idx { background: none; }
+
+/* ---------- панели в перспективе ---------- */
+.d3 .d3-ok .glass:not(.wi-pop):not(.lab-picker) {
+  position: relative;
+  transform: perspective(1800px) rotateX(calc(var(--d3rx, 0deg) * var(--d3s, 1))) rotateY(calc(var(--d3ry, 0deg) * var(--d3s, 1)));
+  transform-origin: 50% 50%;
+  border: 1px solid rgba(255, 90, 30, .38);
+  box-shadow:
+    inset 3px 0 0 var(--acc),
+    0 0 0 1px rgba(0, 0, 0, .6),
+    0 0 34px rgba(255, 60, 20, .14),
+    0 40px 80px -20px rgba(0, 0, 0, .85);
+  background: linear-gradient(160deg, rgba(24, 22, 24, .92), rgba(10, 10, 12, .94));
+  transition: border-color .3s, box-shadow .3s;
+  will-change: transform;
+}
+.d3 .d3-ok .glass:not(.wi-pop):not(.lab-picker):hover {
+  border-color: rgba(255, 120, 45, .65);
+  box-shadow: inset 3px 0 0 var(--acc), 0 0 0 1px rgba(0, 0, 0, .6), 0 0 46px rgba(255, 70, 20, .24), 0 40px 80px -20px rgba(0, 0, 0, .85);
+}
+/* огненные «уголки» за пределами панели, как рамки экранов в ролике */
+.d3 .d3-ok .glass:not(.wi-pop):not(.lab-picker)::before {
+  content: ''; position: absolute; inset: -7px; pointer-events: none;
+  background:
+    linear-gradient(90deg, var(--acc-2), transparent) top left / 64px 2px no-repeat,
+    linear-gradient(180deg, var(--acc-2), transparent) top left / 2px 64px no-repeat,
+    linear-gradient(270deg, var(--acc), transparent) bottom right / 64px 2px no-repeat,
+    linear-gradient(0deg, var(--acc), transparent) bottom right / 2px 64px no-repeat;
+  filter: drop-shadow(0 0 6px rgba(255, 80, 20, .8)); opacity: .85;
+}
+/* блик, пробегающий по стеклу */
+.d3 .d3-ok .glass:not(.wi-pop):not(.lab-picker)::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(105deg, transparent 38%, rgba(255, 255, 255, .075) 46%, rgba(255, 255, 255, .02) 50%, transparent 58%);
+  background-size: 320% 100%; background-position: 130% 0;
+  animation: d3sheen 11s ease-in-out infinite; animation-delay: calc(var(--d3k, 0) * 1.3s + 1s);
+}
+@keyframes d3sheen { 0%, 70% { background-position: 130% 0; } 100% { background-position: -30% 0; } }
+
+/* строки: подсветка и сдвиг вглубь страницы */
+.d3 .d3-ok .row.click { transition: background .25s, translate .3s var(--ease); }
+.d3 .d3-ok .row.click:hover { translate: 6px 0; background: linear-gradient(90deg, rgba(255, 80, 25, .10), transparent 70%); }
+
+/* появление: из глубины, а не глитчем (страницы — FX.glitchIn в depth-режиме, строки — здесь) */
+.d3 .enter .row, .d3 .enter .u-body > *, .d3 .enter .home .stat, .d3 .enter .home .cl { animation-name: d3rise; animation-duration: .7s; }
+@keyframes d3rise {
+  from { opacity: 0; transform: perspective(900px) translate3d(46px, 0, -140px) rotateY(-16deg); filter: blur(3px); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+
+/* ---------- окна ---------- */
+.d3 .veil { perspective: 1600px; background: radial-gradient(ellipse at 50% 60%, rgba(30, 8, 4, .55), rgba(0, 0, 0, .78)); }
+.d3 .veil .glass {
+  animation: d3pop .5s var(--ease) both;
+  border: 1px solid rgba(255, 100, 40, .45);
+  box-shadow: inset 0 3px 0 var(--acc), 0 0 60px rgba(255, 60, 20, .18), 0 40px 120px rgba(0, 0, 0, .85);
+}
+.d3 .veil .glass.ac-wide .glass { animation: none; border: 0; box-shadow: none; }
+@keyframes d3pop {
+  from { opacity: 0; transform: translate3d(0, 40px, -260px) rotateX(16deg) rotateY(-8deg); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---------- главная: объёмное FRX ---------- */
+.d3 .home .word {
+  background: linear-gradient(180deg, #fff 0%, #f0f0f3 40%, #9d9da6 64%, #ececf0 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent; text-shadow: none;
+  filter: drop-shadow(0 1px 0 #6b6b72) drop-shadow(0 2px 0 #4a4a50) drop-shadow(0 3px 0 #2c2c30) drop-shadow(0 14px 30px rgba(0, 0, 0, .9)) drop-shadow(0 0 50px rgba(255, 70, 20, .25));
+  transform: perspective(900px) rotateX(calc(var(--d3rx, 0deg) * 3)) rotateY(calc(var(--d3ry, 0deg) * 3));
+  position: relative; padding-bottom: .12em;
+}
+.d3 .home .word::after {
+  content: ''; position: absolute; left: 6%; right: 6%; bottom: 0; height: 4px;
+  background: var(--acc-grad); box-shadow: 0 0 24px rgba(255, 70, 20, .8);
+  animation: d3line 1.1s var(--ease) both .3s; transform-origin: 50% 50%;
+}
+.d3 .home .stat .num { text-shadow: 0 0 26px rgba(255, 90, 30, .35); }
+
+/* ---------- шапка ---------- */
+.d3 .nav { background: rgba(4, 4, 6, .82); box-shadow: 0 1px 0 rgba(255, 70, 25, .45), 0 10px 40px rgba(0, 0, 0, .6); }
+.d3 .brand { background: linear-gradient(180deg, #fff, #a9a9b2); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.d3 .brand small { -webkit-text-fill-color: var(--acc-2); }
+.d3-switch.on { color: var(--acc-2); text-shadow: 0 0 10px rgba(255, 110, 30, .6); }
+
+/* узкие экраны и «меньше движения»: без наклона, сетки и бликов */
+@media (max-width: 760px) {
+  .d3 .d3-ok .glass:not(.wi-pop):not(.lab-picker) { transform: none; }
+  .d3 .d3-ok .glass:not(.wi-pop):not(.lab-picker)::before { inset: -4px; background-size: 36px 2px, 2px 36px, 36px 2px, 2px 36px; }
+  .d3 .top h1 { padding-left: 26px; }
+  .d3 .top h1::after { left: 26px; }
+  .d3 .d3-idx { left: 28px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .d3 #bg::before, .d3 .d3-ok .glass::after, .d3 .top h1::after { animation: none; }
+  .d3 .d3-ok .glass:not(.wi-pop):not(.lab-picker) { transform: none; }
+  .d3 .veil .glass, .d3 .enter .row { animation: none; }
+}

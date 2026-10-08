@@ -1,0 +1,18 @@
+# FRX в Docker.
+#   Первый вход (api_id/api_hash, номер, код):  docker compose run --rm -e FRX_SETUP_ONLY=1 frx
+#   Запуск в фоне:                               docker compose up -d
+#   Логи:                                        docker compose logs -f
+# Сайт (.web) публикуется только на 127.0.0.1 хоста; с другого компьютера — SSH-туннель или .web tunnel on.
+services:
+  frx:
+    build: .
+    image: frx
+    container_name: frx
+    restart: on-failure          # .exit останавливает юзербот насовсем (код 0), падение — перезапуск
+    stop_grace_period: 45s
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./:/app
+    ports:
+      - "127.0.0.1:8878:8878"
