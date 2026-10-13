@@ -20,7 +20,9 @@ modules/builtin/Loader.py — загрузка, обновление, выгру
                            имя — имя файла (weather или weather.py), MODULE_NAME или NAME модуля
     .dlm <ссылка>          установить по прямой ссылке: github.com/…/blob/…/x.py, raw.githubusercontent.com/…, любой .py
     .dlm upd               проверить обновления установленных модулей и обновить кнопкой
-    .modlist / .ml [поиск] каталог: все модули из репозиториев, карточка, «Установить»
+    .modlist / .ml [поиск] каталог: репозитории → модули репозитория → карточка → «Установить»; кнопка «Поиск»
+                           ищет по названию во всех репозиториях (на первом экране) или в открытом;
+                           `.modlist имя` — сразу результаты поиска, `.modlist refresh` — перечитать репозитории
     .repo                  репозитории: .repo add <ссылка> · .repo del <№|ссылка> · .repo reset
 Репозиторий — это просто .py-файлы (модуль ищется по имени файла, вложенные папки тоже смотрятся). Если в корне
 лежит index.json — берётся из него: [{"file": "weather.py", "name": "…", "version": "…", "description": "…"}].
@@ -45,7 +47,7 @@ import visual
 
 NAME = "Loader"
 MODULE_NAME = "loader"
-VERSION = "2.8"
+VERSION = "2.9"
 AUTHOR = "FRX"
 DESCRIPTION = "Управление модулями: загрузка/обновление (.py/.txt, с превью и подтверждением), каталог модулей с GitHub (.dlm, .modlist, .repo), выгрузка, восстановление, перезагрузка и отправка файла модуля"
 
@@ -1026,71 +1028,190 @@ def _repo_label(url):
     return f"{gh[0]}/{gh[1]}" if gh else url
 
 
-async def _pick_list(event, entries, title):
-    """Список модулей кнопками → карточка → «Установить»."""
-    items = [(f"{e['name']}" + (f" · {_repo_label(e['repo']).split('/')[0]}" if len({x['repo'] for x in entries}) > 1 else ""),
-              f"dl_o:{i}") for i, e in enumerate(entries)]
-    state = {'page': 0}
+async def _repos_entries(force=False):
+    """[(url, [записи] | None, ошибка | None)] — по каждому репозиторию из настроек."""
+    out = []
+    for url in await _cfg('repos', list(DEFAULT_REPOS)) or []:
+        try:
+            out.append((url, await _repo_list(url, force), None))
+        except Exception as e:
+            out.append((url, None, str(e)))
+    return out
 
-    def page_view(page):
-        rows, page, total = engine.picker_page(items, page, per_page=8, page_callback="dl_p:")
-        rows.append([(visual.btn('Закрыть', 'close'), "dl_x")])
-        return visual.title('Каталог модулей', f"{title} · стр. {page + 1}/{total}"), rows, page
 
-    text, rows, state['page'] = page_view(0)
+def _search(query, entries):
+    """Поиск по названию: имя файла, NAME из индекса, MODULE_NAME — частичное совпадение без учёта регистра и «_-.»."""
+    q = _norm(query[:-3] if query.lower().endswith('.py') else query)
+    if not q:
+        return list(entries)
+    exact = [e for e in entries if q in (_norm(e['name']), _norm(_stem(e['file'])), _norm(e['module_name']))]
+    part = [e for e in entries if e not in exact and (q in _norm(e['name']) or q in _norm(_stem(e['file']))
+                                                    or (e['module_name'] and q in _norm(e['module_name'])))]
+    return exact + part
+
+
+async def _catalog_form(event, repos, query='', scope=None, preset=None):
+    """
+    Каталог одной формой: репозитории → модули репозитория → карточка → «Установить».
+    Поиск по названию — кнопкой ввода: на экране репозиториев ищет по всем, в репозитории — только в нём.
+    repos — из _repos_entries(); scope — url репозитория (сразу открыть его) или None;
+    preset — (записи, заголовок): готовый список (например, несколько совпадений у .dlm).
+    """
+    by_url = {u: (ents or []) for u, ents, _err in repos}
+    errors = {u: err for u, _ents, err in repos if err}
+    st = {'view': 'repos', 'scope': scope, 'query': query, 'page': 0, 'list': [], 'card': None, 'preset': preset}
+
+    def all_entries():
+        return [e for _u, ents, _err in repos for e in (ents or [])]
+
+    def current_list():
+        if st['preset'] is not None:
+            return list(st['preset'][0])
+        base = by_url.get(st['scope'], []) if st['scope'] else all_entries()
+        return _search(st['query'], base) if st['query'] else list(base)
+
+    def where():
+        return _repo_label(st['scope']) if st['scope'] else 'все репозитории'
+
+    def view_repos():
+        total = sum(len(v) for v in by_url.values())
+        lines = [visual.title('Каталог модулей', f"{len(by_url)} репоз. · {total} модулей"),
+                 visual.hint('выберите репозиторий или найдите модуль по названию во всех сразу')]
+        rows = []
+        for i, (url, ents, err) in enumerate(repos):
+            rows.append([(f"⚠ {_repo_label(url)} — недоступен" if err else f"📦 {_repo_label(url)} · {len(ents)}", f"ml_r:{i}")])
+        if len(repos) > 1:
+            rows.append([(visual.btn(f"Все модули · {total}"), "ml_a")])
+        rows.append([engine.InputButton("🔍 Поиск по всем", "ml_q", hint="название модуля", style="primary")])
+        rows.append([(visual.btn('Закрыть', 'close'), "ml_x")])
+        return "\n".join(lines), rows
+
+    def view_list():
+        lst = current_list()
+        st['list'] = lst
+        multi = len({e['repo'] for e in lst}) > 1
+        items = [(e['name'] + (f" · {_repo_label(e['repo']).split('/')[0]}" if multi else ""), f"ml_o:{i}")
+                 for i, e in enumerate(lst)]
+        rows, st['page'], total = engine.picker_page(items, st['page'], per_page=8, page_callback="ml_p:")
+        if st['preset'] is not None:
+            head = st['preset'][1]
+        else:
+            head = where() + (f" · «{html.escape(st['query'])}»" if st['query'] else "") + f" · {len(lst)}"
+        lines = [visual.title('Каталог модулей', head + (f" · стр. {st['page'] + 1}/{total}" if total > 1 else ""))]
+        if not lst:
+            lines.append(visual.err('Ничего не нашлось' if st['query'] else 'Модулей нет'))
+        if st['scope'] and errors.get(st['scope']):
+            lines.append(visual.warn(html.escape(errors[st['scope']])))
+        if st['preset'] is None:
+            search = engine.InputButton("🔍 Поиск" + (" в " + _repo_label(st['scope']).split('/')[-1] if st['scope'] else " по всем"),
+                                        "ml_q", hint="название модуля", style="primary", prefill=st['query'] or "")
+            rows.append([search] + ([("✕ Сбросить", "ml_c")] if st['query'] else []))
+        rows.append([(visual.btn('Репозитории', 'back'), "ml_h"), (visual.btn('Закрыть', 'close'), "ml_x")])
+        return "\n".join(lines), rows
+
+    async def view_card(i):
+        e = st['list'][i]
+        try:
+            meta = _parse_module_meta(await _source(e)) or {}
+        except Exception as ex:
+            return visual.err(f"Не скачался: {html.escape(str(ex))}"), [[(visual.btn('К списку', 'back'), "ml_b")]]
+        cur = engine.modules.get(meta.get('module_name') or '')
+        cmds = meta.get('commands') or []
+        lines = [visual.title(meta.get('name') or e['name'], html.escape(meta.get('description') or e['description'] or '') or None),
+                 visual.field('id', meta.get('module_name') or '?'), visual.field('версия', meta.get('version') or '?'),
+                 visual.field('автор', meta.get('author') or '?', code=False),
+                 visual.field('файл', f"{_repo_label(e['repo'])}/{e['path']}")]
+        if cmds:
+            lines += ["", visual.section(f"Команды · {len(cmds)}"),
+                      visual.item(", ".join(f"<code>.{html.escape(n[0])}</code>" for n in cmds[:25]))]
+        lines += _requirements_lines(meta)
+        newer = cur is not None and _vkey(meta.get('version')) > _vkey(cur.version)
+        if cur is not None:
+            lines += ["", visual.hint(f"установлен: версия {cur.version}" + (" — есть новее" if newer else ""))]
+        rows = [] if cur is not None and not newer else [[(visual.btn("Обновить" if newer else "Установить"), f"ml_i:{i}", "success")]]
+        rows.append([(visual.btn('К списку', 'back'), "ml_b")])
+        return "\n".join(lines), rows
+
+    if preset is not None or scope or query:
+        st['view'] = 'list'
+        text, rows = view_list()
+    else:
+        text, rows = view_repos()
     try:
         form = await engine.create_inlineform(event.chat_id, text, buttons=rows, timeout=900)
     except Exception:
-        lines = [visual.title('Каталог модулей', title)] + [visual.item(f"<code>{html.escape(_stem(e['file']))}</code> — "
-                                                                        f"{html.escape(_repo_label(e['repo']))}") for e in entries[:80]]
-        await engine.answer(event, "\n".join(lines) + "\n\n" + visual.hint('установить — .dlm имя'))
+        lst = current_list() if st['view'] == 'list' else all_entries()
+        lines = [visual.title('Каталог модулей', f"{len(lst)}")] + [
+            visual.item(f"<code>{html.escape(_stem(e['file']))}</code> — {html.escape(_repo_label(e['repo']))}") for e in lst[:80]]
+        await engine.answer(event, "\n".join(lines) + "\n\n" + visual.hint('установить — .dlm имя · поиск — .modlist имя'))
         return
     try:
         await event.delete()
     except Exception:
         pass
 
-    @form.on_click(data_startswith="dl_")
+    async def show(view):
+        st['view'] = view
+        t, r = view_repos() if view == 'repos' else view_list()
+        await form.edit(t, buttons=r)
+
+    @form.on_input(data='ml_q')
+    async def _(inp):
+        st['query'] = (inp.value or '').strip()[:60]
+        st['page'] = 0
+        st['preset'] = None
+        await show('list')
+
+    @form.on_click(data_startswith="ml_")
     async def _(click):
         d = click.data
-        if d == 'dl_x':
+        if d == 'ml_x':
             await form.delete()
             return
-        if d.startswith('dl_p:') or d == 'dl_back':
-            if d.startswith('dl_p:'):
-                state['page'] = int(d[5:])
-            t, r, state['page'] = page_view(state['page'])
+        if d == 'ml_h':                                   # к репозиториям
+            st.update(scope=None, query='', page=0, preset=None)
+            await click.answer()
+            await show('repos')
+            return
+        if d == 'ml_a':                                   # все модули всех репозиториев
+            st.update(scope=None, query='', page=0, preset=None)
+            await click.answer()
+            await show('list')
+            return
+        if d == 'ml_c':                                   # сбросить поиск
+            st.update(query='', page=0)
+            await click.answer()
+            await show('list')
+            return
+        if d == 'ml_b':
+            await click.answer()
+            await show('list')
+            return
+        kind, _sep, arg = d.partition(':')
+        if kind == 'ml_r':
+            i = int(arg)
+            if 0 <= i < len(repos):
+                st.update(scope=repos[i][0], query='', page=0, preset=None)
+            await click.answer()
+            await show('list')
+            return
+        if kind == 'ml_p':
+            st['page'] = int(arg)
+            await click.answer()
+            await show('list')
+            return
+        i = int(arg)
+        if i >= len(st['list']):
+            await click.answer("Список обновился — откройте заново")
+            return
+        if kind == 'ml_o':
+            await click.answer()
+            st['view'] = 'card'
+            t, r = await view_card(i)
             await form.edit(t, buttons=r)
             return
-        i = int(d.split(':', 1)[1])
-        e = entries[i]
-        if d.startswith('dl_o:'):
-            await click.answer()
-            try:
-                meta = _parse_module_meta(await _source(e)) or {}
-            except Exception as ex:
-                await form.edit(visual.err(f"Не скачался: {html.escape(str(ex))}"), buttons=[[(visual.btn('Назад', 'back'), "dl_back")]])
-                return
-            cur = engine.modules.get(meta.get('module_name') or '')
-            cmds = meta.get('commands') or []
-            lines = [visual.title(meta.get('name') or e['name'], html.escape(meta.get('description') or e['description'] or '') or None),
-                     visual.field('id', meta.get('module_name') or '?'), visual.field('версия', meta.get('version') or '?'),
-                     visual.field('автор', meta.get('author') or '?', code=False),
-                     visual.field('файл', f"{_repo_label(e['repo'])}/{e['path']}")]
-            if cmds:
-                lines += ["", visual.section(f"Команды · {len(cmds)}"),
-                          visual.item(", ".join(f"<code>.{html.escape(n[0])}</code>" for n in cmds[:25]))]
-            lines += _requirements_lines(meta)
-            if cur is not None:
-                lines += ["", visual.hint(f"установлен: версия {cur.version}"
-                                          + (" — есть новее" if _vkey(meta.get('version')) > _vkey(cur.version) else ""))]
-            btn = "Обновить" if cur is not None and _vkey(meta.get('version')) > _vkey(cur.version) else \
-                ("Установлен" if cur is not None else "Установить")
-            rows = [[(visual.btn(btn), f"dl_i:{i}", "success")]] if btn != "Установлен" else []
-            rows.append([(visual.btn('К списку', 'back'), "dl_back")])
-            await form.edit("\n".join(lines), buttons=rows)
-            return
-        if d.startswith('dl_i:'):
+        if kind == 'ml_i':
+            e = st['list'][i]
             await click.answer("Устанавливаю…")
             try:
                 info = await engine._load_from_source(await _source(e), target='loaded')
@@ -1098,31 +1219,31 @@ async def _pick_list(event, entries, title):
                                   visual.field('id', info.module_name), visual.field('версия', info.version)])
             except Exception as ex:
                 text = visual.err('Ошибка при загрузке модуля') + f"\n<code>{html.escape(str(ex))}</code>"
-            await form.edit(text, buttons=[[(visual.btn('К списку', 'back'), "dl_back")]])
+            await form.edit(text, buttons=[[(visual.btn('К списку', 'back'), "ml_b")]])
+
+
+async def _pick_list(event, entries, title):
+    """Несколько совпадений (.dlm) — тот же каталог, сразу со списком найденного."""
+    await _catalog_form(event, await _repos_entries(), preset=(entries, title))
 
 
 @decorators.command('modlist', 'ml')
 async def modlist_cmd(event):
-    """каталог модулей из репозиториев (кнопками, с карточкой и установкой); [поиск] — фильтр по имени"""
+    """каталог модулей: репозитории → модули → карточка → установка; поиск кнопкой. [название] — сразу искать; refresh — обновить"""
     q = engine.get_args().strip()
+    force = q.lower() == 'refresh'
+    if force:
+        q = ''
     await engine.answer(event, visual.wait('Загружаю каталог…'))
-    try:
-        entries, errors = await _catalog(force=q.lower() == 'refresh')
-    except Exception as e:
-        await engine.answer(event, visual.err(f"Не вышло: {html.escape(str(e))}"))
+    repos = await _repos_entries(force=force)
+    if not repos:
+        await engine.answer(event, visual.err('Репозиториев нет') + "\n" + visual.hint('.repo add <ссылка> или .repo reset'))
         return
-    if q and q.lower() != 'refresh':
-        entries = await _find(q, entries)
-    if not entries:
-        msg = visual.err('Модулей не нашлось')
-        if errors:
-            msg += "\n" + "\n".join(visual.warn(f"{html.escape(u)}: {html.escape(e)}") for u, e in errors.items())
-        await engine.answer(event, msg)
+    if all(err for _u, _e, err in repos):
+        await engine.answer(event, visual.err('Каталог недоступен') + "\n"
+                            + "\n".join(visual.warn(f"{html.escape(_repo_label(u))}: {html.escape(err)}") for u, _e, err in repos))
         return
-    title = f"{len(entries)} модулей" + (f" · «{html.escape(q)}»" if q and q.lower() != 'refresh' else "")
-    if errors:
-        title += f" · {len(errors)} репоз. недоступно"
-    await _pick_list(event, entries, title)
+    await _catalog_form(event, repos, query=q)
 
 
 async def _updates(event):
