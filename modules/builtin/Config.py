@@ -18,7 +18,7 @@ from core.inline_forms import InlineClick
 
 NAME = "Config"
 MODULE_NAME = "config"
-VERSION = "2.11"
+VERSION = "2.12"
 AUTHOR = "FRX"
 DESCRIPTION = "Интерактивный просмотр и редактирование конфигов модулей через Inline-формы"
 
@@ -30,6 +30,7 @@ TYPE_BOOL = "bool"
 TYPE_LIST = "list"
 TYPE_CHOICE = "choice"      # выбор ОДНОГО значения из options
 TYPE_CHOICES = "choices"    # выбор НЕСКОЛЬКИХ значений из options
+TYPE_LINK = "link"          # ссылка http(s):// или tg:// — проверяется ядром
 
 # тонкие символы вместо пёстрых эмодзи
 TYPE_ICONS = {
@@ -40,6 +41,7 @@ TYPE_ICONS = {
     "list": "☰",
     "choice": "◇",
     "choices": "◈",
+    "link": "↗",
 }
 
 
@@ -92,6 +94,12 @@ async def create_config():
         default=["red"],
         options=["red", "green", "blue", "yellow"],
     )
+    await engine.create_config(
+        key="test_config_link",
+        description="Тестовый конфиг — ссылка (проверяется: http(s):// или tg://; example.com → https://example.com)",
+        data_type="link",
+        default="https://github.com",
+    )
 
 
 def format_value(value, config_type: str) -> str:
@@ -112,12 +120,16 @@ def format_value(value, config_type: str) -> str:
         if not value:
             return "<code>''</code>"
         return f"<code>{_esc(value)}</code>"
+    elif config_type == TYPE_LINK:
+        if not value:
+            return unset
+        return f'<a href="{html.escape(str(value), quote=True)}">{_esc(value)}</a>'
     else:
         return f"<code>{_esc(value)}</code>"
 
 
 def parse_and_validate(value_str: str, config_type: str):
-    if config_type == TYPE_STR:
+    if config_type in (TYPE_STR, TYPE_LINK):     # ссылку проверяет и нормализует engine.edit_config()
         return value_str
 
     if config_type == TYPE_INT:
@@ -309,7 +321,7 @@ async def config_cmd(event):
             )
             if value and len(value) > 0:
                 buttons.append(
-                    [(visual.btn("Удалить значение"), f"cfg_show_del_list:{module_name}:{key}")]
+                    [(visual.btn("Удалить значение"), f"cfg_show_del_list:{module_name}:{key}", "danger")]
                 )
         else:
             await cache.set(
@@ -328,7 +340,7 @@ async def config_cmd(event):
 
         # Добавляем кнопку сброса на дефолт, если дефолтное значение задано
         if default_val is not None:
-            buttons.append([(visual.btn("Сбросить"), f"cfg_reset_ask:{module_name}:{key}")])
+            buttons.append([(visual.btn("Сбросить"), f"cfg_reset_ask:{module_name}:{key}", "danger")])
 
         buttons.append([(visual.btn("К конфигам модуля", "back"), f"open_mod:{module_name}")])
         return text, buttons
@@ -357,7 +369,7 @@ async def config_cmd(event):
         ])
 
         buttons = [
-            [(visual.btn("Да, сбросить"), f"cfg_reset_confirm:{module_name}:{key}")],
+            [(visual.btn("Да, сбросить"), f"cfg_reset_confirm:{module_name}:{key}", "danger")],
             [(visual.btn("Отмена", "close"), f"open_cfg:{module_name}:{key}")],
         ]
         return text, buttons

@@ -309,7 +309,7 @@ def _picker(entries_sorted, page):
         for e in entries_sorted
     ]
     rows, page, total = engine.picker_page(items, page, per_page=CL_PAGE_SIZE, page_callback="cl_page:")
-    rows.append([(visual.btn('К последней версии', 'back'), "cl_latest")])
+    rows.append([(visual.btn('К последней версии', 'back'), "cl_latest", "primary")])
     text = visual.title('Журнал обновлений', f"выберите версию · страница {page + 1}/{total}")
     return text, rows, page
 

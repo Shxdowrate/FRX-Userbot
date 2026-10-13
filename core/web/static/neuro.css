@@ -53,3 +53,32 @@
 
 @media (max-width: 900px) { .nr-conns { grid-template-columns: minmax(0, 1fr); } .nr-pick { grid-template-columns: minmax(0, 1fr); } }
 .nr-actions { display: flex; flex-wrap: wrap; gap: 8px; }   /* кнопки подключения не слипаются */
+
+/* Chat */
+.nc { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 14px; height: calc(100vh - var(--nav-h, 64px) - 120px); min-height: 420px; }
+.nc-list { display: flex; flex-direction: column; gap: 6px; overflow: auto; padding-right: 2px; }
+.nc-new { margin-bottom: 6px; }
+.nc-item { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border-radius: 2px; cursor: pointer; background: rgba(255, 255, 255, .04); transition: background .2s var(--ease); }
+.nc-item:hover { background: var(--hover); } .nc-item.on { background: rgba(255, 90, 20, .18); }
+.nc-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.nc-main { display: flex; flex-direction: column; min-height: 0; padding: 0; }
+.nc-feed { flex: 1; overflow: auto; padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
+.nc-empty { margin: auto; text-align: center; max-width: 420px; display: flex; flex-direction: column; gap: 8px; }
+.nc-msg { max-width: min(820px, 92%); display: flex; flex-direction: column; gap: 4px; }
+.nc-msg.user { align-self: flex-end; } .nc-msg.assistant { align-self: flex-start; }
+.nc-body { padding: 10px 14px; border-radius: 2px; font-size: 14px; font-weight: 400; line-height: 1.5; overflow-wrap: anywhere; }
+.nc-msg.user .nc-body { background: rgba(255, 90, 20, .2); }
+.nc-msg.assistant .nc-body { background: rgba(21, 18, 17, .92); }
+.nc-body p { margin: 0 0 8px; white-space: pre-wrap; } .nc-body p:last-child { margin-bottom: 0; }
+.nc-body code { font-family: var(--mono); font-size: 12.5px; background: rgba(255, 255, 255, .08); padding: 1px 5px; border-radius: 2px; }
+.nc-body.typing::after { content: '▍'; animation: nc-blink 1s steps(1) infinite; color: var(--accent, #ff5a14); }
+@keyframes nc-blink { 50% { opacity: 0; } }
+.nc-codewrap { margin: 6px 0 10px; border-radius: 2px; overflow: hidden; background: rgb(14, 12, 11); }
+.nc-codehead { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px 4px 12px; font-size: 11px; color: var(--ink-3); background: rgba(255, 255, 255, .05); }
+.nc-code { margin: 0; padding: 10px 12px; overflow: auto; max-height: 420px; } .nc-code code { background: none; padding: 0; white-space: pre; }
+.nc-meta { font-size: 11px; padding-left: 4px; }
+.nc-compose { display: flex; gap: 10px; align-items: flex-end; padding: 12px 14px; border-top: 1px solid var(--line); }
+.nc-input { flex: 1; resize: none; min-height: 42px; max-height: 220px; line-height: 1.45; }
+.nc-model { max-width: 320px; }
+.nc-foot:empty { display: none; }
+@media (max-width: 760px) { .nc { grid-template-columns: minmax(0, 1fr); height: auto; } .nc-list { flex-direction: row; overflow-x: auto; } .nc-item { flex: none; max-width: 200px; } .nc-main { height: 70vh; } }

@@ -86,6 +86,7 @@ def register(panel, router):
     for name in ('add', 'delete', 'enable', 'category'):
         r.add_post(f'/api/neuro/tools/{name}', panel.api(getattr(api, f'tool_{name}')))
     r.add_post('/api/neuro/assist', api.assist)
+    r.add_post('/api/neuro/chat', api.chat)          # вкладка neuro → Chat: обычный диалог с моделью (поток NDJSON)
     return api
 
 
@@ -223,6 +224,70 @@ class NeuroApi:
         return {'ok': True}
 
     # ------------------------- помощник WebIDE ----------------------------- #
+
+    async def chat(self, request):
+        """POST /api/neuro/chat {ref?, messages:[{role, content}], system?} → поток NDJSON, как у assist:
+        {"t":"delta","text"} … {"t":"done","text","in","out","plan","estimated","ref"} | {"t":"error","message"}.
+        История диалогов живёт в браузере; сюда приходит только нужный кусок (последние 40 сообщений)."""
+        try:
+            b = await request.json()
+        except Exception:
+            return web.json_response({'error': 'Некорректный запрос'}, status=400)
+        msgs = [m for m in (b.get('messages') or []) if isinstance(m, dict) and m.get('role') in ('user', 'assistant')][-40:]
+        messages = [{'role': m['role'], 'content': str(m.get('content', ''))[:20000]} for m in msgs if str(m.get('content', '')).strip()]
+        if not messages or messages[-1]['role'] != 'user':
+            return web.json_response({'error': 'Напишите сообщение'}, status=400)
+        if sum(len(m['content']) for m in messages) > 160000:
+            return web.json_response({'error': 'Диалог слишком длинный — начните новый чат'}, status=413)
+        llm = self.llm
+        ref = str(b.get('ref') or '') or llm.selected('chat')
+        system = str(b.get('system') or '').strip()[:4000] or (
+            'Ты — дружелюбный и точный помощник. Отвечай на языке пользователя. Код оформляй блоками ```язык.')
+        resp = web.StreamResponse(headers={'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
+        await resp.prepare(request)
+        cancel = asyncio.Event()
+
+        async def send(obj):
+            try:
+                await resp.write((json.dumps(obj, ensure_ascii=False) + '\n').encode('utf-8'))
+            except (ConnectionResetError, asyncio.CancelledError, RuntimeError):
+                cancel.set()
+        got = {'any': False}
+
+        async def delta(t):
+            got['any'] = True
+            await send({'t': 'delta', 'text': t})
+        temp = Settings().get().get('temperature')
+        try:
+            try:
+                res = await llm.chat(ref, messages, system=system, stream=True, on_delta=delta, cancel=cancel, temperature=temp)
+            except LLMError as e:
+                # некоторые провайдеры (GigaChat, локальные модели) иногда отвечают 5xx именно на потоковый запрос —
+                # если ещё ничего не пришло, повторяем тот же запрос обычным (без потока), как NeuroDash
+                if e.kind not in ('server', 'network', 'timeout') or got['any']:
+                    raise
+                res = await llm.chat(ref, messages, system=system, stream=False, cancel=cancel, temperature=temp)
+                if res.text:
+                    await send({'t': 'delta', 'text': res.text})
+        except LLMError as e:
+            try:
+                conn, model = llm.parse_ref(ref)
+                where = f"{model} · {conn.get('name') or conn.get('id')}: "
+            except Exception:
+                where = ''
+            await send({'t': 'error', 'kind': e.kind, 'message': where + str(e)})
+            return resp
+        except Exception as e:                                                  # noqa: BLE001
+            await send({'t': 'error', 'kind': 'server', 'message': f'{type(e).__name__}: {e}'[:300]})
+            return resp
+        conn, _model = llm.parse_ref(ref)
+        await send({'t': 'done', 'text': res.text, 'finish': res.finish, 'in': res.tokens_in, 'out': res.tokens_out,
+                    'estimated': res.estimated, 'plan': llm.plan_status(conn['id']), 'ref': ref})
+        try:
+            await resp.write_eof()
+        except Exception:
+            pass
+        return resp
 
     async def assist(self, request):
         """POST /api/neuro/assist → поток NDJSON: {"t":"delta","text":…} … {"t":"done","text","code","fenced","in","out","plan","estimated"} | {"t":"error","message"}."""

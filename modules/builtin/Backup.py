@@ -15,7 +15,8 @@ modules/builtin/Backup.py
 
 Что входит в бэкап (пользовательские данные — ровно то, что НЕ трогают обновления):
     вся папка user/: config.json, data/ (БД, сессии, аккаунты, файлы; кроме
-    data/backup, data/keeper и кэша BotChat), modules/ (загруженные модули), assets/.
+    data/backup, data/keeper, data/bin, data/cache, кэша BotChat, папок с файлом-меткой
+    .nobackup и одиночных файлов больше 45 МБ), modules/ (загруженные модули), assets/.
 Код FRX (core, aiobot, modules/builtin, ...) в бэкап не входит — он обновляется
 через .update и защищён собственными копиями в user/data/backup/.
 
@@ -51,6 +52,19 @@ def _esc(value) -> str:
     return html.escape(str(value), quote=False)
 
 
+def _heaviest(top=5):
+    """Самые тяжёлые папки из того, что идёт в бэкап: [(путь, байт)]."""
+    sizes = {}
+    for rel, f in keeper._iter_user_files():
+        parts = rel.split('/')
+        key = '/'.join(parts[:3]) if len(parts) > 3 else '/'.join(parts[:-1]) or rel
+        try:
+            sizes[key] = sizes.get(key, 0) + f.stat().st_size
+        except OSError:
+            pass
+    return sorted(sizes.items(), key=lambda x: -x[1])[:top]
+
+
 def _fmt_size(n) -> str:
     n = float(n)
     for unit in ('Б', 'КБ', 'МБ', 'ГБ'):
@@ -69,12 +83,15 @@ async def createbackup_cmd(event):
         info = await asyncio.to_thread(keeper.make_user_backup, dst, version)
 
         if info['size'] > MAX_SEND_SIZE:
+            heavy = await asyncio.to_thread(_heaviest)
             await engine.answer(
                 event,
                 visual.err("Бэкап слишком большой для отправки ботом") + "\n"
                 + visual.field("размер", _fmt_size(info['size'])) + "\n"
                 + visual.field("лимит", "~50 МБ") + "\n"
-                + visual.hint("уменьшите user/data/files и повторите"),
+                + (visual.section("Больше всего места") + "\n" + "\n".join(
+                    visual.item(f"<code>{_esc(p)}</code> — {_fmt_size(n)}") for p, n in heavy) + "\n" if heavy else "")
+                + visual.hint("лишнее — удалите или положите в папку файл .nobackup (она не попадёт в бэкап)"),
             )
             return
 
@@ -193,7 +210,7 @@ async def restorebackup_cmd(event):
         form = await engine.create_inlineform(
             chat_id=event.chat_id,
             text=text,
-            buttons=[[(visual.btn("Да, восстановить"), "backup_restore_ok")], [(visual.btn("Отмена", "close"), "backup_restore_no")]],
+            buttons=[[(visual.btn("Да, восстановить"), "backup_restore_ok", "success")], [(visual.btn("Отмена", "close"), "backup_restore_no")]],
         )
     except Exception:
         await engine.answer(

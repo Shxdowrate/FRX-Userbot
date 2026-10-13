@@ -247,7 +247,8 @@ async function neuroView(T) {
       sec('Инструменты', h('div', { class: 'nr-pad' }, ...toolsSection())));
   }
   draw();
-  const node = shell('neuro', { side: [h('span', { class: 'wi-hint' }, 'NeuroDash: ' + refName(S.selected.chat))] },
+  const node = shell('neuro', { side: [h('span', { class: 'wi-hint' }, 'NeuroDash: ' + refName(S.selected.chat)),
+    h('a', { class: 'btn primary', href: '#/neuro/chat' }, 'Chat')] },
     h('div', { class: 'faint', style: 'margin:-4px 0 18px 6px;max-width:760px' }, 'Нейросети для NeuroDash в Telegram и для помощника в FRX WebIDE: ключи (скрыты, пока не нажмёте «показать»), модели, лимиты токенов и инструменты. Провайдер выбирается вручную при добавлении ключа.'), root);
   node.classList.add('wide');
   mount(T, node);
@@ -396,4 +397,147 @@ function wiAssistPane(ed, host) {
   ta.addEventListener('keydown', (ev) => { if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') { ev.preventDefault(); send(); } });
   loadModels(); updSel();
   return box;
+}
+
+
+/* ------------------------------------------------------------------ *
+ * Chat — диалог с моделью прямо на сайте (вкладка neuro → «Chat»)
+ * Диалоги хранятся в этом браузере (localStorage), на сервер уходит только текущий диалог.
+ * ------------------------------------------------------------------ */
+
+const NC_KEY = 'frx_neuro_chats';
+function ncLoad() { try { const v = JSON.parse(localStorage.getItem(NC_KEY) || '[]'); return Array.isArray(v) ? v : []; } catch (e) { return []; } }
+function ncSave(list) { try { localStorage.setItem(NC_KEY, JSON.stringify(list.slice(0, 60))); } catch (e) { /* хранилище недоступно */ } }
+
+/* маленький безопасный markdown: ```блоки```, `код`, **жирный**, ссылки — только через createElement/textContent */
+function ncRender(text) {
+  const out = [];
+  const parts = String(text || '').split(/```/);
+  parts.forEach((part, i) => {
+    if (i % 2 === 1) {
+      const nl = part.indexOf('\n');
+      const lang = nl > 0 ? part.slice(0, nl).trim() : '';
+      const code = nl >= 0 ? part.slice(nl + 1).replace(/\n$/, '') : part;
+      const pre = h('pre', { class: 'nc-code' }, h('code', {}, code));
+      const copy = h('button', { class: 'btn small nc-copy', type: 'button', onclick: async () => { try { await navigator.clipboard.writeText(code); toast('скопировано', 'ok'); } catch (e) { toast('не удалось скопировать', 'error'); } } }, 'копировать');
+      out.push(h('div', { class: 'nc-codewrap' }, h('div', { class: 'nc-codehead' }, h('span', {}, lang || 'код'), copy), pre));
+      return;
+    }
+    part.split(/\n{2,}/).forEach((para) => {
+      if (!para.trim()) return;
+      const p = h('p', {});
+      para.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*|https?:\/\/[^\s)]+)/).forEach((tok) => {
+        if (!tok) return;
+        if (tok.startsWith('`') && tok.endsWith('`') && tok.length > 1) p.appendChild(h('code', {}, tok.slice(1, -1)));
+        else if (tok.startsWith('**') && tok.endsWith('**')) p.appendChild(h('b', {}, tok.slice(2, -2)));
+        else if (/^https?:\/\//.test(tok)) p.appendChild(h('a', { href: tok, target: '_blank', rel: 'noopener noreferrer' }, tok));
+        else p.appendChild(document.createTextNode(tok));
+      });
+      out.push(p);
+    });
+  });
+  return out;
+}
+
+async function neuroChatView(T) {
+  const S = await api('/neuro/state');
+  const models = S.models.filter((m) => m.enabled !== false);
+  let chats = ncLoad();
+  let cur = chats[0] || null;
+  let ref = (cur && cur.ref) || S.selected.chat || (models[0] && models[0].ref) || '';
+  let ctrl = null;
+
+  const list = h('div', { class: 'nc-list' });
+  const feed = h('div', { class: 'nc-feed' });
+  const input = h('textarea', { class: 'field nc-input', rows: 1, placeholder: 'Сообщение… (Enter — отправить, Shift+Enter — новая строка)' });
+  const sendBtn = h('button', { class: 'btn primary nc-send', type: 'button' }, 'отправить');
+  const sel = h('select', { class: 'field nc-model' }, models.map((m) => h('option', { value: m.ref }, `${m.name} · ${m.conn_name}`)));
+  const foot = h('div', { class: 'nc-foot faint' });
+  sel.value = ref;
+  sel.addEventListener('change', () => { ref = sel.value; if (cur) { cur.ref = ref; ncSave(chats); } });
+
+  const newChat = () => { cur = { id: Date.now().toString(36), title: 'Новый чат', ref, messages: [], at: Date.now() }; chats.unshift(cur); ncSave(chats); drawList(); drawFeed(); input.focus(); };
+  function drawList() {
+    list.replaceChildren(h('button', { class: 'btn primary nc-new', type: 'button', onclick: newChat }, '+ новый чат'),
+      ...chats.map((c) => {
+        const del = h('button', { class: 'lb-x bad', type: 'button', title: 'удалить чат', onclick: (e) => { e.stopPropagation(); if (!confirm('Удалить этот чат?')) return; chats = chats.filter((x) => x !== c); ncSave(chats); if (cur === c) cur = chats[0] || null; drawList(); drawFeed(); } }, '×');
+        return h('div', { class: 'nc-item' + (c === cur ? ' on' : ''), onclick: () => { if (ctrl) return; cur = c; if (c.ref && models.some((m) => m.ref === c.ref)) { ref = c.ref; sel.value = ref; } drawList(); drawFeed(); } },
+          h('span', { class: 'nc-title' }, c.title || 'Чат'), del);
+      }));
+  }
+  function bubble(m) {
+    const b = h('div', { class: 'nc-msg ' + m.role }, h('div', { class: 'nc-body' }, m.role === 'user' ? h('p', { class: 'nc-plain' }, m.content) : ncRender(m.content)));
+    if (m.meta) b.appendChild(h('div', { class: 'nc-meta faint' }, m.meta));
+    return b;
+  }
+  function drawFeed() {
+    if (!cur || !cur.messages.length) {
+      feed.replaceChildren(h('div', { class: 'nc-empty' }, h('div', { class: 'h2' }, 'Chat'),
+        h('div', { class: 'faint' }, models.length ? 'Спросите что угодно — ответ печатается на ходу. Диалоги хранятся в этом браузере.' : 'Сначала добавьте нейросеть на вкладке neuro.')));
+      return;
+    }
+    feed.replaceChildren(...cur.messages.map(bubble));
+    feed.scrollTop = feed.scrollHeight;
+  }
+  const grow = () => { input.style.height = 'auto'; input.style.height = Math.min(220, input.scrollHeight) + 'px'; };
+  input.addEventListener('input', grow);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
+  sendBtn.addEventListener('click', () => (ctrl ? ctrl.abort() : send()));
+
+  async function send() {
+    const text = input.value.trim();
+    if (!text || ctrl) return;
+    if (!ref) { toast('нет модели — добавьте нейросеть на вкладке neuro', 'error'); return; }
+    if (!cur) newChat();
+    cur.messages.push({ role: 'user', content: text });
+    if (cur.messages.length === 1) cur.title = text.slice(0, 48);
+    cur.ref = ref; cur.at = Date.now();
+    input.value = ''; grow();
+    const ans = { role: 'assistant', content: '' };
+    cur.messages.push(ans);
+    drawList(); drawFeed();
+    const live = feed.lastChild.querySelector('.nc-body');
+    live.classList.add('typing');
+    ctrl = new AbortController();
+    sendBtn.textContent = 'стоп'; sendBtn.classList.add('danger');
+    let pending = false;
+    const paint = () => { pending = false; live.replaceChildren(...ncRender(ans.content)); feed.scrollTop = feed.scrollHeight; };
+    try {
+      const r = await fetch('/api/neuro/chat', { method: 'POST', headers: { 'X-FRX': '1', 'Content-Type': 'application/json' }, signal: ctrl.signal,
+        body: JSON.stringify({ ref, messages: cur.messages.slice(0, -1).map((m) => ({ role: m.role, content: m.content })) }) });
+      if (!r.ok) { let m = 'ошибка ' + r.status; try { m = (await r.json()).error || m; } catch (e) { /* не JSON */ } throw new Error(m); }
+      const reader = r.body.getReader(), dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, i); buf = buf.slice(i + 1);
+          if (!line.trim()) continue;
+          let ev; try { ev = JSON.parse(line); } catch (e) { continue; }
+          if (ev.t === 'delta') { ans.content += ev.text; if (!pending) { pending = true; requestAnimationFrame(paint); } }
+          else if (ev.t === 'done') { ans.content = ev.text || ans.content; ans.meta = `${nrNum((ev.in || 0) + (ev.out || 0))} ток.` + (ev.plan ? ' · ' + nrPlanLine(ev.plan) : ''); }
+          else if (ev.t === 'error') throw new Error(ev.message);
+        }
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') ans.meta = 'остановлено';
+      else { ans.meta = 'ошибка: ' + e.message; toast(e.message, 'error'); }
+    } finally {
+      ctrl = null;
+      sendBtn.textContent = 'отправить'; sendBtn.classList.remove('danger');
+      if (!ans.content && ans.meta) ans.content = '…';
+      ncSave(chats); drawFeed(); input.focus();
+    }
+  }
+
+  drawList(); drawFeed();
+  const node = shell('neuro · chat', { back: '#/neuro', backLabel: 'neuro', side: [sel] },
+    h('div', { class: 'nc' }, list, h('div', { class: 'nc-main glass' }, feed, h('div', { class: 'nc-compose' }, input, sendBtn), foot)));
+  node.classList.add('wide');
+  if (!mount(T, node)) return;
+  feed.scrollTop = feed.scrollHeight;
+  input.focus();
 }

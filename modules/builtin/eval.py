@@ -13,7 +13,7 @@ modules/builtin/eval.py
     объявленной в коде функции), — результатом будет его значение.
 
 Сообщение — инлайн-форма (engine.create_inlineform) с тремя кнопками:
-  ▸ Редактировать    — InputButton с hint=<текущий код>, позволяет
+  ▸ Редактировать    — InputButton с prefill=<текущий код>, позволяет
                         поправить код прямо в поле ввода и запустить снова
   ▸ Повторить         — выполняет тот же код ещё раз
   ▸ В .py файл        — сохраняет текущий код в .py и отправляет в этот чат
@@ -180,8 +180,8 @@ async def _resolve_code(event) -> str:
 
 def _eval_buttons(code: str):
     return [
-        [engine.InputButton(visual.btn('Редактировать'), "eval_edit", hint=code)],
-        [(visual.btn('Повторить'), "eval_repeat")],
+        [engine.InputButton(visual.btn("Редактировать"), "eval_edit", hint="поправьте код и отправьте", prefill=code, style="primary")],
+        [(visual.btn('Повторить'), "eval_repeat", "primary")],
         [(visual.btn('В .py файл'), "eval_tofile")],
     ]
 

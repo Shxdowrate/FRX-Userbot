@@ -143,9 +143,9 @@ async def neuro_command(event):
         return visual.title('Neuro', _esc(_model_title(engine.llm.selected('chat'))))
 
     def idle_buttons():
-        return [[engine.InputButton(visual.btn('Написать…'), "send_message", hint="")], [(visual.btn('Модель'), 'nd_models'), (visual.btn('Сбросить контекст', 'close'), 'clear_context')]]
+        return [[engine.InputButton(visual.btn('Написать…'), "send_message", hint="сообщение нейросети", style="primary")], [(visual.btn('Модель'), 'nd_models'), (visual.btn('Сбросить контекст', 'close'), 'clear_context', "danger")]]
 
-    stop_buttons = [[(visual.btn('Остановить', 'close'), 'neuro_stop')]]
+    stop_buttons = [[(visual.btn('Остановить', 'close'), 'neuro_stop', "danger")]]
 
     form = await engine.create_inlineform(chat_id=event.chat_id, text=header(), buttons=idle_buttons())
 
@@ -310,7 +310,7 @@ async def neuro_command(event):
                                                                    if kind == 'heavy' else
                                                                    visual.warn(f"<b>{DANGER} Опасный инструмент — нужен ваш ответ</b>") + "\n"
                                                                    + visual.field('вызов', f"{_esc(name)}({_esc(shown[:600])})"))),
-                            buttons=[[(visual.btn('Разрешить'), 'nd_ok'), (visual.btn('Отклонить', 'close'), 'nd_no')]])
+                            buttons=[[(visual.btn('Разрешить'), 'nd_ok', "success"), (visual.btn('Отклонить', 'close'), 'nd_no', "danger")]])
             try:
                 return await asyncio.wait_for(st['confirm'], CONFIRM_TIMEOUT)
             except asyncio.TimeoutError:
@@ -555,7 +555,7 @@ async def _tool_menu(event):
     def root():
         cats = ts.categories()
         rows = [[(f"{'◉' if c['enabled'] else '○'} {c['title']} · {c['enabled_tools']}/{c['count']}"[:48], f"nt_c:{c['id']}")] for c in cats]
-        rows.append([(visual.btn('Отправить все (zip)'), 'nt_all')])
+        rows.append([(visual.btn('Отправить все (zip)'), 'nt_all', "primary")])
         return (visual.title('Инструменты нейросети', f"категорий · {len(cats)}") + "\n"
                 + visual.item('категории экономят токены: в запрос попадают только подходящие') + "\n"
                 + visual.item('ключи и модели — на сайте, вкладка neuro') + "\n\n"

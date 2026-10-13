@@ -42,7 +42,7 @@ from telethon.errors import (
 )
 
 from ..context import current_module
-from ..paths import KEEPER_DIR, MODULES_DIR, CONFIG_PATH
+from ..paths import KEEPER_DIR, MODULES_DIR, CONFIG_PATH, atomic_write_text
 from .auth import WebAuth, AuthError, COOKIE
 from ..module_meta import parse_module_meta
 from ..emulate import EmuSession, describe_commands
@@ -64,9 +64,10 @@ REQUIRED_META = ('NAME', 'MODULE_NAME', 'VERSION', 'AUTHOR', 'DESCRIPTION')
 LOCAL_HOSTS = {'127.0.0.1', 'localhost', '[::1]'}
 TUNNEL_REQUEST_FILE = KEEPER_DIR / 'tunnel_request.json'
 TUNNEL_STATE_FILE = KEEPER_DIR / 'tunnel.json'
-PUBLIC_PATHS = {'/api/auth/request', '/api/auth/verify', '/api/auth/telegram', '/api/auth/state'}
+PREV_HOST_GRACE = 300          # сколько секунд после смены публичного адреса ещё пускать со старого (переезд страниц)
+PUBLIC_PATHS = {'/api/auth/request', '/api/auth/verify', '/api/auth/telegram', '/api/auth/state', '/api/auth/ticket'}
 TELEGRAM_FRAMES = "https://web.telegram.org https://*.telegram.org"
-PASSIVE_PATHS = {'/api/auth/state', '/api/emulate/poll', '/api/botchat/poll', '/botchat/avatar', '/api/logs'}      # опрос ленты Emulate сам по себе не «активность» (см. _guard)
+PASSIVE_PATHS = {'/api/auth/state', '/api/emulate/poll', '/api/botchat/poll', '/botchat/avatar', '/api/logs', '/api/tunnel/where'}      # опрос ленты Emulate сам по себе не «активность» (см. _guard)
 
 mimetypes.add_type('font/woff2', '.woff2')
 mimetypes.add_type('image/webp', '.webp')
@@ -124,6 +125,7 @@ class WebPanel:
         self._page_states = {}
         self._emu = {}                 # module_name -> EmuSession
         self._webide = None            # WebIdeApi (ставится в _add_routes)
+        self.start_hook = None         # /start web в боте (ставит модуль Web: свежая ссылка на сайт)
         self._neuro = None             # NeuroApi
         self._panel_api = None         # README / логи / файлы
         self._sandbox = None           # SandboxApi (песочница модулей)
@@ -166,8 +168,22 @@ class WebPanel:
         except (OSError, ValueError, AttributeError):
             return False
 
-    def request_tunnel(self, enable: bool, renew: bool = False):
-        """Просит keeper включить/выключить туннель (renew — новый адрес). Без keeper'а — RuntimeError."""
+    TUNNEL_SETUP_KEYS = ('mode', 'lhr_key', 'cf_token', 'cf_host', 'custom_url')
+
+    @staticmethod
+    def tunnel_setup() -> dict:
+        """Способ публичного адреса (см. frx_systemkeeper.py, TUNNEL_MODES): {'mode', 'lhr_key', 'cf_token', 'cf_host', 'custom_url'}."""
+        try:
+            prev = json.loads(TUNNEL_REQUEST_FILE.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            prev = {}
+        out = {k: prev.get(k) for k in WebPanel.TUNNEL_SETUP_KEYS}
+        out['mode'] = out.get('mode') or 'auto'
+        return out
+
+    def request_tunnel(self, enable: bool, renew: bool = False, setup: dict = None):
+        """Просит keeper включить/выключить туннель (renew — новый адрес; setup — сменить способ, см. tunnel_setup).
+        Без keeper'а — RuntimeError."""
         if os.environ.get('FRX_KEEPER') != '1':
             raise RuntimeError("публичный туннель работает только при запуске через frx_systemkeeper.py")
         try:
@@ -176,9 +192,35 @@ class WebPanel:
             prev = {}
         port = self._port or int(self.core.config.get('web_port') or DEFAULT_PORT)
         data = {'enable': bool(enable), 'port': port, 'renew': time.time() if renew else prev.get('renew')}
+        for k in self.TUNNEL_SETUP_KEYS:
+            data[k] = setup[k] if setup is not None and k in setup else prev.get(k)
         if data != {k: prev.get(k) for k in data}:
-            TUNNEL_REQUEST_FILE.parent.mkdir(parents=True, exist_ok=True)
-            TUNNEL_REQUEST_FILE.write_text(json.dumps(data), encoding='utf-8')
+            atomic_write_text(TUNNEL_REQUEST_FILE, json.dumps(data))
+
+    @staticmethod
+    async def lhr_pubkey(create: bool = True):
+        """Публичный ключ SSH для localhost.run (user/data/bin/lhr_key.pub). Нет ключа — создаёт его ssh-keygen'ом
+        (create=True). Возвращает строку «ssh-ed25519 …» или бросает RuntimeError с понятной причиной."""
+        import shutil
+        from ..paths import DATA_DIR
+        key = DATA_DIR / 'bin' / 'lhr_key'
+        pub = key.with_name('lhr_key.pub')
+        if pub.is_file() and key.is_file():
+            return pub.read_text(encoding='utf-8').strip()
+        if not create:
+            return None
+        exe = shutil.which('ssh-keygen')
+        if not exe:
+            raise RuntimeError("нет ssh-keygen — поставьте OpenSSH Client (Windows: Параметры → Приложения → Дополнительные компоненты)")
+        key.parent.mkdir(parents=True, exist_ok=True)
+        for f in (key, pub):
+            f.unlink(missing_ok=True)
+        proc = await asyncio.create_subprocess_exec(exe, '-q', '-t', 'ed25519', '-N', '', '-C', 'frx-localhost.run', '-f', str(key),
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await asyncio.wait_for(proc.communicate(), 30)
+        if proc.returncode != 0 or not pub.is_file():
+            raise RuntimeError("ssh-keygen не смог создать ключ: " + (out or b'').decode('utf-8', 'replace')[-200:])
+        return pub.read_text(encoding='utf-8').strip()
 
     async def wait_tunnel(self, timeout: float = 150, on_progress=None) -> dict:
         """Ждёт, пока туннель поднимется. keeper между попытками сам перезапускает cloudflared (и пробует запасной
@@ -214,6 +256,9 @@ class WebPanel:
         st = self.tunnel_state()
         if st.get('host'):
             out.add(str(st['host']).lower())
+        # прежний адрес туннеля ещё несколько минут пускаем: открытые на нём страницы успеют переехать на новый
+        if st.get('prev_host') and time.time() - float(st.get('since') or 0) < PREV_HOST_GRACE:
+            out.add(str(st['prev_host']).lower())
         extra = self.core.config.get('web_hosts')
         if isinstance(extra, list):
             out.update(str(h).strip().lower() for h in extra if str(h).strip())
@@ -428,8 +473,10 @@ class WebPanel:
         r.add_get('/', self.h_index)
         r.add_get('/static/{name}', self.h_static)
         r.add_get('/api/auth/state', self.api(self.a_auth_state))
-        for name in ('request', 'verify', 'telegram', 'logout'):
+        for name in ('request', 'verify', 'telegram', 'logout', 'ticket'):
             r.add_post(f'/api/auth/{name}', self.api(getattr(self, f'a_auth_{name}')))
+        r.add_get('/api/tunnel/where', self.api(self.a_tunnel_where))
+        r.add_post('/api/tunnel/handoff', self.api(self.a_tunnel_handoff))
         r.add_get('/api/state', self.api(self.a_state))
         r.add_get('/api/nav', self.api(self.a_nav))
         r.add_get('/api/changelog', self.api(self.a_changelog))
@@ -447,6 +494,9 @@ class WebPanel:
         for name in ('phone', 'code', '2fa', 'cancel'):
             r.add_post(f'/api/accounts/login/{name}', self.api(getattr(self, f'a_login_{name.replace("2fa", "twofa")}')))
         r.add_post('/api/page/render', self.api(self.a_page_render))
+        r.add_post('/api/modapp/call', self.api(self.a_modapp_call))           # @web.app — вызовы из скрипта страницы
+        r.add_post('/api/modapp/upload', self.api(self.a_modapp_upload))
+        r.add_get('/modapp/{module}/{index}/{name:.+}', self.h_modapp_file)
         r.add_get('/api/emulate/module', self.api(self.a_emu_module))
         r.add_get('/api/emulate/poll', self.api(self.a_emu_poll))
         for name in ('run', 'click', 'input', 'say', 'stop', 'clear', 'upload', 'unupload'):
@@ -541,7 +591,7 @@ class WebPanel:
     async def h_index(self, request):
         page = 'index.html' if self.authed(request) else 'login.html'
         html = (STATIC_DIR / page).read_text(encoding='utf-8')
-        return web.Response(text=html, content_type='text/html')
+        return web.Response(text=html, content_type='text/html', headers={'Cache-Control': 'no-cache'})
 
     # ------------------------------------------------------------------ #
     # Вход (core/web/auth.py)
@@ -594,6 +644,32 @@ class WebPanel:
             raise ApiError(e.message, e.status)
         return await self._set_session(request, 'Telegram Mini App')
 
+    async def a_auth_ticket(self, request):
+        body = await self._json(request)
+        via = self.auth.use_ticket(str(body.get('ticket') or ''))
+        if not via:
+            raise ApiError('Ссылка для входа уже использована или устарела — войдите по коду (.web в Telegram)', 403)
+        return await self._set_session(request, via)
+
+    def login_link(self, url=None, ttl=None):
+        """Ссылка «войти в один клик» на публичный адрес (одноразовая, см. WebAuth.issue_ticket) или None."""
+        url = url or self.public_url()
+        if not url:
+            return None
+        return url.rstrip('/') + '/#frx_t=' + self.auth.issue_ticket(ttl)
+
+    async def a_tunnel_where(self, request):
+        st = self.tunnel_state()
+        return {'url': self.public_url(), 'status': st.get('status') or 'off', 'mode': st.get('mode') or 'auto'}
+
+    async def a_tunnel_handoff(self, request):
+        """Открытая страница увидела новый публичный адрес — даём ей одноразовый билет, чтобы переехать без входа."""
+        from .auth import HANDOFF_TTL
+        url = self.public_url()
+        if not url:
+            raise ApiError('Публичного адреса сейчас нет', 409)
+        return {'url': url.rstrip('/'), 'ticket': self.auth.issue_ticket(HANDOFF_TTL, 'переезд на новый адрес')}
+
     async def a_auth_logout(self, request):
         self.auth.drop(request.cookies.get(COOKIE))
         resp = web.json_response({'ok': True})
@@ -605,7 +681,8 @@ class WebPanel:
         if name not in STATIC_FILES:
             raise web.HTTPNotFound()
         ctype = mimetypes.guess_type(name)[0] or 'application/octet-stream'
-        headers = {'Cache-Control': 'max-age=3600'} if name in ('font.woff2',) else {}
+        # шрифт кэшируется, остальное — нет: иначе после обновления браузер (или кэш туннеля Cloudflare) отдаёт старые скрипты
+        headers = {'Cache-Control': 'max-age=3600'} if name in ('font.woff2',) else {'Cache-Control': 'no-cache'}
         return web.Response(body=(STATIC_DIR / name).read_bytes(), content_type=ctype, headers=headers)
 
     # ------------------------------------------------------------------ #
@@ -616,7 +693,7 @@ class WebPanel:
         result = []
         for module_name, info in self.core.modules.items():
             for idx, entry in enumerate(info.web_pages):
-                result.append({'module': module_name, 'index': idx,
+                result.append({'module': module_name, 'index': idx, 'kind': entry.get('kind', 'page'),
                                'title': entry['title'], 'icon': entry.get('icon')})
         return result
 
@@ -633,7 +710,17 @@ class WebPanel:
         for module_name in core.modules:
             if await core.db.get(core._config_key(module_name), {}):
                 cfg_modules += 1
+        bot_username = None
+        if core._aiogram_bot is not None:
+            bot_username = core._bot_username
+            if not bot_username:
+                try:
+                    bot_username = (await asyncio.wait_for(core._aiogram_bot.get_me(), 5)).username
+                    core._bot_username = bot_username
+                except Exception:
+                    bot_username = None
         return {
+            'bot_username': bot_username,
             'version': core.get_version(), 'prefix': await core.get_prefix(),
             'counts': {'configs': cfg_modules, 'modules': len(core.modules),
                        'accounts': len(core.accounts.account_list())},
@@ -645,7 +732,8 @@ class WebPanel:
 
     async def a_nav(self, request):
         """Лёгкие данные для верхнего меню: без запросов к Telegram и БД."""
-        return {'version': self.core.get_version(), 'pages': self._pages(), 'botchat': self.core._aiogram_bot is not None}
+        return {'version': self.core.get_version(), 'pages': self._pages(), 'botchat': self.core._aiogram_bot is not None,
+                'bot_username': getattr(self.core, '_bot_username', None)}
 
     async def a_changelog(self, request):
         """Записи CHANGELOG.md для главной: [{version, date, items: [str]}], новые сверху."""
@@ -716,7 +804,7 @@ class WebPanel:
                     value = float(str(value).strip().replace(',', '.'))
                 elif typ == 'bool':
                     value = value if isinstance(value, bool) else str(value).strip().lower() in ('1', 'true', 'да', 'yes', 'on')
-                elif typ == 'str':
+                elif typ in ('str', 'link'):
                     value = '' if value is None else str(value)
             except ValueError:
                 raise ApiError('Ожидалось целое число' if typ == 'int' else 'Ожидалось число')
@@ -1070,6 +1158,10 @@ class WebPanel:
         if info is None or not isinstance(index, int) or not (0 <= index < len(info.web_pages)):
             raise ApiError('Страница не найдена', 404)
         entry = info.web_pages[index]
+        if entry.get('kind') == 'app':                 # @web.app — своя разметка; скрипт и стили — /modapp/…
+            import hashlib
+            ver = hashlib.md5((entry.get('js', '') + entry.get('css', '')).encode()).hexdigest()[:10]
+            return {'title': entry['title'], 'app': {'html': entry.get('html', ''), 'v': ver, 'width': entry.get('width', 'normal')}}
         state = self._page_states.setdefault((module, index), {})
         token = current_module.set(module)
         try:
@@ -1082,6 +1174,91 @@ class WebPanel:
         finally:
             current_module.reset(token)
         return {'title': entry['title'], 'tree': tree, 'toasts': toasts}
+
+    # ------------------------------------------------------------------ #
+    # @web.app — своя страница модуля (HTML/CSS/JS + обработчик на Python)
+    # ------------------------------------------------------------------ #
+
+    def _modapp_entry(self, module, index):
+        info = self.core.modules.get(module)
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            index = -1
+        if info is None or not (0 <= index < len(info.web_pages)) or info.web_pages[index].get('kind') != 'app':
+            raise ApiError('Страница не найдена', 404)
+        return info.web_pages[index]
+
+    async def _modapp_run(self, module, entry, req):
+        token = current_module.set(module)
+        try:
+            result = entry['func'](req)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return result
+        except ApiError:
+            raise
+        except Exception as e:
+            self.core.tlog(f"[web] {module}: {req.action}: {type(e).__name__}: {e}")
+            raise ApiError(f"{type(e).__name__}: {e}", 500)
+        finally:
+            current_module.reset(token)
+
+    async def a_modapp_call(self, request):
+        b = await self._json(request)
+        module = str(b.get('module', ''))
+        entry = self._modapp_entry(module, b.get('index'))
+        result = await self._modapp_run(module, entry, ui_mod.AppRequest(b.get('action'), b.get('data')))
+        return result if isinstance(result, dict) else {'result': result}
+
+    async def a_modapp_upload(self, request):
+        """Файл со страницы @web.app: сырое тело, ?module=&index=&action=&name=&data=(json)."""
+        import json as _json
+        import tempfile
+        q = request.query
+        module = q.get('module', '')
+        entry = self._modapp_entry(module, q.get('index'))
+        name = os.path.basename(q.get('name', 'file'))[:120] or 'file'
+        try:
+            data = _json.loads(q.get('data') or '{}')
+        except ValueError:
+            data = {}
+        fd, path = tempfile.mkstemp(prefix='frx_up_', suffix='_' + name)
+        try:
+            with os.fdopen(fd, 'wb') as f:
+                async for chunk in request.content.iter_chunked(256 * 1024):
+                    f.write(chunk)
+            result = await self._modapp_run(module, entry, ui_mod.AppRequest(q.get('action', 'upload'), data, path, name))
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        return result if isinstance(result, dict) else {'result': result}
+
+    async def h_modapp_file(self, request):
+        module, index, name = request.match_info['module'], request.match_info['index'], request.match_info['name']
+        try:
+            entry = self._modapp_entry(module, index)
+        except ApiError:
+            return web.Response(status=404, text='not found')
+        if name in ('app.js', 'app.css'):
+            body = entry.get('js' if name == 'app.js' else 'css', '')
+            ctype = 'application/javascript' if name == 'app.js' else 'text/css'
+            return web.Response(text=body, content_type=ctype, headers={'Cache-Control': 'no-cache'})
+        if name.startswith('res/'):
+            try:
+                result = await self._modapp_run(module, entry, ui_mod.AppRequest('res', {'name': name[4:]}, query=request.query))
+            except ApiError as e:
+                return web.Response(status=e.status, text=e.message)
+            if isinstance(result, tuple) and len(result) == 2:
+                body, ctype = result
+                return web.Response(body=body, content_type=ctype or 'application/octet-stream',
+                                    headers={'Cache-Control': 'max-age=3600'})
+            if isinstance(result, web.StreamResponse):
+                return result
+            return web.Response(status=404, text='not found')
+        return web.Response(status=404, text='not found')
 
     # ------------------------------------------------------------------ #
     # Emulate: команды, формы и диалоги любого модуля на сайте

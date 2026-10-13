@@ -1,5 +1,6 @@
 # FRX в Docker. Код и данные лежат на хосте (том ./ -> /app), поэтому .update и бэкапы работают как обычно,
-# а пересобирать образ нужно, только если обновление поменяло requirements.txt (docker compose build).
+# пакеты, которых не хватает (например, после .update), keeper докачивает при старте сам (frx_deps.py);
+# пересобрать образ (docker compose build) всё равно полезно — тогда они не скачиваются при каждом пересоздании контейнера.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -14,8 +15,9 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install -r /tmp/requirements.txt
+COPY requirements.txt requirements-modules.txt /tmp/
+RUN pip install -r /tmp/requirements.txt \
+ && (pip install -r /tmp/requirements-modules.txt || echo "часть пакетов модулей не встала — FRX докачает их при старте")
 
 EXPOSE 8878
 CMD ["python", "-u", "frx_systemkeeper.py"]

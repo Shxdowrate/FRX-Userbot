@@ -1548,6 +1548,10 @@ class SbForm:
     async def _go_to_page(self, new_page):
         return None
 
+    async def delete(self):
+        """form.delete() — в эмуляции просто закрывает форму."""
+        await self.close(remove_buttons=True)
+
     async def close(self, remove_buttons=True):
         if self._closed:
             return

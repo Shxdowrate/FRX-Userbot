@@ -275,9 +275,9 @@ async def _open_form(event, uid=None, name='', username=''):
 
     async def show_user():
         u = engine.access.get_user(st['uid'])
-        rows = [[(visual.btn('Выдать доступ'), 'give')]]
+        rows = [[(visual.btn('Выдать доступ'), 'give', "success")]]
         if u:
-            rows.append([(visual.btn('Отозвать доступ'), 'revoke')])
+            rows.append([(visual.btn('Отозвать доступ'), 'revoke', "danger")])
         rows.append(close_row())
         await form.edit(_user_text(st['uid'], st['name'], st['username'], prefix), buttons=rows)
 
@@ -286,7 +286,7 @@ async def _open_form(event, uid=None, name='', username=''):
             visual.title("Выдать доступ", sub=who()),
             visual.item("<b>класс</b> — готовый набор прав (создаются на сайте: .web → доступ)"),
             visual.item("<b>разрешение</b> — доступ к одному модулю целиком или к одной его команде"),
-        ]), buttons=[[(visual.btn('Выдать класс'), 'gcls')], [(visual.btn('Выдать разрешение'), 'gperm:0')], back('user')])
+        ]), buttons=[[(visual.btn('Выдать класс'), 'gcls', "success")], [(visual.btn('Выдать разрешение'), 'gperm:0', "success")], back('user')])
 
     async def show_classes():
         u = engine.access.get_user(st['uid']) or {}
@@ -348,7 +348,7 @@ async def _open_form(event, uid=None, name='', username=''):
         if whole:
             lines.append(visual.item(f"доступен целиком <i>({_esc(why)})</i>"))
         else:
-            rows.append([(visual.btn('Выдать доступ ко всему модулю'), 'gm')])
+            rows.append([(visual.btn('Выдать доступ ко всему модулю'), 'gm', "success")])
         lines += ["", visual.hint("или выберите одну команду:")]
         for i, (key, cmd, _d) in enumerate(st['cmds']):
             ok = has_user and engine.access.check(st['uid'], mname, key, builtin)[0]
@@ -383,7 +383,7 @@ async def _open_form(event, uid=None, name='', username=''):
             visual.warn(_esc('; '.join(reasons))),
             "", visual.hint("по сути это доступ ко всему аккаунту и компьютеру, где запущен юзербот. "
                             "Выдавайте только тем, кому доверяете как себе."),
-        ]), buttons=[[(visual.btn('Да, выдать'), ok_data)], back(back_data)])
+        ]), buttons=[[(visual.btn('Да, выдать'), ok_data, "success")], back(back_data)])
 
     async def do_grant(kind, value, click):
         await engine.access.grant('user', st['uid'], kind, value, name=st['name'], username=st['username'])
@@ -400,7 +400,7 @@ async def _open_form(event, uid=None, name='', username=''):
             rows.append([(f"✕ класс {u['class']}", 'rc')])
         for i, (kind, value) in enumerate(st['grants']):
             rows.append([(f"✕ {describe_grant(kind, value, prefix)}"[:60], f"rg:{i}")])
-        rows.append([(visual.btn('Отозвать весь доступ'), 'rall')])
+        rows.append([(visual.btn('Отозвать весь доступ'), 'rall', "danger")])
         rows.append(back('user'))
         await form.edit(visual.title("Отозвать доступ", sub=who()) + "\n"
                         + visual.hint("нажмите на то, что нужно отозвать"), buttons=rows)
@@ -413,8 +413,7 @@ async def _open_form(event, uid=None, name='', username=''):
         try:
             if d == 'close':
                 await click.answer()
-                await form.edit(visual.ok("Доступ: меню закрыто"), buttons=None)
-                await form.close()
+                await form.delete()
                 return
             if d == 'noop':
                 await click.answer()
@@ -499,7 +498,7 @@ async def _open_form(event, uid=None, name='', username=''):
                     return
                 await click.answer()
                 await form.edit(visual.warn(f"Отозвать весь доступ у <b>{who()}</b>? Класс и все разрешения будут сняты."),
-                                buttons=[[(visual.btn('Да, отозвать всё'), 'rallok')], back('revoke')])
+                                buttons=[[(visual.btn('Да, отозвать всё'), 'rallok', "danger")], back('revoke')])
             elif d == 'rallok':
                 await engine.access.remove_user(st['uid'])
                 await click.answer("доступ отозван")

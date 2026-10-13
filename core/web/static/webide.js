@@ -1502,7 +1502,7 @@ const WI_C_FORMEDIT = {
 /* ---------- Конструкция: конфиг (вызов create_config; в какую функцию его поставить — решает автор) ---------- */
 
 const WI_CFG_TYPES = [['str', 'строка'], ['int', 'целое число'], ['float', 'дробное число'], ['bool', 'да / нет'], ['list', 'список'],
-  ['choice', 'выбор одного'], ['choices', 'выбор нескольких']];
+  ['choice', 'выбор одного'], ['choices', 'выбор нескольких'], ['link', 'ссылка']];
 
 const WI_C_CONFIG = {
   id: 'config', title: 'Конфиг', desc: 'await engine.create_config(...) — настройка для вкладки «конфиги»',
@@ -1518,6 +1518,7 @@ const WI_C_CONFIG = {
       if (typeof st.def !== 'number') st.def = 0;
       f.push(wiFld('Значение по умолчанию', wiText(st, 'def', ui, { type: 'number' })), wiFld('Границы', h('div', { class: 'wi-inline' }, wiText(st, 'min', ui, { type: 'number', placeholder: 'мин' }), wiText(st, 'max', ui, { type: 'number', placeholder: 'макс' }))));
     }
+    if (st.type === 'link') f.push(wiFld('Ссылка по умолчанию', wiText(st, 'def', ui, { placeholder: 'https://…' }), 'проверяется: http(s):// или tg://; можно оставить пустой'), wiCheck(st, 'https_only', 'только https', ui));
     if (st.type === 'bool') f.push(wiCheck(st, 'def_bool', 'включено по умолчанию', ui));
     if (st.type === 'list') f.push(wiFld('Элементы по умолчанию', wiText(st, 'options', ui), 'через запятую'));
     if (st.type === 'choice' || st.type === 'choices') {
@@ -1538,6 +1539,7 @@ const WI_C_CONFIG = {
         if (st.type === 'float' && !def.includes('.')) def += '.0';
         valid('min_value', 'max_value'); break;
       case 'bool': def = st.def_bool ? 'True' : 'False'; break;
+      case 'link': def = wiPyStr(typeof st.def === 'string' ? st.def.trim() : ''); if (st.https_only) extra.push('valid={"https_only": True}'); break;
       case 'list': def = wiPyLit(list); break;
       case 'choice': {
         if (list.length < 2) errors.push('Для выбора нужно хотя бы два варианта');
@@ -1570,6 +1572,7 @@ const WI_C_CONFIG = {
       if (type === 'str') { st.def = wiStrOf(def) || ''; if (typeof valid.min_len === 'number') st.min = valid.min_len; if (typeof valid.max_len === 'number') st.max = valid.max_len; }
       else if (type === 'int' || type === 'float') { st.def = typeof def === 'number' ? def : 0; if (typeof valid.min_value === 'number') st.min = valid.min_value; if (typeof valid.max_value === 'number') st.max = valid.max_value; }
       else if (type === 'bool') st.def_bool = def !== false;
+      else if (type === 'link') { st.def = wiStrOf(def) || ''; st.https_only = valid.https_only === true; }
       else if (type === 'list') st.options = (Array.isArray(def) ? def.filter(wiIsStr) : []).join(', ');
       else { st.options = opts.join(', '); st.def_choice = type === 'choice' ? (wiStrOf(def) || '') : (Array.isArray(def) ? def.filter(wiIsStr).join(', ') : ''); }
       out.push({ a: m.index, b: close + 1, ra: m.index, rb: close + 1, indent: m[1], st });
@@ -1936,6 +1939,7 @@ const FRX_DRAFT = { savedAt: 0, pending: 0, label: '', copy: null };
 function wiDraftKeeper(opts) {                        // {key, base, getData, isDirty, alive, label, copyText}
   let timer = 0, has = false, base = opts.base || '', busy = false, again = false;
   FRX_DRAFT.label = opts.label || ''; FRX_DRAFT.copy = opts.copyText || null; FRX_DRAFT.pending = 0; FRX_DRAFT.savedAt = 0;
+  FRX_DRAFT.flushNow = () => flush(false);            // переезд на новый адрес (app.js: moveWatch) — сохранить сразу
   async function flush(keepalive) {
     clearTimeout(timer); timer = 0;
     if (!opts.alive()) return;
@@ -1956,7 +1960,7 @@ function wiDraftKeeper(opts) {                        // {key, base, getData, is
   const onHide = () => { if (document.visibilityState === 'hidden' && timer) flush(true); };
   document.addEventListener('visibilitychange', onHide);
   window.addEventListener('pagehide', onHide);
-  window.addEventListener('hashchange', () => { document.removeEventListener('visibilitychange', onHide); window.removeEventListener('pagehide', onHide); if (FRX_DRAFT.copy === opts.copyText) FRX_DRAFT.copy = null; }, { once: true });
+  window.addEventListener('hashchange', () => { document.removeEventListener('visibilitychange', onHide); window.removeEventListener('pagehide', onHide); if (FRX_DRAFT.copy === opts.copyText) { FRX_DRAFT.copy = null; FRX_DRAFT.flushNow = null; } }, { once: true });
   return {
     notify() { if (!FRX_DRAFT.pending) FRX_DRAFT.pending = Date.now(); clearTimeout(timer); timer = setTimeout(() => flush(false), 1500); },
     flush,

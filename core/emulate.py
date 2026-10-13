@@ -44,7 +44,7 @@ from pathlib import Path
 from .context import current_emulation, current_event, current_module
 from .html_utils import safe_html
 from .paths import DATA_DIR
-from .inline_forms import InlineClick, InlineInput, InputButton, normalize_button_rows
+from .inline_forms import InlineClick, InlineInput, InputButton, normalize_button_rows, parse_button, normalize_style
 from .waiters import Waiter
 
 MAX_ENTRIES_DEFAULT = 200
@@ -145,20 +145,25 @@ def _to_nodes(text, parse_mode) -> list:
     return [str(text or '')[:MAX_TEXT]]                  # незнакомый режим — как есть, без разметки
 
 
-def serialize_buttons(buttons) -> list:
-    """buttons формы (любой формат create_inlineform) → [[{'text','data'} | {'text','input','hint'}], ...]."""
+def serialize_buttons(buttons, styles=None) -> list:
+    """buttons формы (любой формат create_inlineform) → [[{'text','data','style'?} | {'text','input','hint'}], ...]."""
     out = []
     for row in normalize_button_rows(buttons or []):
         cells = []
         for b in row:
-            if isinstance(b, InputButton):
-                cells.append({'text': str(b.text), 'input': str(b.data), 'hint': str(b.hint or '')})
-                continue
             try:
-                text, data = b
-            except (ValueError, TypeError):
+                p = parse_button(b, styles)
+            except ValueError:
+                p = None
+            if p is None:
                 continue
-            cells.append({'text': str(text), 'data': str(data)})
+            if p['kind'] == 'input':
+                cell = {'text': p['text'], 'input': p['data'], 'hint': str(p.get('hint') or '')}
+            else:
+                cell = {'text': p['text'], 'data': p['data']}
+            if p.get('style'):
+                cell['style'] = p['style']
+            cells.append(cell)
         if cells:
             out.append(cells)
     return out
@@ -358,6 +363,7 @@ class EmuForm:
         self._raw_buttons = None
         self._pages = [[]]
         self.page = 0
+        self.styles = {}
         self._click_handlers = []
         self._input_handlers = []
         self._closed = False
@@ -383,7 +389,7 @@ class EmuForm:
     def _sync(self, text, buttons, closed=False):
         fields = {'form': self.form_id, 'closed': closed,
                   'nodes': html_to_nodes(safe_html(text)) if text is not None else self._entry_nodes(),
-                  'rows': [] if closed else serialize_buttons(buttons)}
+                  'rows': [] if closed else serialize_buttons(buttons, self.styles)}
         if self._entry is None:
             self._entry = self._session.add_entry(kind='form', **fields)
         else:
@@ -392,9 +398,11 @@ class EmuForm:
     def _entry_nodes(self):
         return self._entry['nodes'] if self._entry else []
 
-    async def edit(self, text, buttons=None):
+    async def edit(self, text, buttons=None, styles=None):
         if self._closed:
             raise RuntimeError(f"Форма '{self.form_id}' уже закрыта (form.close())")
+        if styles is not None:
+            self.styles = {str(k): normalize_style(v) for k, v in dict(styles).items()}
         self.text = text
         self._raw_buttons = buttons
         self._pages = [normalize_button_rows(buttons or [])]
@@ -402,6 +410,10 @@ class EmuForm:
 
     async def _go_to_page(self, new_page):          # пагинации на сайте нет — совместимость
         return None
+
+    async def delete(self):
+        """form.delete() — в эмуляции просто закрывает форму."""
+        await self.close(remove_buttons=True)
 
     async def close(self, remove_buttons=True):
         if self._closed:
@@ -759,9 +771,10 @@ class EmuSession:
 
         return self.spawn(go, text)
 
-    def create_form(self, chat_id, text, buttons=None, for_user=None, black_list=None, timeout=None):
+    def create_form(self, chat_id, text, buttons=None, for_user=None, black_list=None, timeout=None, styles=None):
         owner = current_module.get() or self.module
         form = EmuForm(self, chat_id, owner, for_user, black_list, timeout)
+        form.styles = {str(k): normalize_style(v) for k, v in (styles or {}).items()}
         self.forms[form.form_id] = form
         form.text = text
         form._raw_buttons = buttons

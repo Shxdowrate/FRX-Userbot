@@ -56,8 +56,10 @@ from .accounts import AccountManager
 from .inline_forms import (
     InlineForm, InlineClick, InputButton, InlineInput, TokenBucket, resolve_form_reply,
     PAGE_PREV, PAGE_NEXT, PAGE_NOOP, paginate_button_rows, render_page_rows,
+    parse_button, normalize_style,
 )
 from .stationary_bot import BotFacade
+from .inline_results import InlineResult, InlineQueryEvent, InlineQueryClick, link_preview_options
 from .html_utils import safe_html
 from .module_meta import parse_module_meta
 from .command_event import CommandEvent
@@ -135,6 +137,13 @@ class ModuleInfo:
     bot_on_load_handlers: list = field(default_factory=list)
     bot_cycle_handlers: list = field(default_factory=list)    # [(func, interval), ...]
     bot_cycle_tasks: list = field(default_factory=list)
+    # @decorators.on_edit / on_delete / on_unload и @bot.inline_query / inline_click / start_link
+    edit_handlers: list = field(default_factory=list)
+    delete_handlers: list = field(default_factory=list)
+    on_unload_handlers: list = field(default_factory=list)
+    bot_inline_queries: dict = field(default_factory=dict)    # name -> func
+    bot_inline_clicks: list = field(default_factory=list)
+    bot_start_links: list = field(default_factory=list)
 
     @property
     def is_builtin(self) -> bool:
@@ -231,6 +240,11 @@ class Core:
         # юзербота через `import bot` (core/bot_decorators.py) ---
         self.bot_command_map: dict[str, tuple] = {}    # alias -> (module_name, func, access, for_user, for_chat, black_list, black_chats)
         self.bot_inline_function_map: dict[str, tuple] = {}  # alias -> (module_name, func, access, for_user, for_chat, black_list, black_chats) — bot.inline_function()
+        self.bot_inline_query_map: dict[str, tuple] = {}    # name -> (module_name, func, access, for_user, for_chat, black_list, black_chats)
+        self.bot_inline_clicks: list = []                # [(module_name, prefix, func, access), ...]
+        self.bot_start_links: list = []                  # [(module_name, prefix, func), ...]
+        self.edit_handlers: list = []                    # [(module_name, func), ...] — @decorators.on_edit
+        self.delete_handlers: list = []                  # [(module_name, func), ...] — @decorators.on_delete
         self.bot_watchers_bot: list = []                # [(module_name, func, access, watch), ...] — кормятся aiogram-сообщениями
         self.bot_watchers_userbot: list = []            # [(module_name, func, access, watch), ...] — кормятся Telethon-событиями
         self.bot_telegram_events: list = []             # [(module_name, func), ...]
@@ -347,6 +361,9 @@ class Core:
         files_module.delete_file = self.file_registry.delete
         files_module.create_file = self.file_registry.create
         sys.modules['files'] = files_module
+
+        from . import media_tools as media_module                     # `import media` — ffmpeg и Pillow для модулей
+        sys.modules['media'] = media_module
 
         accounts_module = types.ModuleType('accounts')
         accounts_module.add_account = self.accounts.add_account
@@ -597,6 +614,10 @@ class Core:
             self.client = TelegramClient(str(SESSION_PATH), self.api_id, self.api_hash)
             await self.client.connect()
             if not await self.client.is_user_authorized():
+                if os.environ.get('FRX_ANDROID'):
+                    # приложение для Android: консоли нет, вход — на экране приложения («Войти заново»)
+                    print("[FRX] Сессия Telegram недействительна или её нет — войдите заново в приложении FRX")
+                    raise SystemExit(78)
                 # первичный вход — ТОЛЬКО через консоль (Telethon спросит номер,
                 # код и, если включена, 2FA прямо в терминале). Так надёжнее, когда юзербот
                 # стоит на внешнем сервере; сайт (.web) — локальный и работает уже после входа.
@@ -680,10 +701,14 @@ class Core:
         client.remove_event_handler(self._on_new_message, events.NewMessage())
         client.remove_event_handler(self._on_chat_action, events.ChatAction())
         client.remove_event_handler(self._on_callback, events.CallbackQuery())
+        client.remove_event_handler(self._on_edit, events.MessageEdited())
+        client.remove_event_handler(self._on_delete, events.MessageDeleted())
 
         client.add_event_handler(self._on_new_message, events.NewMessage())
         client.add_event_handler(self._on_chat_action, events.ChatAction())
         client.add_event_handler(self._on_callback, events.CallbackQuery())
+        client.add_event_handler(self._on_edit, events.MessageEdited())
+        client.add_event_handler(self._on_delete, events.MessageDeleted())
         try:                                             # BotChat «cross watch» (группы глазами аккаунта)
             self.botchat.attach_client(client)
         except Exception as e:
@@ -891,6 +916,14 @@ class Core:
             finally:
                 current_module.reset(mtoken)
 
+    async def _on_edit(self, event):
+        for module_name, func in list(self.edit_handlers):
+            await self._safe_call(module_name, func, event)
+
+    async def _on_delete(self, event):
+        for module_name, func in list(self.delete_handlers):
+            await self._safe_call(module_name, func, event)
+
     async def _on_callback(self, event):
         for module_name, func in list(self.callbacks):
             mtoken = current_module.set(module_name)
@@ -984,6 +1017,8 @@ class Core:
 
     async def _load_from_source(self, source: str, target: str = 'loaded', source_path: str | None = None) -> ModuleInfo:
         self._guest_guard('загрузка модуля', 'loader')
+        if 'REQUIREMENTS' in source:            # пакеты, которые модуль объявил сам (core/requirements.py)
+            await self._ensure_module_requirements(source)
         namespace = self._build_namespace()
 
         token = current_module.set('__loading__')
@@ -1070,6 +1105,14 @@ class Core:
                 elif ftype == 'on_account_switch':
                     self.on_account_switch_handlers.append((module_name, value))
                     info.on_account_switch_handlers.append(value)
+                elif ftype == 'on_edit':
+                    self.edit_handlers.append((module_name, value))
+                    info.edit_handlers.append(value)
+                elif ftype == 'on_delete':
+                    self.delete_handlers.append((module_name, value))
+                    info.delete_handlers.append(value)
+                elif ftype == 'on_unload':
+                    info.on_unload_handlers.append(value)
                 elif ftype == 'on_start':
                     info.on_start_handlers.append(value)
                 elif ftype == 'on_load':
@@ -1079,7 +1122,7 @@ class Core:
 
             # страницы сайта (`import web`, @web.page — core/web/ui.py)
             for page_meta in getattr(value, '_frx_web_pages', []):
-                info.web_pages.append({'title': page_meta['title'], 'icon': page_meta.get('icon'), 'func': value})
+                info.web_pages.append({**page_meta, 'title': page_meta['title'], 'icon': page_meta.get('icon'), 'func': value})
 
             # --- параллельный набор: хэндлеры СТАЦИОНАРНОГО бота (`import bot`,
             # core/bot_decorators.py) — независимо от _frx_type выше ---
@@ -1116,6 +1159,23 @@ class Core:
                             getattr(value, '_frx_bot_black_chats', None),
                         )
                         info.bot_inline_functions[alias] = value
+                elif bftype == 'inline_query':
+                    for alias in value._frx_bot_iq_names:
+                        if alias in self.bot_inline_query_map or alias in self.bot_inline_function_map:
+                            owner = (self.bot_inline_query_map.get(alias) or self.bot_inline_function_map.get(alias))[0]
+                            raise ValueError(f"Инлайн-запрос '{alias}' уже занят модулем '{owner}'")
+                        self.bot_inline_query_map[alias] = (
+                            module_name, value, value._frx_bot_access,
+                            getattr(value, '_frx_bot_for_user', None), getattr(value, '_frx_bot_for_chat', None),
+                            getattr(value, '_frx_bot_black_list', None), getattr(value, '_frx_bot_black_chats', None),
+                        )
+                        info.bot_inline_queries[alias] = value
+                elif bftype == 'inline_click':
+                    self.bot_inline_clicks.append((module_name, value._frx_bot_click_prefix, value, value._frx_bot_access))
+                    info.bot_inline_clicks.append(value)
+                elif bftype == 'start_link':
+                    self.bot_start_links.append((module_name, value._frx_bot_start_prefix, value))
+                    info.bot_start_links.append(value)
                 elif bftype == 'watcher':
                     watch = getattr(value, '_frx_bot_watch', 'bot')
                     entry = (module_name, value, value._frx_bot_access, watch)
@@ -1189,6 +1249,21 @@ class Core:
 
         return info
 
+    async def _ensure_module_requirements(self, source: str):
+        """REQUIREMENTS модуля: недостающие пакеты ставятся до exec(), чтобы import в модуле сразу работал.
+        Не встал пакет — модуль всё равно загружается (многие умеют работать без необязательного пакета),
+        а причина пишется в лог."""
+        from .requirements import ensure_for_source
+        try:
+            done, failed = await ensure_for_source(source, log=lambda t: self.tlog(f"[модули] {t}"))
+        except Exception as e:
+            self.tlog(f"[модули] проверка REQUIREMENTS не удалась: {e}")
+            return
+        if done:
+            self.tlog(f"[модули] поставлены пакеты: {', '.join(done)}")
+        for spec, err in failed.items():
+            self.tlog(f"[модули] пакет {spec} не поставился: {err}")
+
     async def unload_module(self, module_name: str, archive: bool = True):
         """
         Выгружает модуль: останавливает хэндлеры и циклы и убирает его из реестров.
@@ -1204,9 +1279,16 @@ class Core:
         if not info:
             raise KeyError(f"Модуль '{module_name}' не загружен")
 
+        for func in list(info.on_unload_handlers):             # модуль сам останавливает свои задачи
+            try:
+                await asyncio.wait_for(self._safe_call(module_name, func), 10)
+            except Exception:
+                pass
         for alias in list(info.commands.keys()):
             self.command_map.pop(alias, None)
         self.watchers = [(m, f) for m, f in self.watchers if m != module_name]
+        self.edit_handlers = [(m, f) for m, f in self.edit_handlers if m != module_name]
+        self.delete_handlers = [(m, f) for m, f in self.delete_handlers if m != module_name]
         self.telegram_events = [(m, f) for m, f in self.telegram_events if m != module_name]
         self.callbacks = [(m, f) for m, f in self.callbacks if m != module_name]
         self.on_error_handlers = [(m, f) for m, f in self.on_error_handlers if m != module_name]
@@ -1219,6 +1301,10 @@ class Core:
             self.bot_command_map.pop(alias, None)
         for alias in list(info.bot_inline_functions.keys()):
             self.bot_inline_function_map.pop(alias, None)
+        for alias in list(info.bot_inline_queries.keys()):
+            self.bot_inline_query_map.pop(alias, None)
+        self.bot_inline_clicks = [e for e in self.bot_inline_clicks if e[0] != module_name]
+        self.bot_start_links = [e for e in self.bot_start_links if e[0] != module_name]
         self.bot_watchers_bot = [e for e in self.bot_watchers_bot if e[0] != module_name]
         self.bot_watchers_userbot = [e for e in self.bot_watchers_userbot if e[0] != module_name]
         self.bot_telegram_events = [(m, f) for m, f in self.bot_telegram_events if m != module_name]
@@ -1266,7 +1352,7 @@ class Core:
         path = info.path
         await self.unload_module(module_name, archive=False)
         # source_path=path — иначе модуль с нестандартным именем файла
-        # (AutoAnon.py при MODULE_NAME='auto_anon') после перезагрузки получал дубль-файл
+        # (например, MyModule.py при MODULE_NAME='my_module') после перезагрузки получал дубль-файл
         return await self._load_from_source(source, target=target, source_path=path)
 
     async def reload_module(self, module_name: str):
@@ -1626,6 +1712,21 @@ class Core:
         """Список всех загруженных модулей."""
         return list(self.modules.keys())
 
+    async def run_unload_hooks(self, timeout=8.0):
+        """@decorators.on_unload() всех модулей — при выключении/перезапуске юзербота (модули выходят из голосовых
+        чатов, гасят свои серверы и потоки). Не больше timeout секунд на всё, чтобы выключение не зависло."""
+        async def one(module_name, func):
+            try:
+                await asyncio.wait_for(self._safe_call(module_name, func), 5)
+            except Exception:
+                pass
+        jobs = [one(name, f) for name, info in list(self.modules.items()) for f in list(info.on_unload_handlers)]
+        if jobs:
+            try:
+                await asyncio.wait_for(asyncio.gather(*jobs), timeout)
+            except Exception:
+                pass
+
     def get_module_info(self, module_name: str) -> dict:
         """
         Вся инфа о модуле — команды (с алиасами и докстрингом) и остальные
@@ -1689,6 +1790,21 @@ class Core:
                 'description': _doc(func),
             })
 
+        bot_inline_queries = []
+        seen_iq = set()
+        for func in info.bot_inline_queries.values():
+            if id(func) in seen_iq:
+                continue
+            seen_iq.add(id(func))
+            names = getattr(func, '_frx_bot_iq_names', [func.__name__])
+            bot_inline_queries.append({
+                'name': names[0],
+                'aliases': list(names[1:]),
+                'access': getattr(func, '_frx_bot_access', 'self'),
+                'for_user': getattr(func, '_frx_bot_for_user', None),
+                'description': _doc(func),
+            })
+
         return {
             'module_name': info.module_name,
             'name': info.name,
@@ -1710,6 +1826,7 @@ class Core:
             # --- хэндлеры СТАЦИОНАРНОГО бота этого модуля (`import bot`) ---
             'bot_commands': bot_commands,
             'bot_inline_functions': bot_inline_functions,
+            'bot_inline_queries': bot_inline_queries,     # @bot.inline_query — «@бот имя запрос» в любом чате
             'bot_watchers': [
                 {
                     'name': f.__name__,
@@ -1797,11 +1914,12 @@ class Core:
             'int': {'max_value', 'min_value'},
             'float': {'max_value', 'min_value'},
             'str': {'max_len', 'min_len'},
+            'link': {'https_only', 'domains', 'allow_tg', 'max_len'},
         }.get(data_type)
         if allowed is None:
             raise ValueError(
                 f"valid=...  для конфига '{key}' поддерживается только для типов "
-                f"'int'/'float'/'str', не для '{data_type}'"
+                f"'int'/'float'/'str'/'link', не для '{data_type}'"
             )
         unknown = set(valid.keys()) - allowed
         if unknown:
@@ -1809,6 +1927,65 @@ class Core:
                 f"valid=...  для конфига '{key}' (тип '{data_type}') поддерживает "
                 f"только {sorted(allowed)}, а не {sorted(unknown)}"
             )
+
+    _LINK_HOST_RE = re.compile(r'^(?:localhost|\[[0-9a-f:]+\]|(?:\d{1,3}\.){3}\d{1,3}|'
+                               r'(?:[a-z0-9\u0400-\u04ff](?:[a-z0-9\u0400-\u04ff-]{0,61}[a-z0-9\u0400-\u04ff])?\.)+'
+                               r'[a-z\u0400-\u04ff]{2,63})$', re.I)
+
+    def _normalize_link(self, key, value, valid=None):
+        """
+        Конфиг типа 'link': проверяет, что значение — настоящая ссылка, и приводит её к полному виду.
+            example.com/x   -> https://example.com/x   (без схемы — подставляется https://)
+            @username       -> https://t.me/username
+            t.me/channel    -> https://t.me/channel
+        Допустимы http(s):// (с хостом-доменом, IP или localhost) и tg:// (если не запрещено).
+        Пустая строка / None — «не задано», разрешено.
+        valid: {'https_only': True} — только https; {'domains': ['github.com', 't.me']} — только эти
+        домены (и их поддомены); {'allow_tg': False} — запретить tg://; {'max_len': 500}.
+        """
+        from urllib.parse import urlsplit
+        valid = valid or {}
+        if value is None:
+            return None
+        v = str(value).strip()
+        if not v:
+            return ''
+        if re.fullmatch(r'@[A-Za-z][\w]{3,31}', v):
+            v = 'https://t.me/' + v[1:]
+        if not re.match(r'^[a-z][a-z0-9+.-]*://', v, re.I):
+            if re.match(r'^[a-z][a-z0-9+.-]*:', v, re.I) and not re.match(r'^[^:/]+:\d+(?:/|$)', v):
+                raise ValueError(f"Конфиг '{key}': «{v}» — не ссылка (нужно http(s)://…)")
+            local = re.match(r'^(?:localhost|(?:\d{1,3}\.){3}\d{1,3})(?::\d+)?(?:/|$)', v, re.I)
+            v = ('http://' if local else 'https://') + v
+        if any(c.isspace() for c in v):
+            raise ValueError(f"Конфиг '{key}': в ссылке не должно быть пробелов")
+        parts = urlsplit(v)
+        scheme = parts.scheme.lower()
+        if scheme == 'tg':
+            if valid.get('allow_tg') is False or valid.get('https_only'):
+                raise ValueError(f"Конфиг '{key}': ссылки tg:// здесь не разрешены")
+            if not (parts.netloc or parts.path):
+                raise ValueError(f"Конфиг '{key}': пустая tg-ссылка")
+        elif scheme in ('http', 'https'):
+            if valid.get('https_only') and scheme != 'https':
+                raise ValueError(f"Конфиг '{key}': нужна ссылка https://")
+            host = (parts.hostname or '').lower()
+            if not host or not self._LINK_HOST_RE.match(host):
+                raise ValueError(f"Конфиг '{key}': «{v}» — не похоже на ссылку (нет домена)")
+            try:
+                parts.port
+            except ValueError:
+                raise ValueError(f"Конфиг '{key}': неверный порт в ссылке")
+            domains = [str(d).lower().lstrip('.') for d in (valid.get('domains') or [])]
+            if domains and not any(host == d or host.endswith('.' + d) for d in domains):
+                raise ValueError(f"Конфиг '{key}': разрешены только ссылки на {', '.join(domains)}")
+        else:
+            raise ValueError(f"Конфиг '{key}': схема «{scheme}://» не поддерживается — нужна http(s)://"
+                             + ("" if valid.get('allow_tg') is False else " или tg://"))
+        max_len = valid.get('max_len')
+        if max_len is not None and len(v) > max_len:
+            raise ValueError(f"Конфиг '{key}': ссылка длиннее {max_len} символов")
+        return v
 
     def _validate_config_value(self, key, data_type, valid, value):
         """
@@ -1842,7 +2019,12 @@ class Core:
                              options: list = None):
         """
         Создаёт конфиг для текущего модуля (тип может быть 'list', а также
-        'choice'/'choices').
+        'choice'/'choices' и 'link').
+
+        'link' — ссылка: значение проверяется на то, что это настоящий адрес
+        http(s):// или tg://, и приводится к полному виду (example.com -> https://example.com,
+        @user -> https://t.me/user). Пустое значение разрешено («не задано»).
+        valid для 'link': {'https_only': True, 'domains': ['github.com'], 'allow_tg': False, 'max_len': 500}.
 
         valid — необязательные ограничения на значение,
         проверяются при edit_config(key, 'edit', ...) (для 'list'/'bool'/
@@ -1901,6 +2083,10 @@ class Core:
                         f"Конфиг '{key}' типа 'choices': default должен быть непустым списком элементов из options"
                     )
                 default = list(default)
+        elif data_type == 'link':
+            if valid:
+                self._check_valid_spec(key, data_type, valid)
+            default = self._normalize_link(key, default, valid)
         elif valid:
             self._check_valid_spec(key, data_type, valid)
             self._validate_config_value(key, data_type, valid, default)
@@ -1979,6 +2165,10 @@ class Core:
             if value not in options:
                 raise ValueError(f"'{value}' не входит в список допустимых вариантов конфига '{key}'")
             entry['value'] = value
+        elif entry['type'] == 'link':
+            if operation_type != 'edit':
+                raise ValueError("Для конфига типа 'link' operation_type должен быть 'edit'")
+            entry['value'] = self._normalize_link(key, value, entry.get('valid'))
         else:
             if operation_type != 'edit':
                 raise ValueError(f"Для конфига типа '{entry['type']}' operation_type должен быть 'edit'")
@@ -2047,6 +2237,7 @@ class Core:
         """
         Изменяет сообщение (если это наше сообщение), иначе — отправляет новое. file — путь/ID вложения (см. core/files.py).
         Чужое сообщение (команда гостя): первый answer отвечает на него, следующие правят этот ответ — как у владельца.
+        Файл, который грузится дольше мгновения, сначала показывается анимацией «загрузка…» (см. _deliver_media).
         """
         path = await self._resolve_file(file)
         text = safe_html(text)   # <не_теги> показываются как есть, а не пропадают
@@ -2054,27 +2245,33 @@ class Core:
             key = (getattr(message, 'chat_id', None), getattr(message, 'id', None))
             prev = self._guest_replies.get(key)
             if prev is not None:
+                async def edit_prev(f):
+                    try:
+                        return await prev.edit(text, file=f, parse_mode='html')
+                    except MessageNotModifiedError:
+                        return prev
                 try:
-                    return await prev.edit(text, file=path, parse_mode='html')
-                except MessageNotModifiedError:
-                    return prev
+                    return await self._deliver_media(path, text, edit_prev)
                 except Exception:
                     pass
-            sent = await message.reply(text, file=path, parse_mode='html')
+            sent = await self._deliver_media(path, text, lambda f: message.reply(text, file=f, parse_mode='html'))
             self._guest_replies[key] = sent
             while len(self._guest_replies) > 300:
                 self._guest_replies.pop(next(iter(self._guest_replies)))
             return sent
-        try:
-            return await message.edit(text, file=path, parse_mode='html')
-        except Exception:
-            return await message.reply(text, file=path, parse_mode='html')
+
+        async def edit_or_reply(f):
+            try:
+                return await message.edit(text, file=f, parse_mode='html')
+            except Exception:
+                return await message.reply(text, file=f, parse_mode='html')
+        return await self._deliver_media(path, text, edit_or_reply)
 
     async def reply(self, message, text, file=None):
         """Отвечает на message. file — путь на диске / ID из реестра (core/files.py)."""
         path = await self._resolve_file(file)
         text = safe_html(text)
-        return await message.reply(text, file=path, parse_mode='html')
+        return await self._deliver_media(path, text, lambda f: message.reply(text, file=f, parse_mode='html'))
 
     async def noreply(self, message, text, file=None):
         """
@@ -2090,7 +2287,7 @@ class Core:
         if emu is not None and emu.owns_chat(getattr(message, 'chat_id', None)):
             return await emu.send_text(text, path)
         entity = await self._resolve_entity(message.chat_id)
-        return await self.client.send_message(entity, text, file=path, parse_mode='html')
+        return await self._deliver_media(path, text, lambda f: self.client.send_message(entity, text, file=f, parse_mode='html'))
 
     async def send_message(self, chat_id, text, file=None):
         """
@@ -2104,7 +2301,110 @@ class Core:
         if emu is not None and emu.owns_chat(chat_id):
             return await emu.send_text(text, path)
         entity = await self._resolve_entity(chat_id)
-        return await self.client.send_message(entity, text, file=path, parse_mode='html')
+        return await self._deliver_media(path, text, lambda f: self.client.send_message(entity, text, file=f, parse_mode='html'))
+
+    # ------------------------------------------------------------------ #
+    # Медиа с заглушкой «загрузка…»
+    # Telegram показывает сообщение с файлом только после загрузки файла — большое видео «висит» секунды.
+    # Поэтому: загрузка начинается сразу; если за LOADING_AFTER секунд не успела — сообщение уходит с лёгкой
+    # анимацией «загрузка…» (assets/loading.gif, ~9 КБ; свою можно положить в user/assets/loading.gif), а когда файл
+    # загрузится — заглушка меняется на него правкой того же сообщения. Уже отправленный файл (тот же путь, размер
+    # и время изменения) за время работы второй раз не грузится — уходит ссылкой на загруженный.
+    # ------------------------------------------------------------------ #
+
+    LOADING_AFTER = 0.6
+
+    async def _deliver_media(self, path, text, send):
+        """send(file) — отправляет/правит сообщение с этим file и возвращает его. path — None, путь, ссылка или id."""
+        if not path or not isinstance(path, (str, os.PathLike)) or not os.path.isfile(path) or self.client is None:
+            return await send(path)
+        from telethon import utils as tl_utils
+        from telethon.errors import FileReferenceExpiredError
+        st = os.stat(path)
+        key = f"{os.path.abspath(path)}|{st.st_size}|{int(st.st_mtime)}"
+        cache = self.__dict__.setdefault('_tl_media', {})
+        if key in cache:
+            try:
+                return await send(cache[key])
+            except FileReferenceExpiredError:
+                cache.pop(key, None)
+
+        def remember(msg):
+            try:
+                if msg is not None and getattr(msg, 'media', None) is not None:
+                    cache[key] = tl_utils.get_input_media(msg.media)
+                    while len(cache) > 200:
+                        cache.pop(next(iter(cache)))
+            except Exception:
+                pass
+            return msg
+
+        src = path
+        if tl_utils.is_image(path):                  # как Telethon при отправке путём: большие фото — ужать
+            try:
+                from telethon.client.uploads import _resize_photo_if_needed
+                src = _resize_photo_if_needed(path, True)
+            except Exception:
+                src = path
+        up = asyncio.ensure_future(self.client.upload_file(src, file_name=os.path.basename(path)))
+        done, _ = await asyncio.wait({up}, timeout=self.LOADING_AFTER)
+        if up in done and not up.exception():
+            return remember(await send(up.result()))
+        placeholder = None if up.done() else await self._tl_loading_media()
+        if placeholder is None:                     # заглушки нет (или загрузка уже упала) — как раньше
+            up.cancel()
+            return remember(await send(path))
+        try:
+            msg = await send(placeholder)
+        except Exception:
+            up.cancel()
+            return remember(await send(path))
+        if not isinstance(self._tl_loading, (dict,)) and getattr(msg, 'media', None) is not None and \
+                type(self._tl_loading).__name__ in ('InputFile', 'InputFileBig'):
+            try:                                    # дальше заглушка уходит ссылкой на уже загруженный документ
+                self._tl_loading = tl_utils.get_input_media(msg.media)
+            except Exception:
+                pass
+        try:
+            uploaded = await up
+        except Exception as e:
+            self.tlog(f"[core] файл не загрузился: {e}")
+            try:
+                await msg.edit(text + "\n\n<i>файл не загрузился</i>", file=None, parse_mode='html')
+            except Exception:
+                pass
+            return msg
+        for attempt in range(3):
+            try:
+                edited = await msg.edit(text, file=uploaded, parse_mode='html')
+                return remember(edited if edited is not None else msg)
+            except MessageNotModifiedError:
+                return msg
+            except Exception as e:
+                if attempt == 2:                     # правка не прошла — отправляем файл отдельным сообщением
+                    self.tlog(f"[core] не удалось заменить «загрузка…» файлом: {e}")
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+                    return remember(await send(uploaded))
+                await asyncio.sleep(1.0 + attempt)
+
+    async def _tl_loading_media(self):
+        """Заглушка «загрузка…» для сообщений юзербота: загружается один раз, дальше — ссылкой на загруженную."""
+        cached = getattr(self, '_tl_loading', None)
+        if cached is not None:
+            return cached
+        try:
+            path = str(self.asset_path('loading.gif'))
+        except Exception:
+            return None
+        try:
+            uploaded = await self.client.upload_file(path)
+        except Exception:
+            return None
+        self._tl_loading = uploaded          # пока не отправлен — InputFile; после первой отправки — ссылка на документ
+        return uploaded
 
     def get_args(self):
         """Возвращает аргументы текущей команды одной строкой (без самой команды)."""
@@ -2292,7 +2592,8 @@ class Core:
     # ------------------------------------------------------------------ #
 
     async def create_inlineform(self, chat_id, text, buttons=None,
-                                 for_user=None, black_list=None, timeout=None, reply_to=None, media=None):
+                                 for_user=None, black_list=None, timeout=None, reply_to=None, media=None,
+                                 styles=None):
         """
         Создаёт "живую" инлайн-форму — сообщение от лица стационарного
         бота ("via @bot"), которым управляет юзербот: текст/кнопки можно
@@ -2314,6 +2615,10 @@ class Core:
                   бота. Анимация — .mp4/.gif/.webm (как GIF в Telegram, без звука), картинка — .jpg/.png/.webp.
                   Текст тогда становится подписью (Telegram ограничивает её 1024 символами), form.edit()
                   меняет подпись и кнопки. Файл загружается ботом один раз, дальше берётся из кэша.
+        styles: цвет кнопок по их callback_data — {'del': 'danger', 'ok': 'success', 'info': 'primary'}
+                  ('danger' красный, 'success' зелёный, 'primary' синий; синонимы red/green/blue).
+                  Цвет можно задать и у самой кнопки третьим элементом: ("Удалить", "del", "danger"),
+                  и у InputButton(..., style='primary'). Нужен aiogram >= 3.25, на старом — кнопки без цвета.
         reply_to: если команда отправлена ОТВЕТОМ на сообщение, форма
                   по умолчанию (None) тоже отвечает на него. False — не отвечать,
                   int — ответить на сообщение с этим id.
@@ -2334,7 +2639,7 @@ class Core:
         emu = current_emulation.get()
         if emu is not None and emu.owns_chat(chat_id):
             return emu.create_form(chat_id, text, buttons, for_user=for_user,
-                                   black_list=black_list, timeout=timeout)
+                                   black_list=black_list, timeout=timeout, styles=styles)
         if self._aiogram_bot is None:
             raise RuntimeError(
                 "Стационарный бот не запущен (aiogram_token не задан в user/config.json) — "
@@ -2347,8 +2652,20 @@ class Core:
         if for_user is None and guest is not None and self.access.get_user(guest):
             for_user = ['me', guest]          # форма по команде гостя — её кнопки доступны и ему (если классу разрешены формы)
 
+        styles = {str(k): normalize_style(v) for k, v in (styles or {}).items()}
         confirm_timeout = await self._inline_confirm_timeout()
-        media_ref = await self._bot_media(media) if media else None
+        # Медиа, которое бот ещё ни разу не загружал (первый показ, большой файл), не задерживает форму: она сразу
+        # появляется с лёгкой анимацией «загрузка…» (assets/loading.gif, ~9 КБ), а настоящий файл подменяет её,
+        # как только загрузится (_swap_form_media). Уже загруженное (file_id в кэше) показывается сразу.
+        media_ref, media_later = None, None
+        if media:
+            media_ref = await self._bot_media(media, lookup_only=True)
+            if media_ref is None:
+                placeholder = await self._loading_media()
+                if placeholder is not None:
+                    media_ref, media_later = placeholder, media
+                else:
+                    media_ref = await self._bot_media(media)
 
         # Пагинация (см. core/inline_forms.py) — считаем СРАЗУ,
         # чтобы отдать в pending_forms уже готовую (обрезанную по странице 0,
@@ -2363,7 +2680,7 @@ class Core:
         fut = loop.create_future()
         self._pending_forms[form_id] = {
             'future': fut, 'chat_id': chat_id, 'created_at': time.monotonic(),
-            'text': text, 'media': media_ref, 'buttons': rendered0,  # чтобы aiobot/bot.py мог сразу
+            'text': text, 'media': media_ref, 'buttons': rendered0, 'styles': styles,  # чтобы aiobot/bot.py мог сразу
                                                  # ответить на inline_query РЕАЛЬНЫМ
                                                  # (уже постранично нарезанным)
                                                  # содержимым формы, без лишнего
@@ -2396,9 +2713,9 @@ class Core:
                 )
             reply_id = resolve_form_reply(current_event.get(), chat_id, reply_to)
             if reply_id:
-                await results[0].click(reply_to=reply_id)      # форма — ответ на то же сообщение, что и команда
+                sent_msg = await results[0].click(reply_to=reply_id)      # форма — ответ на то же сообщение, что и команда
             else:
-                await results[0].click()  # = SendInlineBotResultRequest, random_id генерится сам
+                sent_msg = await results[0].click()  # = SendInlineBotResultRequest, random_id генерится сам
 
             try:
                 inline_message_id = await asyncio.wait_for(fut, timeout=confirm_timeout)
@@ -2416,8 +2733,12 @@ class Core:
             for_user=for_user, black_list=black_list, timeout=timeout,
         )
         form.media = media_ref
+        form.styles = styles
+        form.message_id = getattr(sent_msg, 'id', None)    # для form.delete()
         self._active_forms[inline_message_id] = form
         form._init_state(text, buttons, pages)
+        if media_later is not None:
+            form._media_task = asyncio.ensure_future(self._swap_form_media(form, media_later))
 
         if not buttons:
             # aiobot/bot.py ответил на inline_query с ПЛЕЙСХОЛДЕР-кнопкой
@@ -2431,7 +2752,7 @@ class Core:
 
     _PHOTO_EXT = ('.jpg', '.jpeg', '.png', '.webp')
 
-    async def _bot_media(self, media):
+    async def _bot_media(self, media, lookup_only=False):
         """путь / ссылка / file_id → {'kind': 'animation'|'photo', 'file_id': ...} для инлайн-формы.
         Bot API отдаёт инлайн-результат с медиа только по file_id, поэтому файл один раз отправляется ботом владельцу
         и сразу удаляется; file_id кэшируется в БД (ключ — путь+размер+время изменения или сама ссылка)."""
@@ -2454,6 +2775,8 @@ class Core:
         cache = await self.db.get('core:form_media', {}) or {}
         if key in cache:
             return {'kind': cache[key][0], 'file_id': cache[key][1]}
+        if lookup_only:                                  # ещё не загружали — вызывающий покажет заглушку «загрузка…»
+            return None
         bot = self._aiogram_bot
         file = URLInputFile(src) if is_url else FSInputFile(src)
 
@@ -2482,13 +2805,150 @@ class Core:
         await self.db.set('core:form_media', cache)
         return {'kind': kind, 'file_id': file_id}
 
+    async def _loading_media(self):
+        """file_id заглушки «загрузка…» (assets/loading.gif — можно подменить своим user/assets/loading.gif) или None."""
+        try:
+            return await self._bot_media(str(self.asset_path('loading.gif')))
+        except Exception as e:
+            self.tlog(f"[core] заглушка «загрузка…» недоступна: {e}")
+            return None
+
+    async def _swap_form_media(self, form, media):
+        """Загружает настоящее медиа формы и меняет им заглушку «загрузка…» (текст, кнопки и страница — текущие)."""
+        from aiogram.types import InputMediaAnimation, InputMediaPhoto
+        try:
+            real = await self._bot_media(media)
+        except Exception as e:
+            self.tlog(f"[core] медиа формы не загрузилось: {e}")
+            try:
+                await self._inline_edit(form.inline_message_id, (form.text or '') + "\n\n<i>медиа не загрузилось</i>",
+                                        render_page_rows(form._pages, form.page, len(form._pages)), form.media, styles=form.styles)
+            except Exception:
+                pass
+            return
+        if form._closed:
+            return
+        cls = InputMediaPhoto if real['kind'] == 'photo' else InputMediaAnimation
+        rows = render_page_rows(form._pages, form.page, len(form._pages))
+        markup = self._build_markup(rows, form.styles) if rows else None
+        for attempt in range(3):
+            try:
+                await self._aiogram_bot.edit_message_media(
+                    inline_message_id=form.inline_message_id, reply_markup=markup,
+                    media=cls(media=real['file_id'], caption=_caption(form.text) or None, parse_mode='HTML'))
+                form.media = real
+                return
+            except Exception as e:
+                if 'not modified' in str(e).lower():
+                    form.media = real
+                    return
+                if attempt == 2:
+                    self.tlog(f"[core] не удалось заменить «загрузка…» медиа формы: {e}")
+                    return
+                await asyncio.sleep(1.0 + attempt)
+
+    # ------------------------------------------------------------------ #
+    # @bot.inline_query / @bot.inline_click / @bot.start_link — core/inline_results.py
+    # ------------------------------------------------------------------ #
+
+    InlineResult = InlineResult
+
+    async def dispatch_inline_query(self, iq):
+        """Инлайн-запрос «@бот имя аргументы»: если имя принадлежит @bot.inline_query — результаты aiogram, иначе None."""
+        q = (iq.query or '').strip()
+        if not q or not self.bot_inline_query_map:
+            return None
+        name, _, rest = q.partition(' ')
+        entry = self.bot_inline_query_map.get(name.lower())
+        if entry is None:
+            return None
+        module_name, func, access, for_user, for_chat, black_list, black_chats = entry
+        user_id = iq.from_user.id if iq.from_user else None
+        if not self._bot_extended_access_ok(access, for_user, for_chat, black_list, black_chats, user_id, None):
+            return []
+        event = InlineQueryEvent(iq, name.lower(), rest.strip())
+        gtoken = current_guest.set(None if user_id == self._owner_id else user_id)
+        try:
+            results = await self._safe_call(module_name, func, event)
+        finally:
+            current_guest.reset(gtoken)
+        results = [InlineResult(**r) if isinstance(r, dict) else r for r in (results or [])[:50] if r is not None]
+        chosen = self.__dict__.setdefault('_iq_chosen', {})
+        now = time.monotonic()
+        for k in [k for k, v in chosen.items() if now - v[2] > 600]:
+            chosen.pop(k, None)
+        for r in results:
+            if r.on_chosen is not None:
+                chosen[r.id] = (module_name, r.on_chosen, now)
+        return [self._aiogram_inline_result(r) for r in results]
+
+    async def dispatch_inline_chosen(self, result_id, inline_message_id):
+        """Результат @bot.inline_query отправлен в чат — его on_chosen. True — это был он."""
+        entry = self.__dict__.get('_iq_chosen', {}).pop(result_id, None)
+        if entry is None:
+            return False
+        await self._safe_call(entry[0], entry[1], inline_message_id)
+        return True
+
+    def _aiogram_inline_result(self, r):
+        from aiogram.types import InlineQueryResultArticle, InlineQueryResultPhoto, InputTextMessageContent
+        if isinstance(r, dict):
+            r = InlineResult(**r)
+        markup = self._build_markup(r.buttons, r.styles) if r.buttons else None
+        if r.photo:
+            return InlineQueryResultPhoto(id=r.id, photo_url=r.photo, thumbnail_url=r.thumb or r.photo, title=r.title,
+                                          description=r.description, caption=_caption(r.text or '') or None,
+                                          parse_mode='HTML', reply_markup=markup)
+        kw = {}
+        lp = link_preview_options(r.link_preview)
+        if lp is not None:
+            kw['link_preview_options'] = lp
+        return InlineQueryResultArticle(
+            id=r.id, title=r.title, description=r.description, thumbnail_url=r.thumb or None, reply_markup=markup,
+            input_message_content=InputTextMessageContent(message_text=(r.text or r.title)[:4096], parse_mode='HTML', **kw))
+
+    async def _dispatch_module_inline_click(self, callback_query):
+        """Кнопка под сообщением @bot.inline_query. True — обработано модулем."""
+        data = callback_query.data or ''
+        for module_name, prefix, func, access in list(self.bot_inline_clicks):
+            if not data.startswith(prefix):
+                continue
+            click = InlineQueryClick(self, callback_query)
+            if not self._bot_access_ok(access, click.user_id):
+                await click.answer("Эта кнопка не для вас", show_alert=True)
+                return True
+            await self._click_bucket.acquire()
+            gtoken = current_guest.set(None if click.user_id == self._owner_id else click.user_id)
+            try:
+                await self._safe_call(module_name, func, click)
+            finally:
+                current_guest.reset(gtoken)
+            await click.answer()
+            return True
+        return False
+
+    async def dispatch_start_link(self, message, payload):
+        """/start <payload> у бота: модуль с @bot.start_link(prefix). True — обработано."""
+        from .bot_events import BotMessageEvent
+        for module_name, prefix, func in list(self.bot_start_links):
+            if payload.startswith(prefix):
+                await self._safe_call(module_name, func, BotMessageEvent(message, self), payload[len(prefix):])
+                return True
+        return False
+
+    @staticmethod
+    def progress_bar(percent, width=10, style='block', show_percent=False, brackets=False):
+        """СИНХРОННО: полоска прогресса текстом — см. visual.progress_bar (17 стилей: block, smooth, bar, frx, …)."""
+        from .visual import progress_bar
+        return progress_bar(percent, width, style, show_percent, brackets)
+
     def get_pending_form(self, form_id):
         """Вызывается ботом на inline_query — отдаёт (text, buttons), которые нужно показать сразу."""
         return self._pending_forms.get(form_id)
 
-    def build_inline_markup(self, buttons):
+    def build_inline_markup(self, buttons, styles=None):
         """Публичная обёртка над _build_markup() — вызывается ботом при ответе на inline_query."""
-        return self._build_markup(buttons)
+        return self._build_markup(buttons, styles)
 
     def set_inline_click_rate(self, rate):
         """Обновляет лимит обработки кликов инлайн-форм (кликов/сек)."""
@@ -2620,18 +3080,19 @@ class Core:
         )
         return [buttons] if is_flat_single_row else buttons
 
-    def _build_markup(self, buttons):
+    def _build_markup(self, buttons, styles=None):
         """
         Принимает buttons в двух форматах:
           - список РЯДОВ, каждый ряд — список кнопок:
                 [[("Ок", "ok")], [("Да", "yes"), ("Нет", "no")]]
           - один ряд без внешней обёртки (шорткат для формы с одной строкой кнопок):
                 [("Ок", "ok"), ("Да", "yes")]
-        Каждая кнопка — либо двухэлементный (text, callback_data) —
-        обычная callback-кнопка, либо InputButton(text, data, hint=...) —
+        Каждая кнопка — (text, callback_data), (text, callback_data, style),
+        {'text', 'data', 'style'} или InputButton(text, data, hint=..., style=...) —
         кнопка "Введите значение" (core/inline_forms.py, см. docstring
-        InputButton и README «Инлайн-формы») — оба вида можно свободно
-        мешать в одном ряду/форме.
+        InputButton и README «Инлайн-формы»). Все виды можно свободно мешать.
+        style — цвет кнопки: 'primary' (синий), 'success' (зелёный), 'danger' (красный);
+        styles — {callback_data: style} на всю форму (create_inlineform(styles=...)).
         """
         if not buttons:
             return None
@@ -2639,34 +3100,38 @@ class Core:
 
         rows = self._normalize_button_rows(buttons)
 
+        def make(style, **kw):
+            if style:
+                try:
+                    return InlineKeyboardButton(style=style, **kw)
+                except Exception:                 # старый aiogram (< 3.25) не знает style — кнопка без цвета
+                    pass
+            return InlineKeyboardButton(**kw)
+
         keyboard = []
         for row in rows:
             keyboard_row = []
             for btn in row:
-                if isinstance(btn, InputButton):
-                    keyboard_row.append(InlineKeyboardButton(
-                        text=btn.text, switch_inline_query_current_chat=btn.hint,
-                    ))
-                    continue
-                try:
-                    btn_text, btn_data = btn
-                except (ValueError, TypeError) as e:
+                b = parse_button(btn, styles)
+                if b is None:
                     raise ValueError(
                         "Некорректный формат buttons для create_inlineform()/form.edit() — "
-                        "ожидается список рядов, каждый ряд — список (text, data) или "
+                        "ожидается список рядов, каждый ряд — список (text, data), (text, data, style) или "
                         "InputButton(text, data, hint=...): "
-                        "buttons=[[('Ок', 'ok')], [InputButton('✏️ Значение', 'val')]], "
-                        "либо один ряд без вложенности: buttons=[('Ок', 'ok'), ('Отмена', 'cancel')]"
-                    ) from e
-                if isinstance(btn_data, str) and btn_data.startswith(('url:http://', 'url:https://', 'url:tg://')):
-                    keyboard_row.append(InlineKeyboardButton(text=btn_text, url=btn_data[4:]))   # кнопка-ссылка
-                    continue
-                keyboard_row.append(InlineKeyboardButton(text=btn_text, callback_data=btn_data))
+                        "buttons=[[('Ок', 'ok', 'success')], [InputButton('✏️ Значение', 'val')]], "
+                        "либо один ряд без вложенности: buttons=[('Ок', 'ok'), ('Отмена', 'cancel', 'danger')]"
+                    )
+                if b['kind'] == 'input':
+                    keyboard_row.append(make(b['style'], text=b['text'], switch_inline_query_current_chat=b.get('prefill') or ''))
+                elif b['kind'] == 'url':
+                    keyboard_row.append(make(b['style'], text=b['text'], url=b['url']))   # кнопка-ссылка
+                else:
+                    keyboard_row.append(make(b['style'], text=b['text'], callback_data=b['data']))
             keyboard.append(keyboard_row)
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-    async def _inline_edit(self, inline_message_id, text, buttons, media=None):
-        markup = self._build_markup(buttons) if buttons is not None else None
+    async def _inline_edit(self, inline_message_id, text, buttons, media=None, styles=None):
+        markup = self._build_markup(buttons, styles) if buttons is not None else None
         if text is not None and media:                      # форма с картинкой/анимацией — меняем подпись
             await self._aiogram_bot.edit_message_caption(
                 caption=_caption(text), inline_message_id=inline_message_id,
@@ -2743,7 +3208,7 @@ class Core:
                     continue
                 for user_id in self._resolve_input_targets(form, btn):
                     self._pending_inputs[user_id] = {
-                        'form': form, 'data': btn.data, 'chat_id': form.chat_id,
+                        'form': form, 'data': btn.data, 'chat_id': form.chat_id, 'hint': btn.hint, 'title': btn.text,
                         'created_at': time.monotonic(),
                     }
 
@@ -2903,6 +3368,8 @@ class Core:
         """
         inline_message_id = callback_query.inline_message_id
         form = self._active_forms.get(inline_message_id)
+        if form is None and await self._dispatch_module_inline_click(callback_query):
+            return
         if form is None or form._closed:
             try:
                 await callback_query.answer("Форма больше не активна", show_alert=True)

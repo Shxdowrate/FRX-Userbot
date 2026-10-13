@@ -109,7 +109,24 @@ _INLINE_FUNCTION_RESULT_PREFIX = "frx_inlinefunc:"
 
 @bot.command('start', access='public')
 async def cmd_start(message: types.Message):
-    """доступно всем, кто пишет боту."""
+    """доступно всем, кто пишет боту. /start web от владельца (ссылка t.me/<бот>?start=web) — актуальный адрес сайта."""
+    raw_payload = (message.text or '').partition(' ')[2].strip()
+    payload = raw_payload.lower()
+    core = _core_ref
+    if raw_payload and core is not None and payload != 'web':
+        try:
+            if await core.dispatch_start_link(message, raw_payload):     # @bot.start_link модулей
+                return
+        except Exception as e:
+            core.tlog(f"[bot] /start {raw_payload[:30]}: {e}")
+    if payload == 'web' and core is not None and message.from_user and _is_owner(message.from_user.id, core):
+        hook = getattr(getattr(core, 'web', None), 'start_hook', None)
+        if hook is not None:
+            try:
+                await hook()
+            except Exception as e:
+                await message.answer(visual_module.err("Сайт") + "\n" + visual_module.hint(str(e)[:300]))
+            return
     await message.answer(
         visual_module.ok("Стационарный бот FRX запущен") + "\n"
         + visual_module.hint("работает параллельно с юзерботом")
@@ -432,7 +449,7 @@ def create_bot(token: str, core=None):
         if pending_form is not None:
             text = pending_form['text']
             buttons = pending_form['buttons']
-            markup = core.build_inline_markup(buttons) if buttons else _PLACEHOLDER_MARKUP
+            markup = core.build_inline_markup(buttons, pending_form.get('styles')) if buttons else _PLACEHOLDER_MARKUP
 
             media = pending_form.get('media')
             if media:                                   # форма с картинкой/анимацией — текст становится подписью
@@ -456,14 +473,30 @@ def create_bot(token: str, core=None):
         pending_input = core.get_pending_input(user_id) if user_id is not None else None
         if pending_input is not None:
             value = iq.query or ""
+            hint = str(pending_input.get('hint') or '').strip()
+            if value:
+                title, descr = visual_module.btn("Отправить: ") + value[:60], hint or "значение уйдёт в форму"
+            else:
+                title = "✏️ " + (hint or "Введите значение")
+                descr = f"«{pending_input.get('title') or ''}» — наберите после @бота и нажмите сюда".strip()
             result = InlineQueryResultArticle(
                 id=f"{_INPUT_RESULT_PREFIX}{uuid.uuid4().hex}",
-                title=visual_module.btn("Отправить значение"),
-                description=value or "Наберите значение — оно уйдёт в форму",
+                title=title,
+                description=descr,
                 input_message_content=InputTextMessageContent(message_text=value or "…"),
             )
             # cache_time=0 — query меняется на каждое нажатие клавиши, кэш не нужен
             await iq.answer([result], cache_time=0, is_personal=True)
+            return
+
+        # @bot.inline_query модулей — настоящие инлайн-результаты (core/inline_results.py)
+        try:
+            module_results = await core.dispatch_inline_query(iq)
+        except Exception as e:
+            core.tlog(f"[bot] инлайн-запрос «{(iq.query or '')[:40]}»: {e}")
+            module_results = []
+        if module_results is not None:
+            await iq.answer(module_results, cache_time=0, is_personal=True)
             return
 
         # bot.inline_function() (core/bot_decorators.py) —
@@ -504,6 +537,8 @@ def create_bot(token: str, core=None):
             return
         if chosen.result_id.startswith(_INPUT_RESULT_PREFIX):
             await core.dispatch_inline_input(chosen)
+            return
+        if await core.dispatch_inline_chosen(chosen.result_id, chosen.inline_message_id):   # @bot.inline_query модулей
             return
         if chosen.inline_message_id is None:
             return

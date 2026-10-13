@@ -1,4 +1,6 @@
+# Ядро FRX — без этого не запустится. Ставится само при каждом старте, если чего-то не хватает (frx_deps.py).
 telethon>=1.36
-aiogram>=3.4,<4.0
+aiogram>=3.25,<4.0      # 3.25+: цветные кнопки (style)
 aiohttp>=3.9            # сайт .web, нейросети; aiogram и так тянет aiohttp
-imageio-ffmpeg>=0.5.1   # ffmpeg для кружков и голосовых в BotChat; не нужен, если ffmpeg уже есть в PATH
+Pillow>=10.0            # картинки: стикеры, цитаты, аватарки (`import media`)
+imageio-ffmpeg>=0.5.1; sys_platform != 'android'   # запасной ffmpeg (на Android не нужен), если своего нет (полный ffmpeg + ffprobe frx_deps.py скачает в user/data/bin)

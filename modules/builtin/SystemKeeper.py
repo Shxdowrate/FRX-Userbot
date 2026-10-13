@@ -133,7 +133,7 @@ async def _confirm_flow(event, text, on_confirm, on_cancel, yes, tag):
         form = await engine.create_inlineform(
             chat_id=event.chat_id,
             text=text,
-            buttons=[[(visual.btn("Подтвердить"), f"sk_{tag}_ok")], [(visual.btn("Отмена", "close"), f"sk_{tag}_no")]],
+            buttons=[[(visual.btn("Подтвердить"), f"sk_{tag}_ok", "success")], [(visual.btn("Отмена", "close"), f"sk_{tag}_no")]],
         )
     except Exception:
         await engine.answer(

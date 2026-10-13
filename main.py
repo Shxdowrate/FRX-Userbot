@@ -49,7 +49,8 @@ def _ask(prompt: str) -> str:
     try:
         return input(prompt).strip()
     except EOFError:
-        _config_error("[FRX] Нет консольного ввода (stdin закрыт) — первичный вход нужно выполнить в терминале.")
+        _config_error("[FRX] Нет консольного ввода (stdin закрыт) — первичный вход нужно выполнить в терминале"
+                      + (" (на Android — в приложении FRX)." if os.environ.get('FRX_ANDROID') else "."))
         return ''  # недостижимо
 
 
@@ -113,6 +114,10 @@ async def _shutdown(core: Core, work, bot):
     """Корректная остановка: задачи -> aiogram-бот -> все Telethon-клиенты. Идемпотентна."""
     global _STOPPING
     _STOPPING = True
+    try:                                        # модули прибирают за собой (голосовые чаты, свои серверы и потоки)
+        await core.run_unload_hooks()
+    except Exception:
+        pass
     if work is not None and not work.done():
         work.cancel()
         try:
@@ -329,8 +334,29 @@ if __name__ == '__main__':
         sys.exit(EXIT_NO_RETRY)
     from core import logs                    # метка времени «мм.дд чч:мм:сс» в терминале + буфер для вкладки «логи»
     logs.install()
+    # Свой запуск цикла вместо asyncio.run(): тот при выходе ждёт ВСЕ фоновые потоки (до 5 минут — например, зависший
+    # запрос в executor или потоки библиотек вроде py-tgcalls), и процесс «умирал» на перезапуске, не завершаясь.
+    # Всё нужное (клиенты, бот, сайт, модули) закрывает _shutdown() в main(), дальше — сразу выходим с кодом.
+    import traceback
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        sys.exit(asyncio.run(main()))
+        code = loop.run_until_complete(main())
     except KeyboardInterrupt:
         print("\n[FRX] Остановлено пользователем")
-        sys.exit(0)
+        code = 0
+    except SystemExit as e:
+        code = e.code
+    except BaseException:
+        traceback.print_exc()
+        code = 1
+    try:
+        loop.run_until_complete(asyncio.wait_for(loop.shutdown_asyncgens(), 3))
+    except BaseException:
+        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    os._exit(code if isinstance(code, int) else (0 if code is None else 1))

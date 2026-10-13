@@ -5,7 +5,9 @@ frx_setup.py — установка FRX на любую машину: серве
 Только стандартная библиотека Python.
 
 Шаги:
-    1. Виртуальное окружение .venv в папке проекта и зависимости из requirements.txt.
+    1. Виртуальное окружение .venv в папке проекта и всё, что нужно скачать (frx_deps.py): пакеты ядра
+       (requirements.txt) и модулей (requirements-modules.txt), ffmpeg, по желанию — Ollama с моделью.
+       Дальше это же проверяется при каждом запуске FRX и докачивается само.
     2. Первый вход в Telegram (если его ещё не было): api_id / api_hash, номер, код — прямо в этом окне.
        Юзербот запускается в режиме настройки (FRX_SETUP_ONLY=1) и сам останавливается после входа.
     3. Автозапуск (по желанию):
@@ -16,7 +18,7 @@ frx_setup.py — установка FRX на любую машину: серве
     4. Подсказка, как открыть сайт: .web в Telegram, SSH-туннель или публичный адрес (.web tunnel on).
 
 Ключи:
-    --yes          отвечать «да» на все вопросы (автозапуск включается)
+    --yes          отвечать «да» на все вопросы (автозапуск включается; Ollama не ставится — её: frx_deps.py --ollama yes)
     --no-service   не настраивать автозапуск
     --no-login     не запускать первый вход (например, сессию перенесли из бэкапа)
     --remove-service   убрать автозапуск, установленный раньше
@@ -89,12 +91,15 @@ def ensure_venv():
         sys.exit(1)
 
 
-def install_requirements():
-    say("    ставлю зависимости (requirements.txt) — это может занять пару минут…")
+def install_requirements(yes_all=False):
+    """Всё, что нужно скачать: пакеты ядра и модулей, ffmpeg, по желанию Ollama с моделью — см. frx_deps.py."""
+    say("    ставлю всё нужное: пакеты, ffmpeg, по желанию — локальную нейросеть. Первый раз — несколько минут…")
     run([VPY, '-m', 'pip', 'install', '--disable-pip-version-check', '-q', '--upgrade', 'pip'])
-    r = run([VPY, '-m', 'pip', 'install', '--disable-pip-version-check', '-r', ROOT / 'requirements.txt'])
+    cmd = [VPY, '-X', 'utf8', ROOT / 'frx_deps.py', '--force']
+    cmd += ['--ollama', 'no'] if yes_all else ['--ask']
+    r = run(cmd)
     if r.returncode != 0:
-        say("\n    pip завершился с ошибкой (см. выше). Частые причины: нет интернета, старый pip, "
+        say("\n    Основные пакеты не поставились (см. выше). Частые причины: нет интернета, старый pip, "
             "нет компилятора для какого-то пакета (Debian/Ubuntu: sudo apt install build-essential python3-dev).")
         sys.exit(1)
 
@@ -362,7 +367,7 @@ def main() -> int:
 
     step(1, "Окружение и зависимости")
     ensure_venv()
-    install_requirements()
+    install_requirements(args.yes)
     keeper.migrate_legacy_layout()
     keeper._apply_layout()
     keeper.ensure_user_layout()

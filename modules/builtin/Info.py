@@ -31,9 +31,9 @@ import accounts
 
 NAME = "Info"
 MODULE_NAME = "info"
-VERSION = "2.0"
+VERSION = "2.1"
 AUTHOR = "FRX"
-DESCRIPTION = "Полная информация о юзерботе и системе (.info) с анимацией; конфиденциальные сведения — по инлайн-кнопке"
+DESCRIPTION = "Полная информация о юзерботе и системе (.info) с анимацией; конфиденциальные сведения — по инлайн-кнопке; проверка окружения (.doctor)"
 
 _STARTED_AT = _time.monotonic()
 PRESETS = {'experience_1': ('experience', 'experience_1.mp4')}     # встроенные медиа (assets/…)
@@ -184,3 +184,106 @@ async def info_cmd(event):
     except Exception as e:
         await engine.answer(event, visual.err('Ошибка') + f"\n<code>{html.escape(str(e))}</code>")
         engine.tlog(f"Ошибка в .info: {e}")
+
+
+# --------------------------------------------------------------------------- #
+# .doctor — проверка окружения одной командой
+# --------------------------------------------------------------------------- #
+
+def _ver(pkg):
+    try:
+        from importlib.metadata import version
+        return version(pkg)
+    except Exception:
+        return None
+
+
+def _vtuple(v):
+    out = []
+    for part in str(v or '').split('.')[:3]:
+        num = ''.join(ch for ch in part if ch.isdigit())
+        out.append(int(num) if num else 0)
+    return tuple(out + [0] * (3 - len(out)))
+
+
+@decorators.command('doctor', 'doc')
+async def doctor_cmd(event):
+    """проверка окружения: Python и библиотеки, бот и инлайн-режим, keeper, сайт и публичный адрес, ffmpeg, ssh, место на диске"""
+    import shutil
+    import sys
+    await engine.answer(event, visual.wait("Проверяю окружение…"))
+    ok, warn, bad = visual.visual('status_success'), visual.visual('status_warning'), visual.visual('status_error')
+    lines = [visual.title("FRX · Doctor", sub="проверка окружения"), ""]
+    problems = 0
+
+    def row(state, label, text, fix=None):
+        nonlocal problems
+        if state != ok:
+            problems += 1
+        lines.append(f"{state} <b>{label}</b>  {text}")
+        if fix and state != ok:
+            lines.append(visual.item(f"<i>{fix}</i>", 1))
+
+    py = sys.version_info
+    row(ok if py >= (3, 10) else bad, "Python", f"<code>{py.major}.{py.minor}.{py.micro}</code>",
+        "нужен Python 3.10 или новее")
+    for pkg, need, why in (('telethon', (1, 36, 0), 'юзербот'), ('aiogram', (3, 25, 0), 'бот; 3.25+ — цветные кнопки'),
+                           ('aiohttp', (3, 9, 0), 'сайт и нейросети')):
+        v = _ver(pkg)
+        if v is None:
+            row(bad, pkg, "не установлен", f"pip install -r requirements.txt")
+        elif _vtuple(v) < need:
+            row(warn, pkg, f"<code>{v}</code> · {why}", f"обновите: pip install -U \"{pkg}>={'.'.join(map(str, need))}\"")
+        else:
+            row(ok, pkg, f"<code>{v}</code>")
+
+    try:
+        from core.media_tools import find_ffmpeg
+        ffmpeg = find_ffmpeg()
+    except Exception:
+        ffmpeg = shutil.which('ffmpeg')
+    row(ok if ffmpeg else warn, "ffmpeg", "есть" if ffmpeg else "нет",
+        "нужен для кружков, голосовых, стикеров и музыки — скачается сам при следующем запуске FRX (или при первом вызове)")
+
+    bot = getattr(engine, '_aiogram_bot', None)
+    if bot is None:
+        row(warn, "бот", "не запущен", "без бота нет инлайн-форм, BotChat и входа на сайт в один клик — Startup создаст его сам при перезапуске")
+    else:
+        try:
+            me = await bot.get_me()
+            inline = getattr(me, 'supports_inline_queries', None)
+            row(ok if inline is not False else bad, "бот", f"@{html.escape(me.username or '?')}" + ("" if inline is not False else " · инлайн-режим выключен"),
+                "включите инлайн-режим: /setinline в @BotFather (или .restart — Startup включит сам)")
+        except Exception as e:
+            row(bad, "бот", f"не отвечает: <code>{html.escape(str(e)[:120])}</code>", "проверьте aiogram_token в user/config.json")
+
+    keeper = os.environ.get('FRX_KEEPER') == '1'
+    row(ok if keeper else warn, "SystemKeeper", "работает" if keeper else "FRX запущен без keeper'а",
+        "запускайте через start.bat / start.sh — без keeper'а нет .restart, .update, публичного адреса и бэкапов")
+
+    web = getattr(engine, 'web', None)
+    if web is not None:
+        row(ok, "сайт", f"работает · порт <code>{web.port}</code>" if web.running else "выключен (.web — включить)")
+        if web.tunnel_wanted():
+            st = web.tunnel_state()
+            mode = web.tunnel_setup().get('mode') or 'auto'
+            if st.get('status') == 'up':
+                row(ok, "публичный адрес", f"<code>{html.escape(st.get('url', ''))}</code> · способ {html.escape(mode)}")
+            else:
+                row(warn, "публичный адрес", f"{html.escape(str(st.get('status') or 'нет'))} · способ {html.escape(mode)}",
+                    html.escape(str(st.get('error') or 'подождите — keeper пробует сам; .web tunnel setup — постоянный адрес')[:200]))
+    row(ok if shutil.which('ssh') else warn, "ssh", "есть" if shutil.which('ssh') else "нет",
+        "нужен для запасного публичного адреса (localhost.run): Windows — «Дополнительные компоненты» → OpenSSH Client")
+
+    try:
+        from core.paths import DATA_DIR
+        free = shutil.disk_usage(str(DATA_DIR)).free
+        gb = free / 1024 ** 3
+        row(ok if gb >= 1 else (warn if gb >= .2 else bad), "место на диске", f"<code>{gb:.1f} ГБ</code> свободно",
+            "освободите место: бэкапы — .sk, файлы — сайт → files")
+    except Exception:
+        pass
+
+    lines.append("")
+    lines.append(visual.ok("Всё в порядке") if not problems else visual.warn(f"<b>Замечаний: {problems}</b> — подсказки под строками"))
+    await engine.answer(event, "\n".join(lines))

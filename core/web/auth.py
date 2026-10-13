@@ -25,7 +25,7 @@ import secrets
 import time
 from urllib.parse import parse_qsl
 
-from ..paths import DATA_DIR
+from ..paths import DATA_DIR, atomic_write_text
 
 SESSIONS_FILE = DATA_DIR / 'web_sessions.json'
 COOKIE = 'frx_session'
@@ -36,6 +36,8 @@ RESEND_GAP = 30               # «прислать новый код» — не 
 RESENDS_PER_WINDOW = 3
 INITDATA_MAX_AGE = 24 * 3600
 DEFAULT_SESSION_DAYS = 30
+TICKET_TTL = 15 * 60          # ссылка «войти в один клик» из ЛС от бота
+HANDOFF_TTL = 90              # переезд открытой страницы на новый публичный адрес
 
 
 def _h(token: str) -> str:
@@ -67,10 +69,7 @@ class WebAuth:
 
     def _save(self):
         try:
-            SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = SESSIONS_FILE.with_suffix('.tmp')
-            tmp.write_text(json.dumps(self._sessions, ensure_ascii=False, indent=1), encoding='utf-8')
-            tmp.replace(SESSIONS_FILE)
+            atomic_write_text(SESSIONS_FILE, json.dumps(self._sessions, ensure_ascii=False, indent=1))
         except OSError as e:
             self.core.tlog(f"[web] не удалось сохранить сессии сайта: {e}")
 
@@ -204,6 +203,31 @@ class WebAuth:
         except Exception as e:
             self._code = None
             raise AuthError(f"Не удалось отправить код в Telegram: {e}", 503)
+
+    # ------------------------------------------------------------------ одноразовые билеты входа
+    # Билет — ссылка «войти в один клик»: https://адрес/#frx_t=<билет>. Выдаётся только владельцу:
+    #   • в ЛС от бота вместе с новой ссылкой на сайт (TICKET_TTL, один вход);
+    #   • уже открытой странице, когда сменился публичный адрес (HANDOFF_TTL) — она сама переезжает на новый адрес
+    #     и остаётся залогиненной. Билет живёт в памяти (не на диске) и сгорает после первого использования.
+    def issue_ticket(self, ttl: int = None, via: str = 'ссылка из Telegram') -> str:
+        now = time.time()
+        tickets = self.__dict__.setdefault('_tickets', {})
+        for k in [k for k, v in tickets.items() if now > v['until']]:
+            tickets.pop(k, None)
+        while len(tickets) > 20:                          # не копим: самые старые выбрасываем
+            tickets.pop(next(iter(tickets)))
+        token = secrets.token_urlsafe(24)
+        tickets[_h(token)] = {'until': now + (ttl or TICKET_TTL), 'via': via}
+        return token
+
+    def use_ticket(self, token: str):
+        """Возвращает via билета (и сжигает его) или None, если билета нет / истёк / уже использован."""
+        if not token or len(token) > 100:
+            return None
+        t = self.__dict__.setdefault('_tickets', {}).pop(_h(str(token)), None)
+        if not t or time.time() > t['until']:
+            return None
+        return t['via']
 
     # ------------------------------------------------------------------ Telegram Mini App
     def verify_init_data(self, init_data: str) -> int:

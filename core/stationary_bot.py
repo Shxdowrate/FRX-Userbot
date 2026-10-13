@@ -24,6 +24,15 @@ engine.answer/engine.send_message в core/engine.py).
 from pathlib import Path
 
 _PHOTO_EXT = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+PLACEHOLDER_MIN_BYTES = 512 * 1024      # файлы больше — сначала уходят заглушкой «загрузка…»
+
+
+def _big_local(path) -> bool:
+    try:
+        p = Path(str(path))
+        return p.is_file() and p.stat().st_size >= PLACEHOLDER_MIN_BYTES
+    except (OSError, ValueError):
+        return False
 
 
 class BotFacade:
@@ -67,6 +76,11 @@ class BotFacade:
                 chat_id, text, reply_markup=markup, reply_to_message_id=reply_to,
             )
         input_file, path_hint = await self._resolve_input_file(file)
+        # большой файл: сначала мгновенно — анимация «загрузка…» (assets/loading.gif), потом она меняется на файл
+        if _big_local(path_hint):
+            msg = await self._with_placeholder(chat_id, text, input_file, path_hint, markup, reply_to)
+            if msg is not None:
+                return msg
         # файлы грузятся с запасом по времени — стандартные 60 с у aiogram обрывали бэкапы и тяжёлые файлы
         if Path(path_hint).suffix.lower() in _PHOTO_EXT:
             return await self.raw.send_photo(
@@ -77,6 +91,27 @@ class BotFacade:
             chat_id, document=input_file, caption=text,
             reply_markup=markup, reply_to_message_id=reply_to, request_timeout=600,
         )
+
+    async def _with_placeholder(self, chat_id, text, input_file, path_hint, markup, reply_to):
+        """Заглушка «загрузка…» → настоящий файл правкой того же сообщения. None — заглушки нет (отправит как обычно)."""
+        from aiogram.types import InputMediaDocument, InputMediaPhoto
+        ph = await self._core._loading_media()
+        if ph is None:
+            return None
+        msg = await self.raw.send_animation(chat_id, animation=ph['file_id'], caption=text, reply_markup=markup,
+                                            reply_to_message_id=reply_to)
+        is_photo = Path(path_hint).suffix.lower() in _PHOTO_EXT - {'.gif'}
+        media = (InputMediaPhoto if is_photo else InputMediaDocument)(media=input_file, caption=text)
+        try:
+            return await self.raw.edit_message_media(media=media, chat_id=chat_id, message_id=msg.message_id,
+                                                     reply_markup=markup, request_timeout=600)
+        except Exception as e:
+            self._core.tlog(f"[bot] файл вместо «загрузка…» не встал ({e}) — отправляю отдельно")
+            try:
+                await self.raw.delete_message(chat_id, msg.message_id)
+            except Exception:
+                pass
+            return None
 
     async def reply(self, message, text, file=None, buttons=None):
         """Отвечает на message (aiogram.types.Message)."""

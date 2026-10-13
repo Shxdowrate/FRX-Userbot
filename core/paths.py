@@ -87,3 +87,23 @@ def display(path) -> str:
     except (OSError, ValueError):
         pass
     return p.as_posix()
+
+
+def atomic_write_text(path, text: str, encoding: str = 'utf-8') -> None:
+    """Пишет файл целиком или никак: во временный файл рядом, затем os.replace. На Windows replace иногда
+    падает с «Отказано в доступе» (файл на миг держат антивирус / индексатор) — тогда несколько повторов."""
+    import time as _time
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + '.tmp')
+    tmp.write_text(text, encoding=encoding)
+    delay = 0.02
+    for i in range(8):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if i == 7:
+                raise
+            _time.sleep(delay)
+            delay = min(delay * 2, 0.5)

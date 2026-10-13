@@ -174,6 +174,9 @@
   function wheel(e) {
     if (RM.matches || e.ctrlKey || e.defaultPrevented || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
     if (document.querySelector('.veil')) return;                  // открыто окно — обычная прокрутка
+    // рабочие поверхности (Lab, WebIDE, BotChat, Emulate, Sandbox) — обычная прокрутка: там раскладка меняется на ходу
+    // (поля растут, блоки перерисовываются), браузер подправляет позицию, и плавная прокрутка «боролась» с ним
+    if (document.querySelector('#app ' + SKIP.split(', ').filter((x) => x !== '.hd' && x !== '.veil').join(', #app '))) return;
     let dy = e.deltaY * (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? window.innerHeight : 1);
     if (scrollable(e.target, dy)) return;
     const max = document.documentElement.scrollHeight - window.innerHeight;
@@ -183,11 +186,14 @@
     target = clamp(target + dy, 0, max);
     if (!wheeling) { wheeling = true; requestAnimationFrame(step); }
   }
+  let lastSet = null;
   function step() {
+    // позицию сдвинул кто-то другой (браузер удержал контент при перестройке, якорь, клавиатура) — не тянем назад
+    if (lastSet !== null && Math.abs(window.scrollY - lastSet) > 3) { cur = window.scrollY; target = cur + (target - lastSet); }
     cur += (target - cur) * .13;
     if (Math.abs(target - cur) < .4) cur = target;
-    ownScroll = true; window.scrollTo(0, cur);
-    if (cur !== target) requestAnimationFrame(step); else wheeling = false;
+    ownScroll = true; window.scrollTo(0, cur); lastSet = Math.round(window.scrollY);
+    if (cur !== target) requestAnimationFrame(step); else { wheeling = false; lastSet = null; }
   }
   window.addEventListener('wheel', wheel, { passive: false });
   window.addEventListener('scroll', () => {

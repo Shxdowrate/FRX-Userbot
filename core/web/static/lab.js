@@ -7,7 +7,7 @@
 const LAB_OPS = [['==', 'равно'], ['!=', 'не равно'], ['>', 'больше'], ['<', 'меньше'], ['>=', 'не меньше'], ['<=', 'не больше'], ['in', 'содержит'], ['not in', 'не содержит'],
   ['starts', 'начинается с'], ['ends', 'заканчивается на'], ['regex', 'подходит под regex'], ['empty', 'пусто'], ['filled', 'не пусто'], ['isnum', 'это число']];
 const LAB_UNARY = ['empty', 'filled', 'isnum'];
-const LAB_CFG_TYPES = [['str', 'текст'], ['int', 'целое число'], ['float', 'дробное число'], ['bool', 'да / нет'], ['list', 'список'], ['choice', 'выбор одного'], ['choices', 'выбор нескольких']];
+const LAB_CFG_TYPES = [['str', 'текст'], ['int', 'целое число'], ['float', 'дробное число'], ['bool', 'да / нет'], ['list', 'список'], ['choice', 'выбор одного'], ['choices', 'выбор нескольких'], ['link', 'ссылка']];
 const LAB_CLIP = { block: null };
 
 function labClone(x) { return JSON.parse(JSON.stringify(x)); }
@@ -75,6 +75,177 @@ function labInsertAt(el, text) {
   el.setRangeText(text, s, e, 'end');
   el.dispatchEvent(new Event('input', { bubbles: true }));
 }
+
+/* ---------- форматирование текста сообщений: выделил — плашка над полем ----------
+   Текст сообщений — HTML Telegram, поэтому кнопки оборачивают выделенное в теги (<b>, <i>, <code>…). Повторное
+   нажатие на уже оформленном фрагменте снимает оформление. Горячие клавиши: Ctrl+B, I, U, E (код), Shift+X
+   (зачёркнутый), Shift+S (спойлер), K (ссылка). */
+const LAB_FMT = [
+  { k: 'b', label: 'Ж', title: 'жирный · Ctrl+B', open: '<b>', close: '</b>', cls: 'f-b', key: 'b' },
+  { k: 'i', label: 'К', title: 'курсив · Ctrl+I', open: '<i>', close: '</i>', cls: 'f-i', key: 'i' },
+  { k: 'u', label: 'Ч', title: 'подчёркнутый · Ctrl+U', open: '<u>', close: '</u>', cls: 'f-u', key: 'u' },
+  { k: 's', label: 'З', title: 'зачёркнутый · Ctrl+Shift+X', open: '<s>', close: '</s>', cls: 'f-s', key: 'X', shift: true },
+  { k: 'code', label: '</>', title: 'код в строке · Ctrl+E', open: '<code>', close: '</code>', cls: 'f-code', key: 'e' },
+  { k: 'pre', label: '{ }', title: 'блок кода', open: '<pre>', close: '</pre>', cls: 'f-pre' },
+  { k: 'spoiler', label: '▒', title: 'спойлер · Ctrl+Shift+S', open: '<tg-spoiler>', close: '</tg-spoiler>', cls: 'f-sp', key: 'S', shift: true },
+  { k: 'quote', label: '❝', title: 'цитата', open: '<blockquote>', close: '</blockquote>', cls: 'f-q' },
+  { k: 'link', label: '🔗', title: 'ссылка · Ctrl+K', cls: 'f-a', key: 'k' },
+];
+let LAB_FMT_BAR = null;
+function labFmtOutside(e) {
+  if (!LAB_FMT_BAR || LAB_FMT_BAR.el.contains(e.target) || e.target === LAB_FMT_BAR.input || (LAB_FMT_BAR.anchor && LAB_FMT_BAR.anchor.contains(e.target))) return;
+  labFmtHide();
+}
+function labFmtHide() { document.removeEventListener('pointerdown', labFmtOutside, true); if (LAB_FMT_BAR) { LAB_FMT_BAR.el.classList.add('out'); const el = LAB_FMT_BAR.el; setTimeout(() => el.remove(), 160); LAB_FMT_BAR = null; } }
+const LAB_FMT_TAGS = 'b|i|u|s|code|pre|tg-spoiler|blockquote|a';
+// теги, вплотную окружающие выделение: «…<b><i>|мир|</i></b>…» → [{name, open, close}], от внутреннего к внешнему
+function labFmtAround(v, s, e) {
+  const before = v.slice(0, s), after = v.slice(e);
+  const opens = (before.match(new RegExp(`(?:<(?:${LAB_FMT_TAGS})(?:\\s[^>]*)?>)+$`, 'i')) || [''])[0].match(/<[^>]+>/g) || [];
+  const closes = (after.match(new RegExp(`^(?:</(?:${LAB_FMT_TAGS})>)+`, 'i')) || [''])[0].match(/<[^>]+>/g) || [];
+  const out = [];
+  let ob = s, ca = e;
+  for (let i = 0; i < Math.min(opens.length, closes.length); i++) {
+    const o = opens[opens.length - 1 - i], c = closes[i];
+    const name = o.match(/^<([\w-]+)/)[1].toLowerCase();
+    if (c.toLowerCase() !== `</${name}>`) break;
+    ob -= o.length;
+    out.push({ name, open: o, close: c, from: ob, to: ca + c.length });
+    ca += c.length;
+  }
+  return out;
+}
+function labFmtName(f) { return f.k === 'link' ? 'a' : f.k === 'spoiler' ? 'tg-spoiler' : f.k === 'quote' ? 'blockquote' : f.k; }
+function labFmtApply(el, f, href) {
+  if (el.selectionStart === el.selectionEnd && el._fsel && document.activeElement !== el) {     // телефон: выделение сбросилось при нажатии
+    const [a, b] = el._fsel;
+    if (b <= el.value.length) el.setSelectionRange(a, b);
+  }
+  const s = el.selectionStart, e = el.selectionEnd, v = el.value;
+  if (s === e) {                                          // ничего не выделено — вставляем пустые теги, курсор внутри
+    if (f.k === 'link') {
+      if (!href) return;
+      const open = `<a href="${href.replace(/"/g, '&quot;')}">`, word = 'ссылка';
+      el.setRangeText(open + word + '</a>', s, e, 'end');
+      el.setSelectionRange(s + open.length, s + open.length + word.length);
+    } else {
+      el.setRangeText(f.open + f.close, s, e, 'end');
+      el.setSelectionRange(s + f.open.length, s + f.open.length);
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.focus();
+    return;
+  }
+  const name = labFmtName(f);
+  const sel = v.slice(s, e);
+  const around = labFmtAround(v, s, e);
+  const hit = around.findIndex((t) => t.name === name);
+  if (hit >= 0) {                                         // уже оформлено этим тегом снаружи — снимаем именно его
+    const t = around[hit];
+    const inner = around.slice(0, hit);                   // теги внутри него остаются
+    const innerOpen = inner.map((x) => x.open).reverse().join(''), innerClose = inner.map((x) => x.close).join('');
+    el.setRangeText(innerOpen + sel + innerClose, t.from, t.to, 'end');
+    const ns = t.from + innerOpen.length;
+    el.setSelectionRange(ns, ns + sel.length);
+  } else if (new RegExp(`^<${name}(\\s[^>]*)?>[\\s\\S]*</${name}>$`, 'i').test(sel)) {   // выделили вместе с тегами
+    const inner = sel.replace(new RegExp(`^<${name}(\\s[^>]*)?>`, 'i'), '').replace(new RegExp(`</${name}>$`, 'i'), '');
+    el.setRangeText(inner, s, e, 'select');
+  } else {
+    if (f.k === 'link' && !href) return;
+    const open = f.k === 'link' ? `<a href="${href.replace(/"/g, '&quot;')}">` : f.open, close = f.k === 'link' ? '</a>' : f.close;
+    // не захватываем пробелы по краям — Telegram не любит «<b> текст </b>»
+    const lead = sel.match(/^\s*/)[0].length, trail = sel.match(/\s*$/)[0].length;
+    const core = sel.slice(lead, sel.length - trail);
+    if (!core) return;
+    el.setRangeText(sel.slice(0, lead) + open + core + close + sel.slice(sel.length - trail), s, e, 'end');
+    el.setSelectionRange(s + lead + open.length, s + lead + open.length + core.length);
+  }
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.focus();
+}
+function labFmtState(el) {                                                 // какие оформления уже на выделении
+  const on = new Set(labFmtAround(el.value, el.selectionStart, el.selectionEnd).map((t) => t.name));
+  return new Set(LAB_FMT.filter((f) => on.has(labFmtName(f))).map((f) => f.k));
+}
+function labFmtShow(el, x, y, anchor) {
+  // anchor — кнопка «Aa» у поля: плашка открывается всегда и не прячется, пока её не закроют
+  if (!anchor && !(LAB_FMT_BAR && LAB_FMT_BAR.pinned && LAB_FMT_BAR.input === el)
+      && (el.selectionStart === el.selectionEnd || document.activeElement !== el)) { labFmtHide(); return; }
+  const on = labFmtState(el);
+  if (LAB_FMT_BAR && LAB_FMT_BAR.input === el && (!anchor || LAB_FMT_BAR.anchor === anchor)) {
+    LAB_FMT_BAR.el.querySelectorAll('[data-k]').forEach((b) => b.classList.toggle('on', on.has(b.dataset.k)));
+  } else {
+    labFmtHide();
+    const bar = h('div', { class: 'lab-fmt glass', role: 'toolbar', 'aria-label': 'оформление текста' });
+    const linkBox = h('div', { class: 'lab-fmt-link', hidden: true });
+    const url = h('input', { class: 'lb-in', type: 'url', placeholder: 'https://…', spellcheck: 'false' });
+    const okLink = () => {
+      let u = url.value.trim();
+      if (u && !/^(https?:\/\/|tg:\/\/|mailto:)/i.test(u)) u = 'https://' + u;
+      if (u && !/^(https?:\/\/[^\s/]+\.[^\s]+|tg:\/\/\S+|mailto:\S+@\S+)$/i.test(u)) { url.classList.add('bad'); return; }
+      labFmtApply(el, LAB_FMT.find((f) => f.k === 'link'), u);
+      labFmtHide();
+    };
+    url.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); okLink(); } if (e.key === 'Escape') { e.preventDefault(); labFmtHide(); el.focus(); } });
+    url.addEventListener('input', () => url.classList.remove('bad'));
+    linkBox.append(url, h('button', { type: 'button', class: 'lab-fmt-b', onmousedown: (e) => e.preventDefault(), onclick: okLink }, 'ок'));
+    const btns = h('div', { class: 'lab-fmt-row' }, LAB_FMT.map((f) => h('button', {
+      type: 'button', class: 'lab-fmt-b ' + f.cls + (on.has(f.k) ? ' on' : ''), title: f.title, 'data-k': f.k,
+      onmousedown: (e) => e.preventDefault(),                              // не терять выделение в поле
+      onclick: () => {
+        if (f.k === 'link') {
+          if (labFmtState(el).has('link')) { labFmtApply(el, f); labFmtShow(el, undefined, undefined, LAB_FMT_BAR && LAB_FMT_BAR.pinned ? LAB_FMT_BAR.anchor : undefined); return; }
+          btns.hidden = true; linkBox.hidden = false; url.value = ''; url.focus(); return;
+        }
+        labFmtApply(el, f); labFmtShow(el, undefined, undefined, LAB_FMT_BAR && LAB_FMT_BAR.pinned ? LAB_FMT_BAR.anchor : undefined);
+      },
+    }, f.label)), h('button', { type: 'button', class: 'lab-fmt-b f-clear', title: 'убрать всё оформление в выделенном', onmousedown: (e) => e.preventDefault(),
+      onclick: () => { const s0 = el.selectionStart, e0 = el.selectionEnd; const t = el.value.slice(s0, e0).replace(/<\/?(b|i|u|s|code|pre|tg-spoiler|blockquote|a)(\s[^>]*)?>/gi, ''); el.setRangeText(t, s0, e0, 'select'); el.dispatchEvent(new Event('input', { bubbles: true })); labFmtShow(el, undefined, undefined, LAB_FMT_BAR && LAB_FMT_BAR.pinned ? LAB_FMT_BAR.anchor : undefined); } }, '⌫'));
+    bar.append(btns, linkBox);
+    if (anchor) {
+      btns.append(h('button', { type: 'button', class: 'lab-fmt-b lab-fmt-x', title: 'закрыть', onmousedown: (e) => e.preventDefault(), onclick: () => labFmtHide() }, '✕'));
+      bar.append(h('div', { class: 'lab-fmt-tip' }, 'выделите текст и нажмите кнопку; без выделения — теги встанут у курсора'));
+    }
+    document.body.appendChild(bar);
+    LAB_FMT_BAR = { el: bar, input: el, pinned: !!anchor, anchor };
+    if (anchor) setTimeout(() => document.addEventListener('pointerdown', labFmtOutside, true), 0);
+  }
+  if (anchor || (LAB_FMT_BAR.pinned && LAB_FMT_BAR.anchor)) {               // под кнопкой «Aa», справа налево
+    const a = (anchor || LAB_FMT_BAR.anchor).getBoundingClientRect(), bar = LAB_FMT_BAR.el, bw = bar.offsetWidth || 360, bh = bar.offsetHeight || 70;
+    let top = a.bottom + 6;
+    if (top + bh > window.innerHeight - 8) top = Math.max(8, a.top - bh - 6);
+    bar.style.left = Math.max(8, Math.min(a.right - bw, window.innerWidth - bw - 8)) + 'px'; bar.style.top = top + 'px';
+    return;
+  }
+  const bar = LAB_FMT_BAR.el, r = el.getBoundingClientRect(), bw = bar.offsetWidth || 340, bh = bar.offsetHeight || 40;
+  let left = (x !== undefined ? x : r.left + r.width / 2) - bw / 2;
+  left = Math.max(8, Math.min(left, window.innerWidth - bw - 8));
+  let top = (y !== undefined ? y - 14 : r.top) - bh - 6;
+  if (top < 8) top = r.bottom + 8;
+  bar.style.left = left + 'px'; bar.style.top = top + 'px';
+}
+function labFormatBar(el) {
+  let mx, my;
+  const remember = () => { if (el.selectionStart !== el.selectionEnd) el._fsel = [el.selectionStart, el.selectionEnd]; };
+  ['select', 'keyup', 'mouseup', 'touchend', 'selectionchange'].forEach((ev) => el.addEventListener(ev, remember));
+  document.addEventListener('selectionchange', () => { if (document.activeElement === el) remember(); });
+  el.addEventListener('mouseup', (e) => { mx = e.clientX; my = e.clientY; setTimeout(() => labFmtShow(el, mx, my), 0); });
+  el.addEventListener('keyup', (e) => { if (e.shiftKey || e.key === 'Shift' || (e.ctrlKey && e.key.toLowerCase() === 'a')) labFmtShow(el); });
+  el.addEventListener('touchend', () => setTimeout(() => labFmtShow(el), 250));
+  el.addEventListener('select', () => labFmtShow(el, mx, my));
+  el.addEventListener('blur', () => setTimeout(() => { if (LAB_FMT_BAR && LAB_FMT_BAR.input === el && !LAB_FMT_BAR.pinned && !LAB_FMT_BAR.el.contains(document.activeElement)) labFmtHide(); }, 120));
+  el.addEventListener('input', () => { if (el.selectionStart === el.selectionEnd && !(LAB_FMT_BAR && LAB_FMT_BAR.pinned)) labFmtHide(); });
+  el.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    const f = LAB_FMT.find((x) => x.key && (x.shift ? e.shiftKey && e.key.toUpperCase() === x.key : !e.shiftKey && e.key.toLowerCase() === x.key));
+    if (!f || el.selectionStart === el.selectionEnd) return;
+    e.preventDefault();
+    if (f.k === 'link') { labFmtShow(el); const b = LAB_FMT_BAR && LAB_FMT_BAR.el.querySelector('[data-k="link"]'); if (b) b.click(); return; }
+    labFmtApply(el, f); labFmtShow(el, undefined, undefined, LAB_FMT_BAR && LAB_FMT_BAR.pinned ? LAB_FMT_BAR.anchor : undefined);
+  });
+}
+window.addEventListener('scroll', () => { if (LAB_FMT_BAR && !LAB_FMT_BAR.el.querySelector('.lab-fmt-link:not([hidden])')) labFmtHide(); }, true);
+window.addEventListener('hashchange', labFmtHide);
 
 /* ------------------------------------------------------------------ *
  * примеры проектов
@@ -237,7 +408,7 @@ async function labEditor(T, param) {
         vs.length ? h('div', { class: 'chips' }, vs.map((v) => h('span', { class: 'chip small' }, '{' + v + '}'))) : h('div', { class: 'wi-hint' }, 'переменных пока нет')));
     });
     parts.push(h('div', { class: 'wi-lab', style: 'margin-top:14px' }, 'Встроенные значения'),
-      h('div', { class: 'wi-hint' }, 'Пишутся как {@имя}; доступность зависит от скрипта.'),
+      h('div', { class: 'wi-hint' }, 'Пишутся как {@имя}; доступность зависит от скрипта. Значки FRX — {@visual:ключ} (кнопка «{ }» → visual). Текст сообщения можно оформить: выделите его — появится плашка (жирный, курсив, код, ссылка…).'),
       Object.entries(LAB_BUILTINS).map(([k, v]) => h('div', { class: 'lab-bi' }, h('code', {}, '{@' + k + '}'), h('span', { class: 'wi-hint' }, ' ' + v.desc + (v.ctx.length ? ' · ' + v.ctx.map((x) => ({ msg: 'сообщение', tg: 'событие чата', click: 'нажатие', input: 'ввод', err: 'ошибка', load: 'загрузка' }[x] || x)).join('/') : '')))));
     varsBox.replaceChildren(...parts);
   }
@@ -293,6 +464,8 @@ async function labEditor(T, param) {
     items.push(h('div', { class: 'lab-pk-h' }, 'Переменные'));
     if (vars.length) vars.forEach((v) => items.push(h('button', { type: 'button', class: 'lab-pk', onclick: () => add('{' + v + '}') }, h('code', {}, '{' + v + '}'))));
     else items.push(h('div', { class: 'wi-hint', style: 'padding:2px 10px' }, 'пока нет — создайте блоком «Задать»'));
+    items.push(h('button', { type: 'button', class: 'lab-pk lab-pk-visual', onclick: (e) => { e.stopPropagation(); openVisualPicker(anchor, input); } },
+      h('code', {}, 'visual'), h('span', { class: 'wi-hint' }, 'значки FRX — выбрать из списка'), h('span', { class: 'lab-pk-go' }, '›')));
     items.push(h('div', { class: 'lab-pk-h' }, 'Встроенные значения'));
     Object.entries(LAB_BUILTINS).filter(([, b]) => !b.ctx.length || b.ctx.some((x) => ctx.has(x))).forEach(([k, b]) =>
       items.push(h('button', { type: 'button', class: 'lab-pk', onclick: () => add('{@' + k + '}') }, h('code', {}, '{@' + k + '}'), h('span', { class: 'wi-hint' }, b.desc))));
@@ -309,6 +482,38 @@ async function labEditor(T, param) {
     setTimeout(() => document.addEventListener('mousedown', outsidePicker, true), 0);
   }
 
+  /* «{ } → visual»: сетка значков visual.visual(); вставляет {@visual:ключ} — в коде это visual.visual("ключ"),
+     так что значок сменится вместе с темой значков (visual_edit) */
+  async function openVisualPicker(anchor, input) {
+    const icons = await loadIcons();
+    const keys = Object.keys(icons);
+    closePicker();
+    const add = (k) => { closePicker(); labInsertAt(input, '{@visual:' + k + '}'); };
+    const grid = h('div', { class: 'lab-vis-grid' });
+    const q = h('input', { class: 'lb-in lab-vis-q', type: 'search', placeholder: 'поиск: ok, wait, back…', spellcheck: 'false' });
+    const draw = () => {
+      const t = q.value.trim().toLowerCase();
+      const list = keys.filter((k) => !t || k.toLowerCase().includes(t) || String(icons[k]).includes(t));
+      grid.replaceChildren(...(list.length ? list.map((k) => h('button', { type: 'button', class: 'lab-vis', title: '{@visual:' + k + '}', onclick: () => add(k) },
+        h('span', { class: 'lab-vis-i' }, icons[k]), h('span', { class: 'lab-vis-k' }, k))) : [h('div', { class: 'wi-hint', style: 'padding:6px 10px' }, keys.length ? 'ничего не найдено' : 'список значков не загрузился')]));
+    };
+    q.addEventListener('input', draw);
+    draw();
+    const head = h('div', { class: 'lab-pk-h lab-vis-h' }, h('button', { type: 'button', class: 'lb-x', title: 'назад', onclick: () => { closePicker(); const bid = input.closest('.lb') && input.closest('.lb').dataset.id; if (bid) openPicker(anchor, input, bid); } }, '‹'), 'visual — значки FRX');
+    const body = h('div', { class: 'lab-vis-box' }, q, grid);
+    if (mIsPhone()) {
+      const closeSheet = mSheet('Значки visual', body);
+      grid.addEventListener('click', (e) => { if (e.target.closest('.lab-vis')) closeSheet(); });
+      return;
+    }
+    pickerEl = h('div', { class: 'glass lab-picker lab-vis-picker' }, head, body);
+    document.body.appendChild(pickerEl);
+    const r = anchor.getBoundingClientRect();
+    pickerEl.style.left = Math.min(r.left, window.innerWidth - 340) + 'px';
+    pickerEl.style.top = Math.min(r.bottom + 4, window.innerHeight - 360) + 'px';
+    setTimeout(() => { document.addEventListener('mousedown', outsidePicker, true); q.focus(); }, 0);
+  }
+
   function autosize(ta) { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'; }
 
   function textField(b, f) {                                           // msg | val | num
@@ -318,6 +523,12 @@ async function labEditor(T, param) {
     inp.addEventListener('input', () => { b.f[f.k] = inp.value; if (multi) autosize(inp); fieldChanged(); });
     if (multi) requestAnimationFrame(() => autosize(inp));
     const pick = h('button', { type: 'button', class: 'lb-pick', title: 'вставить переменную или встроенное значение', onclick: () => openPicker(pick, inp, b.id) }, '{ }');
+    if (f.type === 'msg' && (!f.plain || f.fmt)) {                   // текст сообщения: выделил — плашка; или кнопка «Aa»
+      labFormatBar(inp);
+      const fmt = h('button', { type: 'button', class: 'lb-pick lb-fmt', title: 'оформление: жирный, курсив, код, ссылка…', onmousedown: (e) => e.preventDefault(),
+        onclick: () => { if (LAB_FMT_BAR && LAB_FMT_BAR.anchor === fmt) { labFmtHide(); return; } labFmtShow(inp, undefined, undefined, fmt); } }, 'Aa');
+      return h('span', { class: 'lb-f lb-textf' + (multi ? ' wide' : '') }, inp, fmt, pick);
+    }
     return h('span', { class: 'lb-f lb-textf' + (multi ? ' wide' : '') }, inp, pick);
   }
 
@@ -369,7 +580,7 @@ async function labEditor(T, param) {
       if (rows[sel[0]] === undefined) sel = [Math.max(0, rows.length - 1), 0];
       if (rows[sel[0]] && rows[sel[0]][sel[1]] === undefined) sel[1] = Math.max(0, rows[sel[0]].length - 1);
       kb.replaceChildren(...rows.map((row, ri) => h('div', { class: 'wi-tg-row' },
-        row.map((x, ci) => h('button', { type: 'button', class: 'wi-tg-btn' + (x.kind === 'input' ? ' inp' : '') + (sel[0] === ri && sel[1] === ci ? ' sel' : ''), onclick: () => { sel = [ri, ci]; draw(); } }, x.label || '…')),
+        row.map((x, ci) => h('button', { type: 'button', class: 'wi-tg-btn' + (x.kind === 'input' ? ' inp' : '') + (x.style ? ' st-' + x.style : '') + (sel[0] === ri && sel[1] === ci ? ' sel' : ''), onclick: () => { sel = [ri, ci]; draw(); } }, x.label || '…')),
         row.length < 6 ? h('button', { type: 'button', class: 'wi-tg-add', title: 'кнопка в этот ряд', onclick: () => { row.push({ label: 'Кнопка', data: 'btn' + (rows.flat().length + 1), kind: 'click' }); sel = [ri, row.length - 1]; draw(); fieldChanged(); } }, '+') : null)),
       rows.length < 8 ? h('button', { type: 'button', class: 'wi-tg-addrow', onclick: () => { rows.push([{ label: 'Кнопка', data: 'btn' + (rows.flat().length + 1), kind: 'click' }]); sel = [rows.length - 1, 0]; draw(); fieldChanged(); } }, '+ ряд') : null);
       const x = cur();
@@ -379,9 +590,11 @@ async function labEditor(T, param) {
       dat.addEventListener('input', () => { x.data = dat.value.trim(); fieldChanged(); });
       const kind = h('select', { class: 'lb-in lb-sel' }, [['click', 'обычная'], ['input', 'ввод значения']].map(([v, l]) => h('option', { value: v }, l)));
       kind.value = x.kind; kind.addEventListener('change', () => { x.kind = kind.value; draw(); fieldChanged(); });
+      const color = h('select', { class: 'lb-in lb-sel', title: 'цвет кнопки (Telegram)' }, [['', 'цвет: обычный'], ['primary', 'синяя'], ['success', 'зелёная'], ['danger', 'красная']].map(([v, l]) => h('option', { value: v }, l)));
+      color.value = x.style || ''; color.addEventListener('change', () => { if (color.value) x.style = color.value; else delete x.style; draw(); fieldChanged(); });
       const mv = (dc) => { const row = rows[sel[0]], t = sel[1] + dc; if (t < 0 || t >= row.length) return; [row[sel[1]], row[t]] = [row[t], row[sel[1]]]; sel[1] = t; draw(); fieldChanged(); };
       const del = () => { rows[sel[0]].splice(sel[1], 1); if (!rows[sel[0]].length) rows.splice(sel[0], 1); draw(); fieldChanged(); };
-      ed.replaceChildren(h('span', { class: 'lb-lab' }, 'текст'), lab, h('span', { class: 'lb-lab' }, 'callback data'), dat, kind,
+      ed.replaceChildren(h('span', { class: 'lb-lab' }, 'текст'), lab, h('span', { class: 'lb-lab' }, 'callback data'), dat, kind, color,
         h('button', { type: 'button', class: 'lb-x', title: 'левее', onclick: () => mv(-1) }, '←'), h('button', { type: 'button', class: 'lb-x', title: 'правее', onclick: () => mv(1) }, '→'),
         h('button', { type: 'button', class: 'lb-x', title: 'удалить кнопку', onclick: del }, '×'));
     };
@@ -413,6 +626,7 @@ async function labEditor(T, param) {
   async function loadIcons() {
     if (S.icons) return S.icons;
     try { S.icons = (await api('/webide/visual')).icons || {}; } catch (e) { S.icons = {}; }
+    LAB_ICON_KEYS = new Set(Object.keys(S.icons));
     return S.icons;
   }
   function iconField(b, f) {
@@ -1091,6 +1305,7 @@ async function labEditor(T, param) {
   renderScripts(); renderPalette(); setRtab('code'); recompile(true); updateTools();
 
   // черновик проекта у юзербота: переживает смену адреса сайта и другое устройство
+  loadIcons().then(() => { if (T === TOKEN) recompile(); }).catch(() => {});             // ключи visual для проверки {@visual:…}
   drafts = wiDraftKeeper({ key: 'lab:' + (isNew ? '__new__' : moduleId), base: baseHash, alive: () => T === TOKEN,
     isDirty: () => S.dirty, getData: () => ({ project }), label: 'проект Lab ' + (isNew ? '(новый)' : moduleId), copyText: null });
   const d = await drafts.load();

@@ -1,5 +1,5 @@
 /* ===================================================================== *
- * FRX web — режим «3D» (тест, переключатель «3d» в шапке; depth.js).
+ * FRX web — режим «FX» (переключатель «fx» в шапке; depth.js; до 1.0 назывался «3d»).
  * Мотив — ролик assets/experience/experience_1.mp4: хромированные заголовки со слэшем и счётчиком «03 / 08»,
  * панели в перспективе с огненной кромкой и бликом, наклон за курсором, страницы прилетают из глубины.
  * Всё живёт под html.d3 — без класса сайт выглядит как раньше. Рабочие поверхности (WebIDE, Lab, BotChat,
@@ -151,4 +151,131 @@
   .d3 #bg::before, .d3 .d3-ok .glass::after, .d3 .top h1::after { animation: none; }
   .d3 .d3-ok .glass:not(.wi-pop):not(.lab-picker) { transform: none; }
   .d3 .veil .glass, .d3 .enter .row { animation: none; }
+}
+
+
+/* ===================================================================== *
+ * FX: свет, нажатия, заставка (depth.js)
+ * ===================================================================== */
+
+/* ---------- кнопки проваливаются, из щели — свет ---------- */
+.d3 .btn, .d3 .chip, .d3 .wi-tg-btn, .d3 .lab-fmt-b {
+  transition: background .2s, border-color .2s, opacity .2s, filter .3s var(--ease),
+    transform .42s cubic-bezier(.2, 1.6, .4, 1), box-shadow .45s var(--ease);
+}
+.d3 .btn.fx-down:not(:disabled), .d3 .chip.fx-down, .d3 .wi-tg-btn.fx-down, .d3 .lab-fmt-b.fx-down {
+  transform: perspective(420px) translate3d(0, 1px, -28px);
+  transition: transform .09s cubic-bezier(.3, 0, .6, 1), box-shadow .12s, filter .12s, background .2s, border-color .2s;
+  filter: brightness(.74) saturate(1.15);
+  box-shadow:
+    inset 0 5px 14px rgba(0, 0, 0, .85), inset 0 0 0 1px rgba(0, 0, 0, .55),
+    0 0 0 1px rgba(255, 140, 60, .75),
+    0 0 10px 1px rgba(255, 110, 35, .85),
+    0 0 30px 6px rgba(255, 70, 20, .38),
+    0 0 70px 14px rgba(255, 50, 15, .12);
+}
+.d3 .btn.primary.fx-down { filter: brightness(.66) saturate(1.2); }
+.d3 .btn.fx-up, .d3 .chip.fx-up, .d3 .wi-tg-btn.fx-up, .d3 .lab-fmt-b.fx-up { animation: fxAfterglow .7s var(--ease); }
+@keyframes fxAfterglow {
+  0% { box-shadow: 0 0 0 1px rgba(255, 150, 70, .7), 0 0 16px 2px rgba(255, 110, 35, .7), 0 0 46px 12px rgba(255, 60, 20, .28); }
+}
+.d3 .btn.danger.fx-down { box-shadow: inset 0 5px 14px rgba(0, 0, 0, .85), 0 0 0 1px rgba(255, 110, 110, .75), 0 0 12px 1px rgba(255, 70, 70, .8), 0 0 32px 6px rgba(255, 40, 40, .32); }
+
+/* ---------- блик под курсором на панелях ---------- */
+.d3 .d3-ok .glass.fx-glare:not(.wi-pop):not(.lab-picker) {
+  background:
+    radial-gradient(520px circle at var(--gx, 50%) var(--gy, 50%), rgba(255, 130, 60, .075), transparent 62%),
+    linear-gradient(160deg, rgba(24, 22, 24, .92), rgba(10, 10, 12, .94));
+}
+
+/* ---------- FRX-свеча ---------- */
+.d3 .home { position: relative; isolation: isolate; --flame: 1; --flame-x: 0px; }
+.d3 .home::before {
+  content: ''; position: absolute; z-index: -1; pointer-events: none;
+  left: 50%; top: calc(clamp(10px, 5vh, 56px) - 60px); width: min(96vw, 860px); height: calc(clamp(64px, 12vw, 150px) + 120px);
+  transform: translateX(calc(-50% + var(--flame-x))) scale(calc(.82 + var(--flame) * .2));
+  background: radial-gradient(ellipse 50% 50% at 50% 55%, rgba(255, 110, 30, calc(var(--flame) * .2)), rgba(255, 60, 20, calc(var(--flame) * .07)) 45%, transparent 72%);
+  filter: blur(8px);
+}
+.d3 .home .word {
+  filter: drop-shadow(0 1px 0 #6b6b72) drop-shadow(0 2px 0 #4a4a50) drop-shadow(0 3px 0 #2c2c30) drop-shadow(0 14px 30px rgba(0, 0, 0, .9))
+    drop-shadow(var(--flame-x) 0 calc(var(--flame) * 46px) rgba(255, 90, 25, calc(var(--flame) * .42)))
+    drop-shadow(0 0 calc(var(--flame) * 14px) rgba(255, 170, 90, calc(var(--flame) * .25)));
+}
+.d3 .home .word::after { opacity: calc(.55 + var(--flame) * .45); box-shadow: 0 0 calc(var(--flame) * 28px) rgba(255, 70, 20, calc(var(--flame) * .85)); }
+.d3 .home .stat .num { text-shadow: 0 0 calc(var(--flame) * 26px) rgba(255, 90, 30, calc(var(--flame) * .32)); }
+
+/* ---------- заставка при входе ---------- */
+.fx-intro { position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center; pointer-events: auto; cursor: pointer; }
+.fx-intro::before { content: ''; position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 45%, #0c0907, #020203 70%); transition: opacity .6s var(--ease); }
+.fx-intro.out::before { opacity: 0; }
+.fx-intro.out { pointer-events: none; }
+.fx-intro > * { grid-area: 1 / 1; position: relative; }
+.fx-intro-line {
+  width: min(70vw, 620px); height: 2px; border-radius: 2px;
+  background: linear-gradient(90deg, transparent, #ff8a00 20%, #fff 50%, #ff8a00 80%, transparent);
+  box-shadow: 0 0 18px 2px rgba(255, 110, 30, .9), 0 0 60px 8px rgba(255, 60, 20, .45);
+  animation: fxiLine 1.05s cubic-bezier(.7, 0, .2, 1) both;
+}
+@keyframes fxiLine {
+  0% { transform: scaleX(0); opacity: 0; }
+  12% { opacity: 1; }
+  45% { transform: scaleX(1); opacity: 1; height: 2px; }
+  70% { transform: scaleX(1.08); height: 1px; opacity: .9; }
+  100% { transform: scaleX(1.3); height: 1px; opacity: 0; }
+}
+.fx-intro-word {
+  font-size: clamp(64px, 12vw, 150px); line-height: 1; letter-spacing: .08em; padding-left: .08em;
+  transform-origin: 50% 50%;
+  animation: fxiGlow 1.6s cubic-bezier(.2, .8, .2, 1) both .42s;
+}
+.fx-intro-word > span {
+  display: inline-block;
+  background: linear-gradient(180deg, #fff 0%, #f0f0f3 40%, #9d9da6 64%, #ececf0 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: fxiOpen 1.6s cubic-bezier(.2, .8, .2, 1) both .42s;
+}
+@keyframes fxiOpen {
+  0% { clip-path: inset(49% -10% 49% -10%); opacity: 0; transform: scale(1.06); }
+  10% { opacity: 1; }
+  38% { clip-path: inset(-20% -10% -20% -10%); transform: scale(1); }
+  100% { clip-path: inset(-20% -10% -20% -10%); transform: scale(1); }
+}
+@keyframes fxiGlow {
+  0% { filter: drop-shadow(0 0 40px rgba(255, 180, 90, 1)) brightness(2.4); }
+  38% { filter: drop-shadow(0 0 34px rgba(255, 120, 40, .95)) drop-shadow(0 0 90px rgba(255, 60, 20, .6)) brightness(1.5); }
+  52% { filter: drop-shadow(0 0 22px rgba(255, 110, 30, .6)) drop-shadow(0 0 70px rgba(255, 60, 20, .35)) brightness(1); }
+  60% { filter: drop-shadow(0 0 30px rgba(255, 120, 40, .8)) drop-shadow(0 0 80px rgba(255, 60, 20, .45)) brightness(1.2); }
+  100% { filter: drop-shadow(0 0 26px rgba(255, 110, 30, .7)) drop-shadow(0 0 70px rgba(255, 60, 20, .4)); }
+}
+.fx-intro-flare {
+  width: 60vmin; height: 60vmin; border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 240, 220, .9), rgba(255, 140, 50, .45) 18%, rgba(255, 60, 20, .12) 42%, transparent 66%);
+  mix-blend-mode: screen; animation: fxiFlare 1.4s cubic-bezier(.2, .8, .2, 1) both .5s;
+}
+@keyframes fxiFlare { 0% { transform: scale(.1, .02); opacity: 0; } 18% { opacity: 1; } 100% { transform: scale(1.9, .55); opacity: 0; } }
+.fx-intro-ring {
+  width: 30vmin; height: 30vmin; border-radius: 50%; border: 1px solid rgba(255, 140, 60, .7);
+  box-shadow: 0 0 30px rgba(255, 90, 30, .6), inset 0 0 30px rgba(255, 90, 30, .4);
+  animation: fxiRing 1.3s cubic-bezier(.1, .7, .2, 1) both .55s;
+}
+@keyframes fxiRing { 0% { transform: scale(.2); opacity: 0; } 15% { opacity: 1; } 100% { transform: scale(4.2); opacity: 0; } }
+.fx-intro.out .fx-intro-flare, .fx-intro.out .fx-intro-ring, .fx-intro.out .fx-intro-line { opacity: 0; transition: opacity .3s; }
+.fx-intro-on .home .word { opacity: 0; }
+.fx-intro-on .home > :not(.word), .fx-intro-on #app .shell > :not(.home), .fx-intro-on #nav { opacity: 0; }
+.fx-intro-reveal #nav { animation: fxiNav .9s var(--ease) both; }
+@keyframes fxiNav { from { opacity: 0; transform: translateY(-14px); } }
+.fx-intro-reveal .home > :not(.word), .fx-intro-reveal #app .shell > :not(.home) {
+  animation: d3rise .9s cubic-bezier(.16, .9, .2, 1) both;
+}
+.fx-intro-reveal .home > :nth-child(2) { animation-delay: .05s; }
+.fx-intro-reveal .home > :nth-child(3) { animation-delay: .12s; }
+.fx-intro-reveal .home > :nth-child(4) { animation-delay: .2s; }
+.fx-intro-reveal #app .shell > :not(.home) { animation-delay: .32s; }
+.fx-intro-reveal .home .word { animation: fxiLand .9s var(--ease) both; }
+@keyframes fxiLand { 0% { filter: brightness(1.8) drop-shadow(0 0 40px rgba(255, 120, 40, .9)); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .fx-intro { display: none; }
+  .d3 .btn.fx-down, .d3 .chip.fx-down { transform: none; }
 }

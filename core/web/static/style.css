@@ -72,7 +72,8 @@ a { color: inherit; text-decoration: none; }
   margin: 0 auto; padding: 26px 34px 60px;
   display: flex; flex-direction: column;
 }
-.shell.wide { max-width: min(1700px, 100%); padding-left: 28px; padding-right: 28px; }          /* Lab и редактор с Sandbox */
+.shell.wide { max-width: min(1700px, 100%); padding-left: 28px; padding-right: 28px; }
+.shell.full { max-width: 100%; padding-left: 24px; padding-right: 24px; }                   /* @web.app(width='full') — на весь экран */          /* Lab и редактор с Sandbox */
 .shell.leaving { position: absolute; left: 0; right: 0; top: 0; min-height: 0; pointer-events: none; }
 
 .top {
@@ -142,6 +143,10 @@ a { color: inherit; text-decoration: none; }
 .home .stat { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 64px; }
 .home .stat .num { font-size: 36px; line-height: 1.1; color: var(--ink); font-variant-numeric: tabular-nums; }
 .home .stat .num.small { font-size: 24px; line-height: 1.5; }
+.home .stat .num.botlink { font-size: 18px; line-height: 2; color: var(--acc-2); text-decoration: none; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; transition: opacity .2s; }
+.home .stat .num.botlink:hover { opacity: .75; text-decoration: underline; text-underline-offset: 4px; }
+.home .stat .num.muted { opacity: .55; font-size: 18px; line-height: 2; }
 .home .stat .lbl { font-size: 12px; color: var(--ink-3); }
 .home .dotnum { height: 40px; display: inline-flex; align-items: center; }
 .live { width: 12px; height: 12px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 0 rgba(216, 251, 228, .6); animation: live 2.2s ease-out infinite; }
@@ -567,3 +572,17 @@ html.is-loading-long #app > :not(.leaving) { opacity: .55; transition: opacity .
 #off .off-draft { max-width: 560px; font-size: 14px; line-height: 1.5; color: var(--ok); padding: 10px 14px; border: 1px solid rgba(120, 220, 150, .35); border-radius: 4px; }
 #off .off-draft.bad { color: #ffd28a; border-color: rgba(255, 210, 138, .45); }
 #off .off-act { display: flex; gap: 10px; justify-content: center; margin-top: 8px; }
+
+/* цветные кнопки инлайн-форм (style: primary / success / danger) */
+.emu-kb .btn.st-primary, .sb-kbtn.st-primary { background: rgba(46, 120, 230, .32); border-color: rgba(90, 160, 255, .45); color: #fff; }
+.emu-kb .btn.st-success, .sb-kbtn.st-success { background: rgba(40, 170, 90, .32); border-color: rgba(90, 220, 140, .45); color: #fff; }
+.emu-kb .btn.st-danger,  .sb-kbtn.st-danger  { background: rgba(220, 50, 50, .34); border-color: rgba(255, 110, 110, .45); color: #fff; }
+.emu-kb .btn.st-primary:hover, .sb-kbtn.st-primary:hover { background: rgba(46, 120, 230, .48); }
+.emu-kb .btn.st-success:hover, .sb-kbtn.st-success:hover { background: rgba(40, 170, 90, .48); }
+.emu-kb .btn.st-danger:hover,  .sb-kbtn.st-danger:hover  { background: rgba(220, 50, 50, .5); }
+
+/* конфиг-ссылка: подсветка, пока введённое не похоже на адрес */
+.field.link.bad { border-color: rgba(255, 110, 110, .6); box-shadow: 0 0 0 1px rgba(255, 110, 110, .25) inset; }
+
+/* переезд на новый публичный адрес (app.js: moveWatch) */
+body.moving { transition: opacity .35s var(--ease), filter .35s var(--ease); opacity: .45; filter: blur(2px); pointer-events: none; }

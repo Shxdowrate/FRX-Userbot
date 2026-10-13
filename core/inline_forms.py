@@ -147,8 +147,8 @@ def normalize_button_rows(buttons):
     if not buttons:
         return []
     first = buttons[0]
-    is_flat_single_row = isinstance(first, InputButton) or (
-        isinstance(first, (list, tuple)) and len(first) == 2
+    is_flat_single_row = isinstance(first, (InputButton, dict)) or (
+        isinstance(first, (list, tuple)) and len(first) in (2, 3)
         and isinstance(first[0], str) and isinstance(first[1], str)
     )
     return [list(buttons)] if is_flat_single_row else [list(row) for row in buttons]
@@ -240,6 +240,58 @@ def picker_page(items, page=0, per_page=PICKER_PAGE_SIZE, page_callback="pick_pa
     return rows, page, total
 
 
+# --------------------------------------------------------------------------
+# Цвет кнопок (Bot API: InlineKeyboardButton.style)
+# --------------------------------------------------------------------------
+
+BUTTON_STYLES = {
+    'primary': 'primary', 'blue': 'primary', 'синий': 'primary', 'синяя': 'primary',
+    'success': 'success', 'green': 'success', 'ok': 'success', 'зелёный': 'success', 'зеленый': 'success', 'зелёная': 'success',
+    'danger': 'danger', 'red': 'danger', 'error': 'danger', 'красный': 'danger', 'красная': 'danger',
+}
+
+
+def normalize_style(style):
+    """'primary' | 'success' | 'danger' (и синонимы: blue/green/red, по-русски) -> значение Bot API; иначе None."""
+    if not style:
+        return None
+    norm = BUTTON_STYLES.get(str(style).strip().lower())
+    if norm is None:
+        raise ValueError(f"Неизвестный цвет кнопки {style!r}: доступны 'primary' (синий), "
+                         f"'success' (зелёный), 'danger' (красный)")
+    return norm
+
+
+def parse_button(btn, styles=None):
+    """
+    Одна кнопка в любом поддерживаемом виде -> dict:
+        {'kind': 'input'|'url'|'callback', 'text', 'data', 'style', 'hint'?, 'url'?}
+    Форматы: (text, data) · (text, data, style) · {'text', 'data', 'style'} · InputButton(...).
+    styles — {callback_data: style} формы; цвет у самой кнопки важнее.
+    Возвращает None, если формат не распознан.
+    """
+    styles = styles or {}
+    if isinstance(btn, InputButton):
+        return {'kind': 'input', 'text': str(btn.text), 'data': str(btn.data), 'hint': btn.hint, 'prefill': btn.prefill,
+                'style': btn.style or styles.get(str(btn.data))}
+    if isinstance(btn, dict):
+        text, data, style = btn.get('text'), btn.get('data', btn.get('callback_data')), btn.get('style')
+        if btn.get('url'):
+            data = 'url:' + str(btn['url'])
+    elif isinstance(btn, (list, tuple)) and len(btn) in (2, 3):
+        text, data = btn[0], btn[1]
+        style = btn[2] if len(btn) == 3 else None
+    else:
+        return None
+    if text is None or data is None:
+        return None
+    data = str(data)
+    style = normalize_style(style) if style else styles.get(data)
+    if data.startswith(('url:http://', 'url:https://', 'url:tg://')):
+        return {'kind': 'url', 'text': str(text), 'data': data, 'url': data[4:], 'style': style}
+    return {'kind': 'callback', 'text': str(text), 'data': data, 'style': style}
+
+
 class TokenBucket:
     """Простой async token bucket — ограничивает N операций в секунду."""
 
@@ -274,22 +326,30 @@ class InputButton:
 
     text     — подпись кнопки.
     data     — ключ поля, фильтр в form.on_input(data=...).
-    hint     — подсказка, которой предзаполняется поле ввода пользователя
-               ("@botname <hint>"). По умолчанию "Enter value...".
+    hint     — подсказка: показывается в строке над клавиатурой, пока
+               пользователь набирает значение (поле ввода при этом ПУСТОЕ —
+               стирать ничего не нужно). По умолчанию "Введите значение".
+    prefill  — текст, которым всё же нужно предзаполнить поле
+               ("@botname <prefill>"), например текущее значение для правки.
+               По умолчанию пусто.
     for_user — переопределяет form.for_user именно для этой кнопки (кто
                может вводить значение); None (по умолчанию) — наследуется
                из формы. Правила ровно те же, что и у for_user формы,
                КРОМЕ отрицательных id (целые чаты) — тут они не
                поддерживаются, ожидание ввода всегда привязывается к
                конкретному user_id.
+    style    — цвет кнопки: 'primary' (синий), 'success' (зелёный),
+               'danger' (красный); None — обычная.
     """
-    __slots__ = ('text', 'data', 'hint', 'for_user')
+    __slots__ = ('text', 'data', 'hint', 'for_user', 'style', 'prefill')
 
-    def __init__(self, text, data, hint="Enter value...", for_user=None):
+    def __init__(self, text, data, hint="Введите значение", for_user=None, style=None, prefill=""):
         self.text = text
         self.data = data
         self.hint = hint
+        self.prefill = prefill or ""
         self.for_user = for_user
+        self.style = normalize_style(style)   # цвет кнопки: 'primary' | 'success' | 'danger'
 
 
 class InlineInput:
@@ -376,7 +436,10 @@ class InlineForm:
         self._raw_buttons = None       # buttons, как их передал разработчик (ДО разбивки на страницы)
         self._pages = [[]]             # [[ряды страницы 0], [ряды страницы 1], ...] — без служебного ряда навигации
         self.page = 0                  # индекс текущей отображаемой страницы
+        self.message_id = None         # id сообщения формы в чате (для form.delete())
         self.media = None              # {'kind', 'file_id'}, если форма с картинкой/анимацией (текст — подпись)
+        self.styles = {}               # {callback_data: 'primary'|'success'|'danger'} — цвет кнопок (create_inlineform(styles=...))
+        self._media_task = None        # загрузка настоящего медиа вместо заглушки «загрузка…» (Core._swap_form_media)
 
     # ------------------------------------------------------------------ #
     # Публичный API для модуля
@@ -416,7 +479,7 @@ class InlineForm:
             return func
         return deco
 
-    async def edit(self, text, buttons=None):
+    async def edit(self, text, buttons=None, styles=None):
         """
         Переписывает текст и/или клавиатуру формы. buttons=None — без кнопок.
         Если buttons содержит InputButton(...) — заново регистрирует
@@ -428,12 +491,18 @@ class InlineForm:
         модуля выше, MAX_BUTTONS_PER_PAGE) — движок сам режет их на
         страницы и показывает первую (page=0), добавляя служебный ряд
         навигации ◀/N/M/▶. Работает прозрачно — если кнопок немного,
-        поведение не отличается от версий до """
+        поведение не отличается от версий до
+
+        styles — цвет кнопок по их callback_data: {'del': 'danger', 'ok': 'success'};
+        None — оставить как было (при create_inlineform(styles=...)). Цвет можно задать
+        и у самой кнопки третьим элементом: ("Удалить", "del", "danger")."""
         if self._closed:
             raise RuntimeError(f"Форма '{self.form_id}' уже закрыта (form.close())")
+        if styles is not None:
+            self.styles = {str(k): normalize_style(v) for k, v in dict(styles).items()}
         pages, total_pages = paginate_button_rows(buttons or [])
         rendered = render_page_rows(pages, 0, total_pages)
-        await self._core._inline_edit(self.inline_message_id, text, rendered, self.media)
+        await self._core._inline_edit(self.inline_message_id, text, rendered, self.media, styles=self.styles)
         self.text = text
         self._raw_buttons = buttons
         self._pages = pages
@@ -465,14 +534,39 @@ class InlineForm:
             return
         self.page = new_page
         rendered = render_page_rows(self._pages, new_page, total_pages)
-        await self._core._inline_edit(self.inline_message_id, None, rendered)
+        await self._core._inline_edit(self.inline_message_id, None, rendered, styles=self.styles)
         self._core._register_input_targets(self, self._pages[new_page])
+
+    async def delete(self):
+        """
+        Закрывает форму и УДАЛЯЕТ её сообщение из чата целиком — это то, что
+        ждут от кнопки «Закрыть». Если удалить не вышло (нет прав, сообщение
+        старше 48 ч в группе без прав админа), сообщение просто остаётся без
+        кнопок. Безопасно вызывать повторно.
+        """
+        was_closed = self._closed
+        await self.close(remove_buttons=False)
+        if getattr(self, '_deleted', False):
+            return
+        self._deleted = True
+        msg_id = getattr(self, 'message_id', None)
+        if msg_id:
+            try:
+                await self._core.client.delete_messages(self.chat_id, [msg_id], revoke=True)
+                return
+            except Exception:
+                pass
+        if not was_closed:
+            try:
+                await self._core._inline_edit(self.inline_message_id, None, [])
+            except Exception:
+                pass
 
     async def close(self, remove_buttons=True):
         """
         Останавливает обработку кликов и вводов по форме (сообщение НЕ
-        удаляется). remove_buttons=True — дополнительно снимает клавиатуру.
-        Безопасно вызывать повторно.
+        удаляется — для этого form.delete()). remove_buttons=True —
+        дополнительно снимает клавиатуру. Безопасно вызывать повторно.
         """
         if self._closed:
             return

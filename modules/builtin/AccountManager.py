@@ -71,9 +71,9 @@ async def get_main_menu_buttons() -> list:
     button_text = visual.btn("Номера", "on") if show_phone else visual.btn("Номера", "off")
 
     return [
-        [(visual.btn("Добавить аккаунт"), "add_account_button")],
-        [(visual.btn("Переключить аккаунт"), "reset_account_button")],
-        [(visual.btn("Удалить аккаунт"), "delete_account_button")],
+        [(visual.btn("Добавить аккаунт"), "add_account_button", "success")],
+        [(visual.btn("Переключить аккаунт"), "reset_account_button", "primary")],
+        [(visual.btn("Удалить аккаунт"), "delete_account_button", "danger")],
         [(button_text, "show_hide_numbers_button")],
     ]
 
@@ -243,7 +243,7 @@ async def accounts_command(event):
         ])
         buttons = [
             [
-                (visual.btn("Да, удалить"), f"confirm_delete_{number}"),
+                (visual.btn("Да, удалить"), f"confirm_delete_{number}", "danger"),
                 (visual.btn("Отмена", "close"), "back_to_home_button"),
             ],
         ]
@@ -268,7 +268,7 @@ async def accounts_command(event):
             + visual.hint("введите номер в международном формате, например") + " <code>+79991234567</code>"
         )
         buttons = [
-            [engine.InputButton(visual.btn("Ввести номер"), "input_number", hint="")],
+            [engine.InputButton(visual.btn("Ввести номер"), "input_number", hint="номер телефона, +7…", style="primary")],
             [(visual.btn("Назад", "back"), "back_to_home_button")],
         ]
         await form.edit(text=text, buttons=buttons)
@@ -283,7 +283,7 @@ async def accounts_command(event):
             + visual.hint("введите номер в международном формате, например") + " <code>+79991234567</code>\n\n"
         )
         input_buttons = [
-            [engine.InputButton(visual.btn("Ввести номер"), "input_number", hint="")],
+            [engine.InputButton(visual.btn("Ввести номер"), "input_number", hint="номер телефона, +7…", style="primary")],
             [(visual.btn("Назад", "back"), "back_to_home_button")],
         ]
 
@@ -353,7 +353,7 @@ async def accounts_command(event):
         text += "\n" + visual.hint("введите код из Telegram")
 
         step_three_buttons = [
-            [engine.InputButton(visual.btn("Ввести код"), "input_code", hint="")],
+            [engine.InputButton(visual.btn("Ввести код"), "input_code", hint="код из Telegram", style="primary")],
             [(visual.btn("Назад", "back"), "back_to_home_button")],
         ]
         await cache.set("login_text", text)

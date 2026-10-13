@@ -19,6 +19,8 @@ modules/builtin/Web.py — команда .web: сайт управления FR
   .web login           только открыть вход и прислать новый код
   .web stop            выключить сайт
   .web tunnel on|off   включить / выключить публичный адрес;  .web tunnel new — получить новый адрес
+  .web tunnel setup    способ публичного адреса: без регистрации (меняется) или постоянный (localhost.run с ключом,
+                       свой домен в Cloudflare, Tailscale Funnel / свой адрес)
   .web logout          завершить все сессии сайта
 
 Кнопка «Сайт» в меню чата с ботом (у владельца) ведёт на публичный адрес и меняется сама вместе с ним (menu_button).
@@ -29,6 +31,7 @@ Emulate: command_timeout, hide_modules, history_limit, emulate_upload_mb.
 
 import asyncio
 import html
+import re
 import time
 
 import db
@@ -38,7 +41,7 @@ import visual
 
 NAME = "Web"
 MODULE_NAME = "web_panel"
-VERSION = "2.1"
+VERSION = "2.2"
 AUTHOR = "FRX"
 DESCRIPTION = "Сайт управления FRX: конфиги, модули (IDE, Emulate), аккаунты, страницы модулей; вход по коду из Telegram, публичный адрес"
 
@@ -75,7 +78,7 @@ async def setup_configs():
     )
     await engine.create_config(
         key='tunnel',
-        description='Публичный адрес сайта (https://….trycloudflare.com) — открыть сайт с любого устройства и в Telegram',
+        description='Публичный адрес сайта — открыть сайт с любого устройства и в Telegram (способ: .web tunnel setup)',
         data_type='bool', default=False,
     )
     await engine.create_config(
@@ -110,6 +113,7 @@ async def setup_configs():
     )
     _sync_tunnel(await _cfg('tunnel'), hold=False)
     _start_tunnel_watch()
+    engine.web.start_hook = _bot_start_web            # /start web в боте — свежая ссылка (aiobot/bot.py)
     # вернуть сайт после рестарта / автозапуск по конфигу — в фоне: передача порта от keeper'а может занять
     # до пары секунд, а запуск юзербота ждать её не должен
     engine.web.start_wake_watch()          # сторож keeper'а — заход на адрес поднимает сайт
@@ -129,6 +133,11 @@ def _start_tunnel_watch():
     async def loop():
         while True:
             await asyncio.sleep(5)
+            if getattr(engine, '_aiogram_bot', None) is not None and not getattr(engine, '_bot_username', None):
+                try:
+                    engine._bot_username = (await engine._aiogram_bot.get_me()).username
+                except Exception:
+                    pass
             try:
                 await _sync_menu_button()
             except asyncio.CancelledError:
@@ -145,7 +154,9 @@ def _start_tunnel_watch():
                 await db.gset(f'{MODULE_NAME}:last_public_url', url)
                 code = engine.web.auth.open_window()
                 text = (visual.title("Новый адрес сайта", sub="прежний больше не работает") + "\n"
-                        + visual.field("адрес", _esc(url)) + "\n\n" + engine.web.auth.code_text(code))
+                        + visual.field("адрес", _esc(url)) + "\n"
+                        + visual.hint("открытые вкладки сайта переедут на него сами, без входа") + "\n\n"
+                        + engine.web.auth.code_text(code))
                 if not await _send_links_to_owner(text, url):
                     try:
                         await engine.web.auth._deliver(text)
@@ -233,12 +244,12 @@ async def _remember_url(url):
         pass
 
 
-def _sync_tunnel(want, renew=False, hold=True):
-    """Просит keeper включить/выключить туннель. Возвращает текст ошибки или None."""
+def _sync_tunnel(want, renew=False, hold=True, setup=None):
+    """Просит keeper включить/выключить туннель (setup — сменить способ адреса). Возвращает текст ошибки или None."""
     _WATCH['hold'] = time.time() + 160 if (want and hold) else 0.0
     try:
-        if want or engine.web.tunnel_wanted():
-            engine.web.request_tunnel(bool(want), renew=renew)
+        if want or engine.web.tunnel_wanted() or setup is not None:
+            engine.web.request_tunnel(bool(want), renew=renew, setup=setup)
     except Exception as e:
         return str(e)
     return None
@@ -260,7 +271,9 @@ def _tunnel_step(st) -> tuple:
     """(номер попытки, сервис, что сейчас происходит, ошибка прошлой попытки | '')."""
     status = st.get('status')
     att = int(st.get('attempt') or 1)
-    svc = 'Cloudflare' if (st.get('provider') or 'cloudflare') == 'cloudflare' else 'localhost.run (запасной)'
+    prov = st.get('provider') or 'cloudflare'
+    svc = {'cloudflare': 'Cloudflare', 'cloudflare-token': 'Cloudflare (свой домен)', 'custom': 'свой адрес',
+           'localhost.run': 'localhost.run' if st.get('mode') in ('lhr',) else 'localhost.run (запасной)'}.get(prov, prov)
     err = ''
     if status == 'downloading':
         step = 'скачиваю cloudflared — один раз, до минуты'
@@ -283,7 +296,7 @@ def _tunnel_progress_text(st, elapsed) -> str:
              visual.item(_esc(step))]
     if err:
         lines.append(visual.hint(_esc(err)))
-    lines.append(visual.hint("обычно 5–30 с; если Cloudflare не отвечает, FRX сам пробует снова (до 2,5 мин)"))
+    lines.append(visual.hint("обычно 5–30 с; если сервис не отвечает, FRX сам пробует снова (до 2,5 мин)"))
     return "\n".join(lines)
 
 
@@ -336,6 +349,10 @@ def _links_text(port, public, tunnel_err, hide_public=False):
         lines.append(visual.warn("публичный адрес не поднялся: " + _esc(tunnel_err)))
     else:
         lines.append(visual.item("публичный адрес выключен — <code>.web tunnel on</code>"))
+    bot = getattr(engine, '_bot_username', None)
+    if public and bot:
+        lines.append(visual.field("постоянная ссылка", f"t.me/{_esc(bot)}?start=web", code=True))
+        lines.append(visual.item("всегда присылает актуальный адрес — сохраните её в закладки", 1))
     lines += ["", visual.hint("вход — по коду ниже (открыт 10 минут для одного устройства)" + (" или кнопкой «Открыть в Telegram»" if public else ""))]
     return "\n".join(lines)
 
@@ -348,10 +365,12 @@ async def _send_links_to_owner(text, public):
     if public:
         try:
             from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+            one_click = engine.web.login_link(public) or public       # одноразовая ссылка: вход без кода
             markup = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text='Открыть в Telegram', web_app=WebAppInfo(url=public))],
-                [InlineKeyboardButton(text='Открыть в браузере', url=public)],
+                [InlineKeyboardButton(text='Открыть в браузере — вход в один клик', url=one_click)],
             ])
+            text += "\n" + visual.hint("кнопка «в браузере» входит сама — один раз, 15 минут; потом — по коду")
         except Exception:
             markup = None
     try:
@@ -401,6 +420,13 @@ async def web_cmd(event):
                             + "\n" + visual.hint("на каждом устройстве снова понадобится код из Telegram"))
         return
 
+    if sub == 'tunnel' and len(args) > 1 and args[1] in ('setup', 'mode', 'способ'):
+        try:
+            await _open_setup(event)
+        except Exception as e:
+            await engine.answer(event, visual.err("Настройка адреса недоступна") + "\n" + visual.hint(_esc(e)))
+        return
+
     if sub == 'tunnel':
         mode = args[1] if len(args) > 1 else ''
         if mode not in ('on', 'off', 'new'):
@@ -413,7 +439,8 @@ async def web_cmd(event):
                 lines.append(visual.field("адрес", _esc(st['url'])))
             if st.get('status') == 'error' and st.get('error'):
                 lines.append(visual.warn(_esc(st['error'])))
-            lines += ["", visual.hint(".web tunnel on | off | new (новый адрес)")]
+            lines.append(visual.field("способ", _MODE_TITLES.get(engine.web.tunnel_setup().get('mode'), 'авто'), code=False))
+            lines += ["", visual.hint(".web tunnel on | off | new (новый адрес) | setup (постоянный адрес)")]
             await engine.answer(event, "\n".join(lines))
             return
         await _set('tunnel', mode != 'off')
@@ -536,9 +563,10 @@ async def _panel_buttons(private: bool):
     rows = []
     if web.running and tunnel and st.get('status') == 'up' and private:
         rows.append([(visual.btn('Открыть сайт'), 'url:' + st['url'])])
-    rows.append([(visual.btn('Выключить сайт', 'close'), 'wp:stop') if web.running else (visual.btn('Запустить сайт'), 'wp:start')])
-    rows.append([(visual.btn('Пустить устройство — прислать код'), 'wp:login')])
+    rows.append([(visual.btn('Выключить сайт', 'close'), 'wp:stop', "danger") if web.running else (visual.btn('Запустить сайт'), 'wp:start', "success")])
+    rows.append([(visual.btn('Пустить устройство — прислать код'), 'wp:login', "primary")])
     rows.append([(_on(tunnel, 'Публичный адрес'), 'wp:tunnel')] + ([(visual.btn('Новый адрес'), 'wp:renew')] if tunnel else []))
+    rows.append([(visual.btn('Способ адреса · ' + _MODE_TITLES.get(web.tunnel_setup().get('mode'), 'авто')), 'wp:setup')])
     if getattr(engine, '_aiogram_bot', None) is not None:
         rows.append([(_on(await _cfg('menu_button'), 'Кнопка «Сайт» в боте'), 'wp:menubtn')])
     rows.append([(_on(await _cfg('autostart'), 'Автозапуск'), 'wp:autostart'),
@@ -590,8 +618,7 @@ async def _open_panel(event, note=''):
                 t = state['watch']
                 if t is not None and not t.done():
                     t.cancel()
-                await form.edit(visual.ok("Панель сайта закрыта") + "\n" + visual.hint("открыть снова — .web"), buttons=None)
-                await form.close()
+                await form.delete()
                 return
             if act == 'refresh':
                 await click.answer("обновлено")
@@ -627,6 +654,9 @@ async def _open_panel(event, note=''):
                     if not engine.web.running:
                         await engine.web.start()
                     watch_tunnel()
+            elif act == 'setup':
+                await click.answer()
+                await _open_setup(None, form=form, back=redraw)
             elif act == 'menubtn':
                 value = not await _cfg('menu_button')
                 await _set('menu_button', value)
@@ -641,7 +671,7 @@ async def _open_panel(event, note=''):
             elif act == 'logout':
                 await click.answer()
                 await form.edit(visual.warn("Выйти на всех устройствах? На каждом снова понадобится код из Telegram."),
-                                buttons=[[(visual.btn('Да, выйти везде'), 'wp:logout!')], [(visual.btn('Назад', 'back'), 'wp:refresh')]])
+                                buttons=[[(visual.btn('Да, выйти везде'), 'wp:logout!', "danger")], [(visual.btn('Назад', 'back'), 'wp:refresh')]])
             elif act == 'logout!':
                 n = engine.web.auth.drop_all()
                 await click.answer(f"сессий завершено: {n}")
@@ -655,3 +685,245 @@ async def _open_panel(event, note=''):
             except Exception:
                 pass
     return form
+
+
+# ------------------------------------------------------------------ #
+# Способ публичного адреса — .web tunnel setup
+# Бесплатные туннели без регистрации меняют адрес (localhost.run — примерно раз в 20 минут). Открытые страницы
+# переезжают сами (core/web/server.py: /api/tunnel/handoff), но постоянный адрес удобнее — здесь его настраивают.
+# ------------------------------------------------------------------ #
+
+_MODE_TITLES = {
+    'auto': 'авто', 'cloudflare': 'Cloudflare', 'lhr': 'localhost.run',
+    'cf_token': 'свой домен (Cloudflare)', 'custom': 'свой адрес',
+}
+
+
+def _mask(v, keep=4):
+    v = str(v or '')
+    return (v[:keep] + '…' + v[-keep:]) if len(v) > keep * 2 + 3 else ('•' * len(v))
+
+
+async def _apply_setup(setup: dict):
+    """Сохранить способ и (раз туннель включают) поднять адрес заново."""
+    await _set('tunnel', True)
+    err = _sync_tunnel(True, renew=True, hold=False, setup=setup)   # ссылку пришлёт слежение за адресом
+    if err:
+        raise RuntimeError(err)
+    if not engine.web.running:
+        await engine.web.start()
+
+
+async def _tailscale_url(port):
+    """Tailscale Funnel: включает публикацию порта и возвращает https://<машина>.<tailnet>.ts.net."""
+    import json as _json
+    import shutil
+    exe = shutil.which('tailscale')
+    if not exe:
+        raise RuntimeError("Tailscale не установлен (tailscale.com/download) или его нет в PATH")
+
+    async def run(*a, timeout=40):
+        proc = await asyncio.create_subprocess_exec(exe, *a, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        return proc.returncode, (out or b'').decode('utf-8', 'replace')
+    code, out = await run('funnel', '--bg', str(port))
+    if code != 0:
+        raise RuntimeError("tailscale funnel: " + out.strip()[-300:])
+    code, out = await run('status', '--json')
+    try:
+        name = (_json.loads(out).get('Self') or {}).get('DNSName', '').rstrip('.')
+    except ValueError:
+        name = ''
+    if not name:
+        raise RuntimeError("не удалось узнать адрес машины в Tailscale (tailscale status)")
+    return 'https://' + name
+
+
+async def _setup_view(view):
+    web = engine.web
+    cur = web.tunnel_setup()
+    mode = cur.get('mode') or 'auto'
+    port = web.port or 8878
+    if view == 'lhr':
+        try:
+            pub = await web.lhr_pubkey()
+        except Exception as e:
+            pub, err = None, str(e)
+        else:
+            err = ''
+        lines = [visual.title("localhost.run + ключ", sub="бесплатно, адрес держится намного дольше"),
+                 visual.item("1. Зарегистрируйтесь на admin.localhost.run (бесплатно)"),
+                 visual.item("2. Добавьте этот ключ в разделе SSH keys:")]
+        lines.append(f"<code>{_esc(pub)}</code>" if pub else visual.warn(_esc(err)))
+        lines += [visual.item("3. Нажмите «Ключ добавлен»"), "",
+                  visual.hint("ключ создан только для этого и лежит в user/data/bin; без регистрации адрес всё равно работает, но меняется чаще")]
+        rows = [[(visual.btn('admin.localhost.run'), 'url:https://admin.localhost.run/')]]
+        if pub:
+            rows.append([(visual.btn('Ключ добавлен — включить'), 'ts:lhr_on', "success")])
+        rows.append([(visual.btn('Назад', 'back'), 'ts:main')])
+        return "\n".join(lines), rows
+    if view == 'cf':
+        lines = [visual.title("Свой домен через Cloudflare", sub="постоянный адрес, бесплатно; нужен домен в Cloudflare"),
+                 visual.item("1. one.dash.cloudflare.com → Networks → Tunnels → Create a tunnel (Cloudflared)"),
+                 visual.item("2. Скопируйте токен из команды установки (длинная строка после --token)"),
+                 visual.item(f"3. Public Hostname: свой поддомен → Service <code>http://127.0.0.1:{port}</code>"),
+                 visual.item("4. Впишите токен и адрес кнопками ниже, затем «Включить»"), "",
+                 visual.field("токен", _mask(cur.get('cf_token')) if cur.get('cf_token') else 'не задан', code=False),
+                 visual.field("адрес", _esc(cur.get('cf_host') or 'не задан'), code=False),
+                 "", visual.hint("cloudflared нужен соединение по порту 7844 — если провайдер его режет, этот способ не поднимется")]
+        rows = [[engine.InputButton(visual.btn('Токен'), 'cf_token', hint='токен туннеля'),
+                 engine.InputButton(visual.btn('Адрес'), 'cf_host', hint='frx.example.com')]]
+        if cur.get('cf_token') and cur.get('cf_host'):
+            rows.append([(visual.btn('Включить'), 'ts:cf_on', "success")])
+        rows.append([(visual.btn('Назад', 'back'), 'ts:main')])
+        return "\n".join(lines), rows
+    if view == 'custom':
+        lines = [visual.title("Свой адрес", sub="Tailscale Funnel, свой сервер, nginx…"),
+                 visual.item("Адрес поднимает другая программа, FRX только проверяет, что он отвечает, и присылает его."),
+                 visual.item(f"Tailscale Funnel (бесплатно, постоянный адрес *.ts.net): поставьте Tailscale, войдите — и нажмите кнопку ниже "
+                             f"(или вручную: <code>tailscale funnel --bg {port}</code>)."),
+                 visual.item(f"Свой сервер / прокси: направьте домен на <code>http://127.0.0.1:{port}</code> и впишите адрес."), "",
+                 visual.field("адрес", _esc(cur.get('custom_url') or 'не задан'), code=False)]
+        rows = [[(visual.btn('Tailscale Funnel — включить'), 'ts:tailscale', "success")],
+                [engine.InputButton(visual.btn('Вписать адрес'), 'custom_url', hint='https://')]]
+        if cur.get('custom_url'):
+            rows.append([(visual.btn('Включить'), 'ts:custom_on', "success")])
+        rows.append([(visual.btn('Назад', 'back'), 'ts:main')])
+        return "\n".join(lines), rows
+    mark = lambda m: ('● ' if mode == m else '') + _MODE_TITLES[m]
+    lines = [visual.title("Публичный адрес", sub="как открыть сайт откуда угодно"),
+             visual.field("сейчас", _MODE_TITLES.get(mode, mode), code=False), "",
+             visual.item("<b>авто</b> — Cloudflare, при сбое localhost.run. Без регистрации, но адрес меняется: открытые вкладки "
+                         "переезжают сами, новая ссылка приходит в ЛС"),
+             visual.item("<b>localhost.run</b> — сразу запасной сервис, без ожидания Cloudflare (если он у вас не подключается)"),
+             visual.item("<b>localhost.run + ключ</b> — бесплатная регистрация, адрес держится намного дольше"),
+             visual.item("<b>свой домен (Cloudflare)</b> — постоянный адрес, нужен домен"),
+             visual.item("<b>свой адрес</b> — Tailscale Funnel (постоянный *.ts.net) или свой сервер"), "",
+             visual.hint("где бы ни был сайт, t.me/<бот>?start=web всегда присылает актуальную ссылку")]
+    rows = [[(mark('auto'), 'ts:auto'), (mark('lhr'), 'ts:lhr_plain')],
+            [(visual.btn('localhost.run + ключ'), 'ts:view:lhr')],
+            [(mark('cf_token') if mode == 'cf_token' else visual.btn('Свой домен (Cloudflare)'), 'ts:view:cf')],
+            [(mark('custom') if mode == 'custom' else visual.btn('Свой адрес / Tailscale'), 'ts:view:custom')],
+            [(visual.btn('Назад', 'back'), 'ts:back')]]
+    return "\n".join(lines), rows
+
+
+async def _open_setup(event, form=None, back=None):
+    """Форма выбора способа публичного адреса. form — уже открытая панель .web (рисуем в ней)."""
+    own = form is None
+    if own:
+        text, rows = await _setup_view('main')
+        form = await engine.create_inlineform(chat_id=event.chat_id, text=text, buttons=rows)
+    state = getattr(form, '_frx_setup', None)
+    if state is not None:                     # обработчики на этой форме уже есть — просто показываем главный экран
+        await state['show']('main')
+        return form
+    state = {'view': 'main'}
+    form._frx_setup = state
+
+    async def show(view, note='', bad=False):
+        state['view'] = view
+        text, rows = await _setup_view(view)
+        if note:
+            text += "\n\n" + (visual.warn(_esc(note)) if bad else visual.ok(_esc(note)))
+        await form.edit(text, buttons=rows)
+    state['show'] = show
+
+    if not own:
+        await show('main')
+
+    async def done(note):
+        await show('main', note)
+
+    @form.on_click(data_startswith='ts:')
+    async def _ts(click):
+        act = click.data[3:]
+        try:
+            if act.startswith('view:'):
+                await click.answer()
+                await show(act[5:])
+            elif act == 'main':
+                await click.answer()
+                await show('main')
+            elif act == 'back':
+                await click.answer()
+                if back is not None:
+                    await back()
+                else:
+                    await form.edit(visual.ok("Готово") + "\n" + visual.hint("панель сайта — .web"), buttons=None)
+                    await form.close()
+            elif act in ('auto', 'lhr_plain'):
+                await _apply_setup({'mode': 'auto' if act == 'auto' else 'lhr', 'lhr_key': False})
+                await click.answer("способ сменён — поднимаю адрес")
+                await done("адрес поднимается, ссылка придёт в ЛС")
+            elif act == 'lhr_on':
+                await _apply_setup({'mode': 'lhr', 'lhr_key': True})
+                await click.answer("включаю localhost.run с ключом")
+                await done("localhost.run + ключ — ссылка придёт в ЛС")
+            elif act == 'cf_on':
+                await _apply_setup({'mode': 'cf_token'})
+                await click.answer("подключаю туннель Cloudflare")
+                await done("свой домен — как только Cloudflare подключится, ссылка придёт в ЛС")
+            elif act == 'custom_on':
+                await _apply_setup({'mode': 'custom'})
+                await click.answer("проверяю адрес")
+                await done("свой адрес — FRX проверит его и пришлёт ссылку")
+            elif act == 'tailscale':
+                await click.answer("включаю Tailscale Funnel…")
+                url = await _tailscale_url(engine.web.port or 8878)
+                await _apply_setup({'mode': 'custom', 'custom_url': url})
+                await done(f"Tailscale Funnel: {url}")
+            else:
+                await click.answer()
+        except Exception as e:
+            try:
+                await click.answer(str(e)[:190] or 'ошибка', show_alert=True)
+            except Exception:
+                pass
+
+    @form.on_input()
+    async def _inp(inp):
+        key, value = inp.data, (inp.value or '').strip()
+        try:
+            if key == 'cf_token':
+                if not re.fullmatch(r'[A-Za-z0-9_=+/.-]{40,}', value):
+                    raise ValueError("не похоже на токен туннеля — скопируйте строку после --token целиком")
+                engine.web.request_tunnel(engine.web.tunnel_wanted(), setup={'cf_token': value})
+                await show('cf', 'токен сохранён')
+            elif key == 'cf_host':
+                host = re.sub(r'^https?://', '', value).strip('/').lower()
+                if not re.fullmatch(r'(?:[a-z0-9-]+\.)+[a-z]{2,}', host):
+                    raise ValueError("нужен домен вида frx.example.com")
+                engine.web.request_tunnel(engine.web.tunnel_wanted(), setup={'cf_host': host})
+                await show('cf', 'адрес сохранён')
+            elif key == 'custom_url':
+                url = engine._normalize_link('custom_url', value, {'allow_tg': False})
+                if not url:
+                    raise ValueError("адрес пустой")
+                engine.web.request_tunnel(engine.web.tunnel_wanted(), setup={'custom_url': url.rstrip('/')})
+                await show('custom', 'адрес сохранён')
+        except Exception as e:
+            await show(state['view'], str(e), bad=True)
+    return form
+
+
+# ------------------------------------------------------------------ #
+# Постоянная ссылка: t.me/<бот>?start=web — бот присылает актуальный адрес и вход в один клик
+# ------------------------------------------------------------------ #
+
+async def _bot_start_web():
+    """Вызывается ботом на /start web от владельца (aiobot/bot.py)."""
+    if not engine.web.running:
+        await engine.web.start()
+    url = engine.web.public_url() if engine.web.tunnel_wanted() else None
+    if not url:
+        if not await _cfg('tunnel'):
+            await engine.bot_send_to_owner(visual.warn("Публичный адрес выключен") + "\n"
+                                           + visual.hint("включите: .web tunnel on — или откройте http://127.0.0.1:" + str(engine.web.port)))
+            return
+        await engine.bot_send_to_owner(visual.wait("Публичный адрес поднимается — ссылка придёт сюда, как только заработает"))
+        _sync_tunnel(True, hold=False)
+        return
+    code = engine.web.auth.open_window()
+    text = _links_text(engine.web.port, url, None) + "\n\n" + engine.web.auth.code_text(code)
+    await _send_links_to_owner(text, url)

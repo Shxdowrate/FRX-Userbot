@@ -89,7 +89,11 @@ const LAB_HELPERS = {
     '    if v is None:', '        return ""', '    if isinstance(v, bool):', '        return "да" if v else "нет"',
     '    if isinstance(v, float) and v == int(v) and abs(v) < 1e15:', '        return str(int(v))', '    if isinstance(v, (list, tuple)):', '        return ", ".join(_s(x) for x in v)',
     '    return str(v)'],
-  _h: ['def _h(v):', '    """Значение → безопасный для HTML текст."""', '    return _html.escape(_s(v), quote=False)'],
+  _h: ['def _h(v):', '    """Значение → безопасный для HTML текст (текст с оформлением из Lab — как есть)."""',
+    '    if isinstance(v, _Html):', '        return str(v)', '    return _html.escape(_s(v), quote=False)'],
+  _Html: ['class _Html(str):', '    """Текст с оформлением (HTML Telegram): в сообщения вставляется как есть, а не экранируется."""'],
+  _cat: ['def _cat(a, b):', '    """Склеить тексты; если хоть один с оформлением — результат тоже с оформлением."""',
+    '    if isinstance(a, _Html) or isinstance(b, _Html):', '        return _Html(_h(a) + _h(b))', '    return _s(a) + _s(b)'],
   _n: ['def _n(v):', '    """Значение → число (текст вида «5» и «2,5» тоже подойдёт)."""',
     '    if isinstance(v, bool):', '        return int(v)', '    if isinstance(v, (int, float)):', '        return v', '    if v is None or v == "":', '        return 0',
     '    try:', '        t = str(v).strip().replace(",", ".")', '        f = float(t)', '        return int(f) if f == int(f) and "." not in t and "e" not in t.lower() else f',
@@ -121,7 +125,7 @@ const LAB_HELPERS = {
     '        kw = {"user_id": event.sender_id} if onlyme else {}', '        w = await engine.wait_message(timeout=timeout, **kw)', '        if (w.chat_id, w.id) not in _SENT:', '            return w'],
   _flat: ['def _flat(v):', '    return list(v) if isinstance(v, (list, tuple)) else ([] if v in (None, "") else [v])'],
 };
-const LAB_HELPER_DEPS = { _h: ['_s'], _cmp: ['_s'], _n: [], _numfmt: ['_n'], _uname: [], _wait: ['_sent'] };
+const LAB_HELPER_DEPS = { _h: ['_s', '_Html'], _cat: ['_h', '_s', '_Html'], _cmp: ['_s'], _n: [], _numfmt: ['_n'], _uname: [], _wait: ['_sent'] };
 const LAB_MODULES_FOR = { _h: 'html', _cmp: 're', _now: 'datetime' };
 
 /* ------------------------------------------------------------------ *
@@ -133,6 +137,7 @@ const labPyNum = (n) => (Number.isFinite(n) ? String(n) : '0');
 const LAB_IDENT = /^[A-Za-zА-Яа-яЁё_][\wА-Яа-яЁё]{0,31}$/;
 const LAB_NUM = /^[+-]?(\d+([.,]\d*)?|[.,]\d+)$/;
 const LAB_VARREF = /^\{([^{}@]+)\}$/;
+let LAB_ICON_KEYS = new Set();                                          // ключи visual (заполняет lab.js после загрузки списка)
 let labIdSeq = 0;
 const labId = () => 'b' + (++labIdSeq).toString(36) + Math.random().toString(36).slice(2, 5);
 const labMangle = (name) => 'v_' + name;
@@ -221,15 +226,24 @@ labDef('event_sense', 'event', 'Свойство сообщения', { ctx: ['m
 /* ====== Переменные ====== */
 labDef('set', 'var', 'Задать', { hint: 'Число, {переменная} или текст. «{имя}» внутри текста подставит значение.', fields: [F.out('var', 'переменная', 'x'), F.val('value', 'значение', '0')],
   build(b, c) { c.set(b.f.var, c.val(b.f.value, 'any')); } });
-labDef('set_text', 'var', 'Задать текстом', { fields: [F.out('var', 'переменная', 'текст'), F.msg('value', 'текст', 'Привет!', { plain: true })],
-  build(b, c) { c.set(b.f.var, c.val(b.f.value, 'text')); } });
+const LAB_FMT_RE = /<\/?(b|i|u|s|code|pre|tg-spoiler|blockquote|a)(\s[^>]*)?>/i;   // в тексте есть оформление (кнопка «Aa»)
+labDef('set_text', 'var', 'Задать текстом', { hint: 'Оформление («Aa») сохраняется: переменная вставится в сообщение уже жирной, курсивом и т. д.',
+  fields: [F.out('var', 'переменная', 'текст'), F.msg('value', 'текст', 'Привет!', { plain: true, fmt: true })],
+  build(b, c) {
+    if (LAB_FMT_RE.test(String(b.f.value || ''))) { c.set(b.f.var, `_Html(${c.val(b.f.value, 'msg')})`); c.helper('_Html'); c.helper('_h'); }
+    else c.set(b.f.var, c.val(b.f.value, 'text'));
+  } });
 labDef('change', 'var', 'Изменить', { fields: [F.in('var', 'переменную'), F.sel('op', 'как', [['+', '+ прибавить'], ['-', '− вычесть'], ['*', '× умножить'], ['/', '÷ разделить']]), F.num('value', 'на', '1')],
   build(b, c) { c.set(b.f.var, `_n(${c.read(b.f.var)}) ${b.f.op} _n(${c.val(b.f.value, 'num', true)})`, true); c.helper('_n'); } });
 labDef('inc', 'var', 'Увеличить на 1', { fields: [F.in('var', 'переменную')], build(b, c) { c.set(b.f.var, `_n(${c.read(b.f.var)}) + 1`, true); c.helper('_n'); } });
 labDef('dec', 'var', 'Уменьшить на 1', { fields: [F.in('var', 'переменную')], build(b, c) { c.set(b.f.var, `_n(${c.read(b.f.var)}) - 1`, true); c.helper('_n'); } });
 labDef('toggle_var', 'var', 'Переключить да/нет', { fields: [F.in('var', 'переменную')], build(b, c) { c.set(b.f.var, `not ${c.read(b.f.var)}`, true); } });
-labDef('append_text', 'var', 'Дописать текст', { fields: [F.in('var', 'в переменную'), F.msg('value', 'текст', '!', { plain: true })],
-  build(b, c) { c.set(b.f.var, `_s(${c.read(b.f.var)}) + ${c.val(b.f.value, 'text')}`, true); c.helper('_s'); } });
+labDef('append_text', 'var', 'Дописать текст', { fields: [F.in('var', 'в переменную'), F.msg('value', 'текст', '!', { plain: true, fmt: true })],
+  build(b, c) {
+    const fmt = LAB_FMT_RE.test(String(b.f.value || ''));
+    c.set(b.f.var, `_cat(${c.read(b.f.var)}, ${fmt ? `_Html(${c.val(b.f.value, 'msg')})` : c.val(b.f.value, 'text')})`, true);
+    c.helper('_cat'); if (fmt) c.helper('_Html');
+  } });
 labDef('choose', 'var', 'Выбрать по условию', { hint: 'Как «если … то A иначе B» в одну строку.', fields: [{ k: 'conds', type: 'conds', label: 'если', def: [{ a: '{x}', op: '>', b: '0', join: 'and' }] }, F.out('var', 'в переменную', 'выбор'), F.val('a', 'то', 'да'), F.val('b', 'иначе', 'нет')],
   build(b, c) { c.set(b.f.var, `(${c.val(b.f.a, 'any')} if ${c.cond(b.f.conds)} else ${c.val(b.f.b, 'any')})`); } });
 labDef('type_of', 'var', 'Тип значения', { fields: [F.in('var', 'переменной'), F.out('res', 'в переменную', 'тип')],
@@ -454,7 +468,10 @@ function labFormButtons(raw, c) {                                  // макет
   if (!rows.length) c.err('Добавьте хотя бы одну кнопку');
   const seen = new Set();
   rows.flat().forEach((x) => { if (seen.has(x.kind + ':' + x.data)) c.err(`Кнопка «${x.label}»: «${x.data}» уже есть в этой форме`); seen.add(x.kind + ':' + x.data); if (new TextEncoder().encode(x.data).length > 64) c.err(`callback data «${x.data}» длиннее 64 байт`); });
-  const btn = (x) => (x.kind === 'input' ? `engine.InputButton(${c.val(x.label, 'text', true)}, ${labPyStr(x.data)})` : `(${c.val(x.label, 'text', true)}, ${labPyStr(x.data)})`);
+  const st = (x) => (['primary', 'success', 'danger'].includes(x.style) ? x.style : '');
+  const btn = (x) => (x.kind === 'input'
+    ? `engine.InputButton(${c.val(x.label, 'text', true)}, ${labPyStr(x.data)}${st(x) ? `, style=${labPyStr(st(x))}` : ''})`
+    : `(${c.val(x.label, 'text', true)}, ${labPyStr(x.data)}${st(x) ? `, ${labPyStr(st(x))}` : ''})`);
   return { rows, py: `[${rows.map((r) => '[' + r.map(btn).join(', ') + ']').join(', ')}]` };
 }
 labDef('form_new', 'form', 'Создать форму с кнопками', { side: 'user', ctx: ['msg'], hint: 'Нужен стационарный бот. Ниже — макет, как в Telegram. Кнопки обрабатываются блоками «Нажали кнопку».', fields: [
@@ -520,7 +537,7 @@ labDef('wait_msg', 'wait', 'Дождаться сообщения', { slots: ['b
 /* ====== Файлы ====== */
 labDef('file_make', 'file', 'Создать текстовый файл', { fields: [F.val('name', 'имя файла', 'report.txt'), F.msg('text', 'содержимое', 'Привет!', { plain: true }), F.out('res', 'файл в переменную', 'файл')],
   build(b, c) { c.set(b.f.res, `await files.create_file(type="text/plain", name=${c.str(b.f.name)}, text=${c.val(b.f.text, 'text')})`); c.helper('_s'); c.need('files'); } });
-labDef('file_send', 'file', 'Отправить файл', { ctx: ['msg'], fields: [F.in('file', 'файл'), F.msg('text', 'подпись', '', { plain: true })],
+labDef('file_send', 'file', 'Отправить файл', { ctx: ['msg'], fields: [F.in('file', 'файл'), F.msg('text', 'подпись', '', { plain: true, fmt: true })],
   build(b, c) { c.line(labSend(c, `files.reply_file(event, ${c.read(b.f.file)}["id"], ${c.val(b.f.text, 'msg')})`)); c.need('files'); } });
 labDef('file_from_reply', 'file', 'Скачать файл из ответа', { ctx: ['msg'], side: 'user', hint: 'Нужен ответ (reply) на сообщение с файлом.', fields: [F.out('res', 'файл в переменную', 'файл')],
   build(b, c) { c.set(b.f.res, 'await files.download_reply_file(event)'); c.need('files'); } });
@@ -548,7 +565,7 @@ labDef('tg_user', 'chat', 'Участник события', { ctx: ['tg'], side
 
 /* ====== Отладка ====== */
 labDef('log', 'dbg', 'Записать в лог', { hint: 'Строка появится в терминале юзербота (и в журнале Sandbox).', fields: [F.msg('text', 'текст', 'Сработало', { plain: true })], build(b, c) { c.line(`engine.tlog(${c.val(b.f.text, 'text')})`); } });
-labDef('botlog', 'dbg', 'Отправить лог владельцу', { fields: [F.sel('level', 'уровень', [['info', 'инфо'], ['success', 'успех'], ['warning', 'предупреждение'], ['error', 'ошибка']]), F.msg('text', 'текст', 'Что-то случилось', { plain: true })],
+labDef('botlog', 'dbg', 'Отправить лог владельцу', { fields: [F.sel('level', 'уровень', [['info', 'инфо'], ['success', 'успех'], ['warning', 'предупреждение'], ['error', 'ошибка']]), F.msg('text', 'текст', 'Что-то случилось', { plain: true, fmt: true })],
   build(b, c) { c.line(`engine.botlog(${c.val(b.f.text, 'text')}, ${labPyStr(b.f.level)})`); } });
 labDef('note', 'dbg', 'Заметка', { hint: 'Ничего не делает — пояснение для себя (попадёт комментарием в код).', fields: [F.msg('text', 'заметка', 'Здесь считаем очки', { plain: true })],
   build(b, c) { String(b.f.text || '').split('\n').forEach((l) => c.line('# ' + l.replace(/\r/g, ''))); } });
@@ -664,6 +681,13 @@ function labCompile(project) {
         const m = LAB_VARREF.exec(raw.trim());
         const refVar = (name) => { name = name.trim(); if (!scopes.some((s) => s.defined.has(name))) err(`Переменная «{${name}}» не задана выше`); return labMangle(name); };
         const builtin = (name) => {
+          const vm = /^visual\s*[:.]\s*(\w+)$/.exec(name);                  // {@visual:ключ} — значок FRX (visual.visual)
+          if (vm) {
+            const keys = typeof LAB_ICON_KEYS !== 'undefined' ? LAB_ICON_KEYS : null;
+            if (keys && keys.size && !keys.has(vm[1])) err(`Нет значка «${vm[1]}» — выберите из списка visual`);
+            needs.add('visual');
+            return `visual.visual(${labPyStr(vm[1])})`;
+          }
           const b = LAB_BUILTINS[name];
           if (!b) { err(`Нет встроенного значения «{@${name}}»`); return '""'; }
           if (b.ctx.length && !b.ctx.some((x) => ctxHas(x))) err(`«{@${name}}» недоступно в этом скрипте (${b.desc})`);
@@ -692,7 +716,8 @@ function labCompile(project) {
         if (parts.every((p) => p.lit !== undefined)) return labPyStr(raw);
         const pieces = parts.map((p) => {
           if (p.lit !== undefined) return JSON.stringify(p.lit).slice(1, -1).replace(/\{/g, '{{').replace(/\}/g, '}}');
-          const e = p.var !== undefined ? refVar(p.var) : builtin(p.builtin);
+          // кавычки внутри f"…{выражение}…" — одинарные: двойные там допустимы только с Python 3.12
+          const e = (p.var !== undefined ? refVar(p.var) : builtin(p.builtin)).replace(/"/g, "'");
           helpers.add(esc ? '_h' : '_s');
           return `{${esc ? '_h' : '_s'}(${e})}`;
         });
@@ -869,6 +894,7 @@ function labCompile(project) {
       case 'int': def = String(Math.trunc(Number(cf.default) || 0)); break;
       case 'float': { def = String(Number(cf.default) || 0); if (!def.includes('.') && !/e/i.test(def)) def += '.0'; break; }
       case 'bool': def = cf.default === true || cf.default === 'true' ? 'True' : 'False'; break;
+      case 'link': { const v = String(cf.default ?? '').trim(); if (v && !/^(https?:\/\/|tg:\/\/)?(@[A-Za-z]\w{3,31}|[^\s/]+\.[^\s/]{2,}|localhost)(\S*)$/i.test(v)) e('значение по умолчанию — не ссылка'); def = labPyStr(v); break; }
       case 'list': def = '[' + String(cf.default || '').split(',').map((x) => x.trim()).filter(Boolean).map(labPyStr).join(', ') + ']'; break;
       case 'choices': {
         const picked = String(cf.default || '').split(',').map((x) => x.trim()).filter(Boolean);
@@ -1017,7 +1043,7 @@ function labSanitize(project) {
   clean.meta = { name: String(m.name || 'Мой модуль').slice(0, 80), module_name: String(m.module_name || 'my_module').slice(0, 64), version: String(m.version || '1.0').slice(0, 20),
     description: String(m.description || '').slice(0, 300), author_extra: String(m.author_extra || '').slice(0, 60) };
   if (m.locked_author !== undefined && m.locked_author !== null) clean.meta.locked_author = String(m.locked_author);
-  clean.configs = (Array.isArray(project.configs) ? project.configs : []).slice(0, 60).map((x) => ({ key: String(x.key || '').slice(0, 40), description: String(x.description || '').slice(0, 200), type: ['str', 'int', 'float', 'bool', 'list', 'choice', 'choices'].includes(x.type) ? x.type : 'str', default: x.default === undefined ? '' : x.default, options: String(x.options || '') }));
+  clean.configs = (Array.isArray(project.configs) ? project.configs : []).slice(0, 60).map((x) => ({ key: String(x.key || '').slice(0, 40), description: String(x.description || '').slice(0, 200), type: ['str', 'int', 'float', 'bool', 'list', 'choice', 'choices', 'link'].includes(x.type) ? x.type : 'str', default: x.default === undefined ? '' : x.default, options: String(x.options || '') }));
   const walk = (list, depth) => (Array.isArray(list) ? list : []).slice(0, 500).map((b) => {
     const def = LAB_BLOCKS[b && b.t];
     const nb = { id: typeof b.id === 'string' ? b.id.slice(0, 20) : labId(), t: String((b && b.t) || ''), f: (b && typeof b.f === 'object' && b.f) ? b.f : {} };

@@ -86,7 +86,7 @@ function showLost() {
   const D = typeof FRX_DRAFT === 'object' ? FRX_DRAFT : null;
   const tm = (t) => { const d = new Date(t), p2 = (n) => String(n).padStart(2, '0'); return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`; };
   const parts = [h('div', { class: 'big' }, 'сайт недоступен'),
-    h('div', { class: 'muted off-why' }, 'Сайт выключился (простой или команда) либо сменился публичный адрес. Новая ссылка — в ЛС от бота и на кнопке «Сайт» в меню чата с ботом; или напишите ', h('code', {}, '.web'), ' в Telegram.')];
+    h('div', { class: 'muted off-why' }, 'Сайт выключился (простой или команда) либо сменился публичный адрес. Новая ссылка «войти в один клик» — в ЛС от бота и на кнопке «Сайт» в меню чата с ботом; или напишите ', h('code', {}, '.web'), ' в Telegram.')];
   if (D && D.label) {
     if (D.pending && D.copy) {
       const copyBtn = h('button', { class: 'btn small primary', type: 'button', onclick: async () => {
@@ -100,7 +100,10 @@ function showLost() {
       parts.push(h('div', { class: 'off-draft' }, `Черновик (${D.label}) сохранён в ${tm(D.savedAt)}: откройте модуль по новой ссылке — сайт предложит восстановить правки.`));
     }
   }
-  parts.push(h('div', { class: 'off-act' }, h('button', { class: 'btn small', type: 'button', onclick: () => location.reload() }, 'обновить страницу')));
+  const bl = IS_LOCAL ? null : botLink();
+  parts.push(h('div', { class: 'off-act' },
+    bl ? h('a', { class: 'btn small primary', href: bl, target: '_blank', rel: 'noopener' }, 'новая ссылка в боте') : null,
+    h('button', { class: 'btn small', type: 'button', onclick: () => location.reload() }, 'обновить страницу')));
   off.replaceChildren(...parts);
   off.classList.add('show');
 }
@@ -420,6 +423,7 @@ const ROUTES = [
   [/^modules\/([^/]+)\/emulate$/, emulateModule],
   [/^files$/, filesView],                                    // panel.js
   [/^neuro$/, neuroView],                                    // neuro.js
+  [/^neuro\/chat$/, neuroChatView],                          // neuro.js — Chat
   [/^webide$/, webideList],                                  // webide.js
   [/^lab$/, (T) => labEditor(T, '__new__')],                 // lab.js (FRX WebIDE Lab)
   [/^lab\/([^/]+)$/, labEditor],
@@ -515,8 +519,60 @@ function buildTabs(s) {
 function setNav(state) { NAV.state = state; renderNav(); }
 
 async function refreshNav() {
-  try { setNav(await api('/nav')); } catch (e) { /* сайт выключен — оверлей уже показан */ }
+  try {
+    const n = await api('/nav');
+    if (n.bot_username) { try { localStorage.setItem('frx_bot', n.bot_username); } catch (e) { /* без хранилища */ } }
+    setNav(n);
+  } catch (e) { /* сайт выключен — оверлей уже показан */ }
 }
+
+/* ------------------------------------------------------------------ *
+ * переезд на новый публичный адрес без повторного входа
+ * Бесплатные туннели время от времени меняют адрес. Открытая страница раз в несколько секунд спрашивает у сайта
+ * текущий адрес; когда он сменился — сохраняет черновик редактора, берёт одноразовый билет и сама переходит на
+ * новый адрес (#frx_t=…&to=<раздел>), где билет меняется на сессию. Если старый адрес умер раньше, чем страница
+ * успела это увидеть, — плашка «сайт недоступен» ведёт в бота за свежей ссылкой «войти в один клик».
+ * ------------------------------------------------------------------ */
+const IS_LOCAL = /^(127\.0\.0\.1|localhost|\[::1\])$/.test(location.hostname);
+function botLink() {
+  let u = null;
+  try { u = localStorage.getItem('frx_bot'); } catch (e) { /* нет хранилища */ }
+  return u ? 'https://t.me/' + u + '?start=web' : null;
+}
+let MOVING = false;
+async function moveWatch() {
+  if (MOVING || IS_LOCAL || SLEEP) return;
+  let w;
+  try {
+    const r = await fetch('/api/tunnel/where', { headers: { 'X-FRX': '1' } });
+    if (!r.ok) return;
+    w = await r.json();
+  } catch (e) { return; }
+  if (!w.url) return;
+  let target;
+  try { target = new URL(w.url); } catch (e) { return; }
+  if (target.origin === location.origin) return;
+  MOVING = true;
+  try {
+    const D = typeof FRX_DRAFT === 'object' ? FRX_DRAFT : null;
+    if (D && D.pending && typeof D.flushNow === 'function') { try { await D.flushNow(); } catch (e) { /* черновик — как получится */ } }
+    const hand = await api('/tunnel/handoff', {});
+    toast('адрес сайта сменился — переезжаю…', 'ok');
+    document.body.classList.add('moving');
+    await sleep(350);
+    location.replace(hand.url + '/#frx_t=' + enc(hand.ticket) + '&to=' + enc(curPath()));
+  } catch (e) { MOVING = false; }
+}
+if (!IS_LOCAL) setInterval(moveWatch, 6000);
+
+/* пришли по ссылке с билетом, а сессия на этом адресе уже есть — просто убираем билет из адреса */
+(function stripTicket() {
+  const q = new URLSearchParams(location.hash.slice(1));
+  if (!q.has('frx_t')) return;
+  const to = q.get('to') || '';
+  fetch('/api/auth/ticket', { method: 'POST', headers: { 'X-FRX': '1', 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket: q.get('frx_t') }) }).catch(() => {});
+  history.replaceState(null, '', location.pathname + (to ? '#/' + to.replace(/^\/+/, '') : ''));
+})();
 
 function renderNav() {
   const s = NAV.state;
@@ -637,7 +693,10 @@ async function home(T) {
     h('span', { class: 'num dotnum' }, h('i', { class: 'live' })),
     h('span', { class: 'lbl' }, s.account ? (s.account.first_name || ('id ' + s.account.id)) : 'аккаунт'));
   stats.push(online);
-  stats.push(h('div', { class: 'stat' }, h('span', { class: 'num small' }, s.bot ? 'да' : 'нет'), h('span', { class: 'lbl' }, 'бот')));
+  const botNum = s.bot && s.bot_username
+    ? h('a', { class: 'num small botlink', href: 'https://t.me/' + s.bot_username, target: '_blank', rel: 'noopener', title: 'открыть бота в Telegram' }, '@' + s.bot_username)
+    : h('span', { class: 'num small' + (s.bot ? '' : ' muted') }, s.bot ? 'запущен' : 'не создан');
+  stats.push(h('div', { class: 'stat' }, botNum, h('span', { class: 'lbl' }, 'бот')));
 
   /* плашка CHANGELOG: по умолчанию — последняя версия */
   let cur = 0;
@@ -773,7 +832,11 @@ function configRow(m, it) {
     sync();
     control = h('div', { class: 'stack', style: 'width:100%' }, box, h('div', { class: 'inline' }, inp, h('button', { class: 'btn small', type: 'button', onclick: add }, 'добавить')));
   } else {
-    const inp = h('input', { class: 'field short', value: value === null || value === undefined ? '' : String(value), inputmode: (it.type === 'int' || it.type === 'float') ? 'decimal' : 'text' });
+    const inp = h('input', { class: 'field short' + (it.type === 'link' ? ' link' : ''), value: value === null || value === undefined ? '' : String(value), inputmode: (it.type === 'int' || it.type === 'float') ? 'decimal' : it.type === 'link' ? 'url' : 'text', placeholder: it.type === 'link' ? 'https://…' : '', spellcheck: it.type === 'link' ? 'false' : null });
+    if (it.type === 'link') {
+      const looks = (v) => !v.trim() || /^(https?:\/\/|tg:\/\/)?(@[A-Za-z]\w{3,31}|[^\s/]+\.[^\s/]{2,}|localhost)(\S*)$/i.test(v.trim()) || /^tg:\/\/\S+$/i.test(v.trim());
+      inp.addEventListener('input', () => inp.classList.toggle('bad', !looks(inp.value)));
+    }
     const save = h('button', { class: 'btn small', type: 'button', disabled: true, onclick: () => send('edit', inp.value) }, 'сохранить');
     const cmp = () => { save.disabled = inp.value === String(value ?? ''); };
     sync = (ok) => { if (ok !== false) inp.value = value === null || value === undefined ? '' : String(value); cmp(); };
@@ -1136,12 +1199,12 @@ async function emulateModule(T, moduleId) {
     };
     if ((e.rows || []).length) {
       box.appendChild(h('div', { class: 'emu-kb' }, e.rows.map((r) => h('div', { class: 'emu-krow' }, r.map((b) => (b.input !== undefined
-        ? h('button', { class: 'btn small', type: 'button', onclick: () => openInput(b) }, b.text)
-        : /^url:(https?|tg):/.test(b.data || '') ? h('a', { class: 'btn small', href: b.data.slice(4), target: '_blank', rel: 'noopener noreferrer' }, b.text + ' ↗')
-        : h('button', { class: 'btn small', type: 'button', onclick: () => post('/emulate/click', { form: e.form, data: b.data }) }, b.text)))))));
+        ? h('button', { class: 'btn small' + (b.style ? ' st-' + b.style : ''), type: 'button', onclick: () => openInput(b) }, b.text)
+        : /^url:(https?|tg):/.test(b.data || '') ? h('a', { class: 'btn small' + (b.style ? ' st-' + b.style : ''), href: b.data.slice(4), target: '_blank', rel: 'noopener noreferrer' }, b.text + ' ↗')
+        : h('button', { class: 'btn small' + (b.style ? ' st-' + b.style : ''), type: 'button', onclick: () => post('/emulate/click', { form: e.form, data: b.data }) }, b.text)))))));
     }
     box.appendChild(inpBox);
-    box._sig = 'f' + JSON.stringify((e.rows || []).map((r) => r.map((b) => [b.text, b.data, b.input])));
+    box._sig = 'f' + JSON.stringify((e.rows || []).map((r) => r.map((b) => [b.text, b.data, b.input, b.style])));
     return box;
   }
 
@@ -1462,8 +1525,53 @@ async function pageView(T, module, index) {
     }
   }
 
-  await load();
+  const first = await api('/page/render', { module, index: Number(index), values: vals });
+  if (first.app) return appView(T, module, Number(index), first);
+  title = first.title;
+  (first.toasts || []).forEach((t) => toast(t.text, t.kind));
+  body.replaceChildren(...first.tree.map(renderNode));
   mount(T, shell(title, {}, glass(h('div', { style: 'padding:18px 0 22px' }, body))));
+}
+
+/* @web.app — своя страница модуля: html из Python, стили и скрипт — /modapp/<модуль>/<n>/app.css|app.js.
+ * Скрипт регистрирует запуск: FRXApps.register('<модуль>', (app) => {...}). Разметку пишет сам модуль
+ * (это код модуля — ему и так доверено всё), чужие данные модуль выводит через textContent. */
+window.FRXApps = window.FRXApps || {
+  _fns: {},
+  register(name, fn) { this._fns[name] = fn; if (this._pending && this._pending.module === name) { const p = this._pending; this._pending = null; p.start(); } },
+};
+
+async function appView(T, module, index, r) {
+  const base = `/modapp/${enc(module)}/${index}/`;
+  const root = h('div', { class: 'modapp', 'data-module': module });
+  root.innerHTML = r.app.html || '';
+  const node = shell(r.title, {}, root);
+  if (r.app.width === 'wide' || r.app.width === 'full') node.classList.add(r.app.width);
+  if (!mount(T, node)) return;
+  const app = {
+    root, module, index,
+    alive: () => root.isConnected && T === TOKEN,
+    call: (action, data) => api('/modapp/call', { module, index, action, data: data || {} }),
+    upload: (action, file, data, onProgress) => apiUpload(`/modapp/upload?module=${enc(module)}&index=${index}&action=${enc(action)}`
+      + `&name=${enc(file.name || 'file')}&data=${enc(JSON.stringify(data || {}))}`, file, onProgress),
+    res: (name, params) => base + 'res/' + name + (params ? '?' + new URLSearchParams(params).toString() : ''),
+    toast: (text, kind) => toast(text, kind),
+  };
+  if (!document.querySelector(`link[data-modapp="${module}"][data-v="${r.app.v}"]`)) {
+    document.querySelectorAll(`link[data-modapp="${module}"]`).forEach((x) => x.remove());
+    document.head.appendChild(h('link', { rel: 'stylesheet', href: base + 'app.css?v=' + r.app.v, 'data-modapp': module, 'data-v': r.app.v }));
+  }
+  const start = () => { try { FRXApps._fns[module](app); } catch (e) { toast('страница модуля: ' + e.message, 'error'); } };
+  const loaded = document.querySelector(`script[data-modapp="${module}"][data-v="${r.app.v}"]`);
+  if (loaded && FRXApps._fns[module]) { start(); return; }
+  document.querySelectorAll(`script[data-modapp="${module}"]`).forEach((x) => x.remove());
+  FRXApps._pending = { module, start };
+  delete FRXApps._fns[module];
+  const sc = document.createElement('script');
+  sc.src = base + 'app.js?v=' + r.app.v;
+  sc.dataset.modapp = module; sc.dataset.v = r.app.v;
+  sc.onerror = () => toast('не загрузился скрипт страницы', 'error');
+  document.body.appendChild(sc);
 }
 
 /* ------------------------------------------------------------------ */

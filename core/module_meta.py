@@ -14,9 +14,9 @@ import ast
 
 def parse_module_meta(source: str):
     """
-    Возвращает dict {'name','module_name','version','author','description','commands'}
-    (commands — список списков имён: [['loadmod', 'lm'], ...]) либо None, если в файле
-    синтаксическая ошибка или не задан MODULE_NAME.
+    Возвращает dict {'name','module_name','version','author','description','commands','requirements'}
+    (commands — список списков имён: [['loadmod', 'lm'], ...]; requirements — строки pip из REQUIREMENTS,
+    core/requirements.py) либо None, если в файле синтаксическая ошибка или не задан MODULE_NAME.
     """
     try:
         tree = ast.parse(source)
@@ -57,4 +57,16 @@ def parse_module_meta(source: str):
                 if names:
                     commands.append(names)
     meta['commands'] = commands
+    try:
+        from .requirements import normalize
+    except ImportError:                    # модуль импортирован не как часть пакета core
+        from requirements import normalize  # type: ignore
+    reqs = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'REQUIREMENTS' for t in node.targets):
+            try:
+                reqs = [spec for spec, _names in normalize(ast.literal_eval(node.value))]
+            except Exception:
+                reqs = []
+    meta['requirements'] = reqs
     return meta

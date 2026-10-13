@@ -179,6 +179,8 @@ def web_allowed_hosts() -> set:
     st = read_json(TUNNEL_STATE_FILE) if TUNNEL_STATE_FILE else None
     if isinstance(st, dict) and st.get('host'):
         out.add(str(st['host']).lower())
+    if isinstance(st, dict) and st.get('prev_host') and time.time() - float(st.get('since') or 0) < 300:
+        out.add(str(st['prev_host']).lower())         # прежний адрес — пока открытые страницы переезжают на новый
     cfg = read_json(CONFIG_PATH, {}) if CONFIG_PATH else {}
     extra = cfg.get('web_hosts') if isinstance(cfg, dict) else None
     if isinstance(extra, list):
@@ -264,7 +266,22 @@ def write_json(path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + '.tmp')
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-    os.replace(tmp, path)
+    replace_retry(tmp, path)
+
+
+def replace_retry(src, dst, tries: int = 8) -> None:
+    """os.replace с повтором: на Windows файл на мгновение держат антивирус, индексатор или читающий его
+    юзербот — тогда replace падает с WinError 5 / 32 («Отказано в доступе»). Ждём и пробуем ещё раз."""
+    delay = 0.02
+    for i in range(tries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.5)
 
 
 def rmtree(path) -> None:
@@ -736,7 +753,9 @@ def migrate_legacy_layout() -> bool:
 # Бэкапы старой раскладки (modules/loaded/... вместо modules/..., без assets/) тоже восстанавливаются.
 
 # кэши, которые восстановятся сами (скачанные файлы и аватарки BotChat) — в резервную копию не кладём
-CACHE_DIRS = ('data/botchat/media/', 'data/botchat/avatars/', 'data/bin/')     # кэш BotChat и скачанный cloudflared (десятки МБ) — не данные
+CACHE_DIRS = ('data/botchat/media/', 'data/botchat/avatars/', 'data/bin/', 'data/cache/')     # кэш BotChat, программы (cloudflared, ffmpeg) и кэши модулей — не данные
+NOBACKUP_MARK = '.nobackup'         # файл-метка: папка с ним (и всё внутри) в резервную копию не идёт — для кэшей и тяжёлых медиа модулей
+NOBACKUP_FILE_LIMIT = 45 * 1024 * 1024   # одиночный файл больше этого — точно не данные FRX (видео, архив) — не кладём
 
 
 def _user_roots() -> list:
@@ -747,6 +766,50 @@ def _user_roots() -> list:
     return roots
 
 
+def _walk_files(base: Path):
+    """Файлы папки, кроме папок с меткой .nobackup и слишком больших одиночных файлов."""
+    for root, dirs, files in os.walk(base):
+        if NOBACKUP_MARK in files:
+            dirs[:] = []
+            continue
+        dirs[:] = [d for d in dirs if d != '__pycache__']
+        for fn in files:
+            f = Path(root) / fn
+            try:
+                if f.is_file() and f.stat().st_size <= NOBACKUP_FILE_LIMIT:
+                    yield f
+            except OSError:
+                continue
+
+
+STUCK_EXIT_SECONDS = 45
+
+
+def _force_stuck_exit(proc):
+    """main.py попросил перезапуск/обновление (request.json), но сам не завершился за STUCK_EXIT_SECONDS
+    (зависший поток библиотеки, сетевой запрос) — завершаем его сами. Возвращает код, как если бы он вышел сам."""
+    try:
+        if not REQUEST_FILE.exists():
+            return None
+        req = read_json(REQUEST_FILE) or {}
+        created = float(req.get('created') or 0)
+    except Exception:
+        return None
+    if not created or created < getattr(proc, '_frx_started', 0) or time.time() - created < STUCK_EXIT_SECONDS:
+        return None                     # заявка старше этого запуска (осталась от прошлого) — не наша
+    log(f"main.py не завершился за {STUCK_EXIT_SECONDS} с после запроса «{req.get('action')}» — завершаю принудительно")
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+    return EXIT_RESTART if req.get('action') == 'restart' else EXIT_APPLY
+
+
 def _iter_user_files() -> list:
     """[(путь_в_бэкапе, Path)] — всё, что считается пользовательскими данными."""
     items = []
@@ -755,9 +818,7 @@ def _iter_user_files() -> list:
     for name, base in _user_roots():
         if not base.is_dir():
             continue
-        for f in base.rglob('*'):
-            if not f.is_file():
-                continue
+        for f in _walk_files(base):
             rel = f"{name}/{f.relative_to(base).as_posix()}"
             parts = rel.split('/')
             if parts[0] == 'data' and len(parts) > 1 and parts[1] in ('backup', 'keeper'):
@@ -1016,10 +1077,12 @@ def restore_code_backup(zip_path) -> None:
 
 
 def _install_requirements() -> dict:
+    deps = ROOT / 'frx_deps.py'
+    cmd = ([sys.executable, str(deps), '--force', '--no-tools'] if deps.is_file()      # ядро + пакеты модулей
+           else [sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt', '--disable-pip-version-check'])
     try:
         r = subprocess.run(
-            [sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt',
-             '--disable-pip-version-check'],
+            cmd,
             cwd=ROOT, capture_output=True, text=True, encoding='utf-8',
             errors='replace', timeout=900,
         )
@@ -1491,8 +1554,25 @@ def hibernate(sentinel: WebSentinel, version: str) -> bool:
 # Основной цикл
 # ===================================================================== #
 
+def ensure_deps() -> None:
+    """Перед запуском: всё, что нужно скачать (пакеты ядра и модулей, ffmpeg, Ollama, если выбрана), — докачать.
+    Если всё на месте, frx_deps.py заканчивает за доли секунды. FRX_SKIP_DEPS=1 — не проверять."""
+    deps = ROOT / 'frx_deps.py'
+    if os.environ.get('FRX_SKIP_DEPS') == '1' or not deps.is_file():
+        return
+    try:
+        r = subprocess.run([sys.executable, str(deps), '--auto'], cwd=ROOT, timeout=3 * 3600)
+        if r.returncode != 0:
+            log("Зависимости поставились не полностью (см. выше) — пробую запустить как есть")
+    except Exception as e:
+        log(f"Проверка зависимостей не удалась: {e}")
+
+
 def _start_main() -> subprocess.Popen:
     env = os.environ.copy()
+    ff = BIN_DIR / 'ffmpeg' if BIN_DIR else None          # свой ffmpeg/ffprobe (frx_deps.py) — виден всем: yt-dlp, py-tgcalls, модулям
+    if ff and ff.is_dir() and str(ff) not in env.get('PATH', '').split(os.pathsep):
+        env['PATH'] = str(ff) + os.pathsep + env.get('PATH', '')
     env.update({
         'FRX_KEEPER': '1',
         'FRX_KEEPER_PID': str(os.getpid()),
@@ -1574,7 +1654,16 @@ def _handle_exit_request(code: int):
 # через обычный ssh-клиент (адрес https://….lhr.life), и потом снова Cloudflare.
 
 TUNNEL_URL_RE = re.compile(r'https://(?!api\.)[a-z0-9-]+\.trycloudflare\.com')
-LHR_URL_RE = re.compile(r'https://[a-z0-9-]+\.lhr\.life')
+LHR_URL_RE = re.compile(r'https://[a-z0-9-]+\.(?:lhr\.life|lhr\.pro|localhost\.run)')
+LHR_KEY_NAME = 'lhr_key'                       # ключ SSH для localhost.run (user/data/bin/lhr_key[.pub]), см. .web tunnel setup
+#
+# Способы публичного адреса (tunnel_request.json → mode), выбираются в Telegram: .web tunnel setup
+#   auto        Cloudflare quick tunnel, при сбоях — localhost.run (без регистрации; адрес меняется)
+#   cloudflare  только Cloudflare quick tunnel
+#   lhr         только localhost.run; с ключом (lhr_key: true), добавленным на admin.localhost.run, адрес живёт дольше
+#   cf_token    именованный туннель Cloudflare (cloudflared tunnel run --token …) на своём домене — адрес постоянный
+#   custom      адрес поднимает что-то другое (Tailscale Funnel, свой сервер, nginx…) — keeper только проверяет его
+TUNNEL_MODES = ('auto', 'cloudflare', 'lhr', 'cf_token', 'custom')
 CLOUDFLARED_BASE = 'https://github.com/cloudflare/cloudflared/releases/latest/download/'
 
 
@@ -1648,11 +1737,14 @@ class TunnelManager:
         self._fails = 0
         self._attempt = 0                      # номер попытки с момента включения — юзербот показывает его владельцу
         self.provider = 'cloudflare'
+        self.mode = 'auto'                     # способ публичного адреса (TUNNEL_MODES), из tunnel_request.json
+        self.setup = None
+        self._fixed_url = None
 
     CONNECT_TIMEOUT = 40                       # адрес выдан, но соединения с Cloudflare нет столько секунд — новая попытка
 
     def state(self, **kw):
-        data = {'ts': time.time(), 'attempt': self._attempt, 'provider': self.provider, **kw}
+        data = {'ts': time.time(), 'attempt': self._attempt, 'provider': self.provider, 'mode': getattr(self, 'mode', 'auto'), **kw}
         if kw.get('status') == 'error' and self._next_try:
             data['next_try'] = self._next_try
         try:
@@ -1709,14 +1801,35 @@ class TunnelManager:
             return
         port = int(req.get('port') or WebSentinel.port())
         renew = req.get('renew')
+        mode = req.get('mode') if req.get('mode') in TUNNEL_MODES else 'auto'
+        setup = (mode, bool(req.get('lhr_key')), str(req.get('cf_token') or ''), str(req.get('cf_host') or ''),
+                 str(req.get('custom_url') or ''))
         alive = self.proc is not None and self.proc.poll() is None
-        if port != self.port or renew != self.renew:          # новый порт или «новый адрес» — пробуем сразу
-            self._next_try, self._streak = 0.0, 0
-            if renew != self.renew:
+        # что из настроек важно для выбранного способа: токен Cloudflare, вписанный «на будущее», не перезапускает
+        # работающий авто-туннель (иначе адрес сменился бы зря)
+        relevant = {'auto': setup[:2], 'cloudflare': setup[:1], 'lhr': setup[:2], 'cf_token': (mode,) + setup[2:4],
+                    'custom': (mode, setup[4])}[mode]
+        new_setup = relevant != getattr(self, '_relevant', None)
+        self._relevant = relevant
+        changed = port != self.port or renew != self.renew or new_setup
+        if changed:                                  # новый порт, «новый адрес» или другой способ — пробуем сразу
+            self._next_try, self._streak, self._fails = 0.0, 0, 0
+            if renew != self.renew or new_setup:
                 self._attempt = 0
-        if alive and (port != self.port or renew != self.renew):
+            if new_setup:
+                self.mode = mode
+                self.provider = {'lhr': 'localhost.run', 'cf_token': 'cloudflare-token', 'custom': 'custom'}.get(mode, 'cloudflare')
+                self._custom_ok_at = 0.0
+                if getattr(self, 'setup', None) is not None:
+                    log(f"Туннель: способ публичного адреса — {mode}")
+        self.setup = setup
+        if alive and changed:
             self._kill()
             alive = False
+        if self.mode == 'custom':
+            self.port, self.renew = port, renew
+            self._custom_tick(setup[4], port, force=changed)
+            return
         if alive:
             return
         if self.proc is not None:                    # процесс умер сам
@@ -1727,7 +1840,7 @@ class TunnelManager:
             self._streak = getattr(self, '_streak', 0) + 1
             log(f"Туннель ({self.provider}): процесс завершился (код {code}) {last}")
             err = f"{self.provider}: процесс завершился (код {code}). {last}".strip()
-            if self._fails >= 2 and shutil.which('ssh'):
+            if self.mode == 'auto' and self._fails >= 2 and shutil.which('ssh'):
                 self.provider = 'localhost.run' if self.provider == 'cloudflare' else 'cloudflare'
                 self._fails = 0
                 log(f"Туннель: пробую {self.provider}")
@@ -1740,20 +1853,36 @@ class TunnelManager:
             return
         self.port, self.renew = port, renew
         self._attempt += 1
-        if self.provider == 'cloudflare':
+        if self.provider in ('cloudflare', 'cloudflare-token'):
+            if self.provider == 'cloudflare-token' and not (self.setup[2] and self.setup[3]):
+                raise KeeperError("именованный туннель Cloudflare: не заданы токен и адрес (.web tunnel setup)")
             exe = find_cloudflared()
             if not exe:
                 self.state(status='downloading', port=port, provider=self.provider)
                 exe = download_cloudflared()
             # http2 (TCP) вместо QUIC (UDP): на многих серверах и в сетях UDP закрыт — тогда QUIC-соединение не
             # поднимается, а адрес отвечает ошибкой 1033
-            cmd = [exe, 'tunnel', '--no-autoupdate', '--protocol', 'http2', '--url', f'http://127.0.0.1:{port}']
+            if self.provider == 'cloudflare-token':
+                token, host = self.setup[2], self.setup[3]
+                if not token or not host:
+                    raise KeeperError("именованный туннель Cloudflare: не заданы токен и адрес (.web tunnel setup)")
+                # куда вести адрес (http://127.0.0.1:<порт>) задаётся в панели Cloudflare у самого туннеля
+                cmd = [exe, 'tunnel', '--no-autoupdate', '--protocol', 'http2', 'run', '--token', token]
+                self._fixed_url = 'https://' + host.strip().strip('/').removeprefix('https://').removeprefix('http://')
+            else:
+                cmd = [exe, 'tunnel', '--no-autoupdate', '--protocol', 'http2', '--url', f'http://127.0.0.1:{port}']
         else:
+            if not shutil.which('ssh'):
+                raise KeeperError("localhost.run: нужен ssh-клиент (на Windows — компонент OpenSSH Client)")
             known = BIN_DIR / 'ssh_known_hosts'
             BIN_DIR.mkdir(parents=True, exist_ok=True)
+            key = BIN_DIR / LHR_KEY_NAME
             cmd = ['ssh', '-T', '-o', 'StrictHostKeyChecking=accept-new', '-o', f'UserKnownHostsFile={known}',
-                   '-o', 'ServerAliveInterval=30', '-o', 'ExitOnForwardFailure=yes', '-o', 'BatchMode=yes',
-                   '-R', f'80:127.0.0.1:{port}', 'nokey@localhost.run']
+                   '-o', 'ServerAliveInterval=30', '-o', 'ExitOnForwardFailure=yes', '-o', 'BatchMode=yes']
+            if self.setup[1] and key.is_file():        # свой ключ, добавленный на admin.localhost.run — адрес держится дольше
+                cmd += ['-i', str(key), '-o', 'IdentitiesOnly=yes', '-R', f'80:127.0.0.1:{port}', 'frx@localhost.run']
+            else:
+                cmd += ['-R', f'80:127.0.0.1:{port}', 'nokey@localhost.run']
         self.state(status='starting', port=port, provider=self.provider)
         self._tail = []
         flags = {'creationflags': 0x08000000} if os.name == 'nt' else {}     # CREATE_NO_WINDOW
@@ -1772,6 +1901,16 @@ class TunnelManager:
             if not line or self.proc is not proc:
                 continue
             self._tail = (self._tail + [line[-200:]])[-8:]
+            if self.provider == 'cloudflare-token':          # адрес известен заранее — ждём только соединения
+                if 'Registered tunnel connection' in line:
+                    cur = read_json(TUNNEL_STATE_FILE) or {}
+                    if cur.get('status') != 'up':
+                        self._mark_up(proc, self._fixed_url, port)
+                elif url is None:
+                    url = self._fixed_url
+                    self.state(status='connecting', url=url, host=urllib.parse.urlparse(url).hostname, port=port,
+                               pid=proc.pid, provider=self.provider)
+                continue
             m = (TUNNEL_URL_RE if self.provider == 'cloudflare' else LHR_URL_RE).search(line)
             if m and m.group(0) != url:
                 url = m.group(0)
@@ -1791,8 +1930,49 @@ class TunnelManager:
         self._bad_checks = 0
         self._up_at = time.time()
         log(f"Туннель работает ({self.provider}): {url}")
+        prev = read_json(TUNNEL_STATE_FILE) or {}
+        extra = {}
+        if prev.get('status') == 'up' and prev.get('url') and prev.get('url') != url:
+            extra = {'prev_url': prev['url'], 'prev_host': prev.get('host')}      # открытые страницы переедут сами
         self.state(status='up', url=url, host=urllib.parse.urlparse(url).hostname, port=port,
-                   since=time.time(), pid=proc.pid, provider=self.provider)
+                   since=time.time(), pid=proc.pid, provider=self.provider, **extra)
+
+    def _custom_tick(self, url, port, force=False):
+        """Способ «свой адрес»: туннель держит не keeper (Tailscale Funnel, свой сервер…), keeper раз в минуту
+        проверяет, что адрес отвечает, и сообщает его юзерботу."""
+        if self.proc is not None:
+            self._kill()
+        url = (url or '').strip().rstrip('/')
+        if not re.match(r'^https?://[^\s/]+', url):
+            if force:
+                self.state(status='error', error='свой адрес не задан (.web tunnel setup)', port=port)
+            return
+        now = time.time()
+        every = self.CHECK_EVERY if (read_json(TUNNEL_STATE_FILE) or {}).get('status') == 'up' else 20
+        if not force and now - getattr(self, '_custom_check', 0) < every:
+            return
+        self._custom_check = now
+        ok, err = True, ''
+        try:
+            req = urllib.request.Request(url + '/__frx_tunnel_check', headers={'User-Agent': f'FRX-Keeper/{KEEPER_VERSION}'})
+            urllib.request.urlopen(req, timeout=15).close()
+        except urllib.error.HTTPError as e:
+            ok, err = e.code not in (502, 503, 504, 530), f"ответ {e.code}"
+        except Exception as e:
+            ok, err = False, str(e)[:160]
+        host = urllib.parse.urlparse(url).hostname
+        cur = read_json(TUNNEL_STATE_FILE) or {}
+        if ok:
+            if cur.get('status') != 'up' or cur.get('url') != url:
+                self._attempt += 1
+                log(f"Туннель (свой адрес): {url} отвечает")
+                self.state(status='up', url=url, host=host, port=port, since=now, provider='custom')
+            return
+        if cur.get('status') == 'up' and now - float(cur.get('ts', 0)) < 3 * self.CHECK_EVERY and not force:
+            return                                       # одна неудачная проверка — ещё не повод
+        self._attempt += 1
+        self._next_try = now + 20
+        self.state(status='error', error=f"{url} не отвечает: {err}", url=url, host=host, port=port, provider='custom')
 
     # Проверка снаружи: раз в CHECK_EVERY секунд keeper сам открывает адрес туннеля. Ответ 530 (ошибка Cloudflare 1033 —
     # «туннель не подключён») CHECK_FAILS раз подряд — cloudflared перезапускается за новым адресом (не чаще 3 раз в час);
@@ -1809,7 +1989,7 @@ class TunnelManager:
             self._streak = getattr(self, '_streak', 0) + 1
             self._fails += 1
             self._next_try = time.time() + 3
-            if self._fails >= 2 and shutil.which('ssh'):
+            if self.mode == 'auto' and self._fails >= 2 and shutil.which('ssh'):
                 self.provider, self._fails, self._next_try = 'localhost.run', 0, time.time() + 2
                 log("Туннель: пробую localhost.run")
             self.state(status='error', error=f"нет соединения с Cloudflare за {self.CONNECT_TIMEOUT} с (порт 7844 закрыт?). {last}".strip(),
@@ -1953,6 +2133,7 @@ def main() -> int:
     recover_interrupted()
     if not REQUEST_FILE.exists():
         cleanup_work_dirs()
+    ensure_deps()
 
     retry_used = False
     pending = None
@@ -1964,6 +2145,7 @@ def main() -> int:
     while True:
         READY_FILE.unlink(missing_ok=True)
         proc = _start_main()
+        proc._frx_started = time.time()
         started = time.monotonic()
         ready_at = None
 
@@ -1974,6 +2156,10 @@ def main() -> int:
                     break
                 except subprocess.TimeoutExpired:
                     now = time.monotonic()
+                    forced = _force_stuck_exit(proc)
+                    if forced is not None:            # main.py завис на выходе после .restart/.update — добиваем
+                        code = forced
+                        break
                     if ready_at is None and READY_FILE.exists():
                         ready_at = now
                         log("main.py запущен полностью")

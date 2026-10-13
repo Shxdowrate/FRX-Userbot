@@ -14,7 +14,7 @@ core/decorators.py
 подстановки декораторов как глобальных имён в namespace модуля нет).
 Использование: `decorators.command(...)`, `decorators.watcher()` и т.д.,
 доступны: command, watcher, on_start, on_load, cycle, telegram_event,
-callback, on_error.
+callback, on_error, on_account_switch, on_edit, on_delete, on_unload.
 """
 
 
@@ -136,5 +136,45 @@ def on_account_switch():
     """
     def deco(func):
         func._frx_type = 'on_account_switch'
+        return func
+    return deco
+
+
+def on_edit():
+    """
+    @on_edit()
+    Сообщение отредактировали (любой чат, в т.ч. ваши сообщения). Функция вызывается
+    с событием Telethon MessageEdited: event.raw_text — новый текст, event.id, event.chat_id,
+    event.sender_id, event.out.
+    """
+    def deco(func):
+        func._frx_type = 'on_edit'
+        return func
+    return deco
+
+
+def on_delete():
+    """
+    @on_delete()
+    Сообщения удалили. Функция вызывается с событием Telethon MessageDeleted:
+    event.deleted_ids — id удалённых сообщений, event.chat_id — чат (в личных чатах и
+    обычных группах Telegram его не сообщает — None; в каналах и супергруппах — есть).
+    Текста удалённого сообщения в событии нет — если он нужен, запоминайте сообщения
+    заранее (@watcher).
+    """
+    def deco(func):
+        func._frx_type = 'on_delete'
+        return func
+    return deco
+
+
+def on_unload():
+    """
+    @on_unload()
+    Модуль выгружают (выгрузка, перезагрузка, обновление): остановите здесь свои фоновые
+    задачи, снимите обработчики. Вызывается без аргументов; ошибки не мешают выгрузке.
+    """
+    def deco(func):
+        func._frx_type = 'on_unload'
         return func
     return deco

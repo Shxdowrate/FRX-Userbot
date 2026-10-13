@@ -22,7 +22,17 @@
     if (!r.ok) { const e = new Error(data.error || ('ошибка ' + r.status)); e.status = r.status; throw e; }
     return data;
   }
-  const enter = () => { msg('вход выполнен'); location.replace('/'); };
+  // ссылка «войти в один клик» из бота или переезд открытой страницы на новый адрес: #frx_t=<билет>&to=<раздел>
+  const hashQ = new URLSearchParams(location.hash.slice(1));
+  const ticket = hashQ.get('frx_t'), goTo = (hashQ.get('to') || '').replace(/^\/+/, '');
+  // '/#/раздел' при открытой '/' — это только смена якоря, страница бы не перезагрузилась и осталась на «вход выполнен»
+  let entering = false;
+  const enter = () => {
+    if (entering) return;
+    entering = true; msg('вход выполнен');
+    history.replaceState(null, '', '/' + (goTo ? '#/' + goTo : ''));
+    location.reload();
+  };
 
   function countdown() {
     clearInterval(tick);
@@ -66,7 +76,12 @@
 
   // Telegram Mini App: данные запуска приходят во фрагменте адреса (#tgWebAppData=…)
   const init = new URLSearchParams(location.hash.slice(1)).get('tgWebAppData');
-  if (init) {
+  if (ticket) {
+    history.replaceState(null, '', location.pathname);            // билет одноразовый — в адресной строке ему не место
+    $('lg-tg').querySelector('.lg-note').textContent = 'вход по ссылке…';
+    show('lg-tg');
+    call('ticket', { ticket }).then(enter).catch((e) => { msg(e.message, true); refresh(); });
+  } else if (init) {
     try { sessionStorage.setItem('frx_tg', '1'); } catch (e) { /* без хранилища — сайт узнает Telegram по его мосту */ }
     show('lg-tg');
     call('telegram', { init_data: init }).then(enter).catch((e) => { msg(e.message, true); refresh(); });

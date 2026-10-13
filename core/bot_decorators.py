@@ -370,3 +370,71 @@ def callback(access='public'):
         return func
 
     return deco
+
+
+def inline_query(*names, access='self', for_user=None, for_chat=None, black_list=None, black_chats=None):
+    """
+    @bot.inline_query('wh', 'whisper', access='self')
+    Настоящий инлайн-режим: «@бот wh аргументы» в любом чате — функция САМА возвращает
+    результаты, которые человек видит в списке и отправляет (в отличие от inline_function,
+    где в чат уходит служебный текст, а работу делает юзербот).
+
+        async def f(query) -> list[engine.InlineResult] | None
+            query.text      — всё после имени ('' если ничего)
+            query.name      — имя, по которому вызвали
+            query.user_id, query.username, query.first_name — кто набирает
+            query.query     — запрос целиком
+
+    access: 'self' (по умолчанию — только владелец) | 'public' — кто угодно.
+    Кнопки результатов с callback_data ловит @bot.inline_click(data_startswith=...).
+    """
+    _check_access(access)
+    if not names:
+        raise ValueError("bot.inline_query(): укажите хотя бы одно имя")
+
+    def deco(func):
+        existing = getattr(func, '_frx_bot_iq_names', [])
+        func._frx_bot_iq_names = list(existing) + [n.lower() for n in names]
+        func._frx_bot_type = 'inline_query'
+        func._frx_bot_access = access
+        func._frx_bot_for_user = for_user
+        func._frx_bot_for_chat = for_chat
+        func._frx_bot_black_list = black_list
+        func._frx_bot_black_chats = black_chats
+        return func
+    return deco
+
+
+def inline_click(data_startswith, access='public'):
+    """
+    @bot.inline_click(data_startswith='wh:')
+    Нажатие кнопки под сообщением, отправленным через @bot.inline_query (не инлайн-формой).
+        async def f(click)
+            click.data, click.user_id, click.username, click.first_name, click.inline_message_id
+            await click.answer(text=None, show_alert=False, url=None)
+            await click.edit(text, buttons=None, styles=None, link_preview=None)
+    access='self' — нажимать может только владелец (остальным — «не для вас»).
+    """
+    _check_access(access)
+
+    def deco(func):
+        func._frx_bot_type = 'inline_click'
+        func._frx_bot_click_prefix = str(data_startswith)
+        func._frx_bot_access = access
+        return func
+    return deco
+
+
+def start_link(prefix):
+    """
+    @bot.start_link('wh_')
+    Ссылка t.me/<бот>?start=<prefix>… — человек открыл бота по такой ссылке.
+        async def f(event, payload)   # event — BotMessageEvent (.reply, .sender_id), payload — всё после prefix
+    Удобно, чтобы показать что-то лично (длинный текст, файл) по кнопке из инлайн-сообщения:
+    click.answer(url=f"https://t.me/{bot}?start=wh_{id}").
+    """
+    def deco(func):
+        func._frx_bot_type = 'start_link'
+        func._frx_bot_start_prefix = str(prefix)
+        return func
+    return deco

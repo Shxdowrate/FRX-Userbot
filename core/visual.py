@@ -166,3 +166,66 @@ def make_helpers(get):
 _h = make_helpers(visual)
 sep, title, section, field, item = _h['sep'], _h['title'], _h['section'], _h['field'], _h['item']
 ok, err, warn, wait, hint, btn = _h['ok'], _h['err'], _h['warn'], _h['wait'], _h['hint'], _h['btn']
+
+
+# --------------------------------------------------------------------------- #
+# progress_bar — полоска прогресса текстом
+# --------------------------------------------------------------------------- #
+
+# стиль → (заполнено, пусто[, частичные доли от меньшей к большей])
+PROGRESS_STYLES = {
+    'block':    ('█', '░'),
+    'smooth':   ('█', '░', '▏▎▍▌▋▊▉'),     # с долями — плавная
+    'shade':    ('▓', '░'),
+    'bar':      ('▰', '▱'),
+    'square':   ('■', '□'),
+    'dot':      ('●', '○'),
+    'circle':   ('◉', '◎'),
+    'line':     ('━', '─'),
+    'arrow':    ('═', '─', '>'),          # «══════>───»
+    'ascii':    ('#', '-'),
+    'braille':  ('⣿', '⣀', '⡀⡄⡆⡇⣇⣧⣷'),
+    'star':     ('★', '☆'),
+    'diamond':  ('◆', '◇'),
+    'frx':      ('🟧', '⬛'),              # в цветах FRX
+    'heart':    ('♥', '♡'),
+    'moon':     ('🌕', '🌑', '🌘🌗🌖'),
+    'vertical': ('█', ' ', '▁▂▃▄▅▆▇'),     # одна ячейка — столбик (удобно с width=1)
+}
+
+
+def progress_bar(percent, width: int = 10, style: str = 'block', show_percent: bool = False, brackets: bool = False) -> str:
+    """
+    Полоска прогресса: progress_bar(37) → «███▋░░░░░░» (style='smooth') / «████░░░░░░» (block).
+    percent — 0…100 (дробные можно, за пределами — обрезается); width — ячеек (по умолчанию 10: 1 ячейка = 10 %);
+    style — см. PROGRESS_STYLES; show_percent — дописать « 37%»; brackets — обернуть в [ ].
+    """
+    st = PROGRESS_STYLES.get(str(style).lower())
+    if st is None:
+        raise KeyError(f"Неизвестный стиль полоски '{style}'. Доступны: {', '.join(PROGRESS_STYLES)}")
+    try:
+        p = float(percent)
+    except (TypeError, ValueError):
+        p = 0.0
+    p = max(0.0, min(100.0, p))
+    width = max(1, int(width or 10))
+    full, empty = st[0], st[1]
+    parts = st[2] if len(st) > 2 else ''
+    cells = p / 100 * width
+    n_full = int(cells)
+    out = full * n_full
+    if n_full < width:
+        frac = cells - n_full
+        if style == 'arrow':
+            out += parts if p > 0 else empty
+        elif parts and frac > 0:
+            idx = min(len(parts) - 1, int(frac * (len(parts) + 1)) - 1)
+            out += parts[idx] if idx >= 0 else empty
+        else:
+            out += empty
+        out += empty * (width - n_full - 1)
+    if brackets:
+        out = f"[{out}]"
+    if show_percent:
+        out += f" {round(p)}%"
+    return out

@@ -15,7 +15,7 @@ import asyncio
 from pathlib import Path
 
 from .context import current_module
-from .paths import DB_PATH
+from .paths import DB_PATH, atomic_write_text
 
 
 class Database:
@@ -32,16 +32,23 @@ class Database:
         if self.path.exists():
             try:
                 self._data = json.loads(self.path.read_text(encoding='utf-8'))
-            except Exception:
+                if not isinstance(self._data, dict):
+                    raise ValueError('не словарь')
+            except Exception as e:
+                # битый файл не затираем пустой базой: откладываем его в сторону — данные можно будет достать руками
+                import time
+                broken = self.path.with_name(f"{self.path.stem}.broken-{time.strftime('%Y%m%d-%H%M%S')}{self.path.suffix}")
+                try:
+                    self.path.replace(broken)
+                    print(f"[FRX] база данных повреждена ({e}) — сохранена как {broken.name}, начинаю с пустой")
+                except OSError:
+                    pass
                 self._data = {}
         else:
             self._data = {}
 
     def _save(self):
-        self.path.write_text(
-            json.dumps(self._data, ensure_ascii=False, indent=2),
-            encoding='utf-8',
-        )
+        atomic_write_text(self.path, json.dumps(self._data, ensure_ascii=False, indent=2))
 
     async def get(self, key, default=None):
         async with self._lock:

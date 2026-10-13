@@ -28,7 +28,7 @@ core/web/ui.py
 import inspect
 from contextlib import contextmanager
 
-__all__ = ['page', 'Ui', 'Ctx']
+__all__ = ['page', 'app', 'Ui', 'Ctx', 'AppRequest']
 
 
 def page(title, icon=None):
@@ -43,6 +43,50 @@ def page(title, icon=None):
         func._frx_web_pages = pages + [{'title': str(title), 'icon': icon}]
         return func
     return deco
+
+
+def app(title, icon=None, html='', css='', js='', width='normal'):
+    """
+    @web.app("Плеер", icon="♫", html=HTML, css=CSS, js=JS)
+    async def player_api(req): ...
+
+    Своя страница сайта на HTML/CSS/JS — когда декларативного @web.page мало (плеер, живые обновления,
+    картинки, загрузка файлов). Вкладка появляется в меню сайта, как и у @web.page.
+
+    html — разметка (вставляется в страницу), css — стили, js — скрипт. Скрипт подключается отдельным
+    файлом (так требует защита сайта) и должен зарегистрировать функцию запуска:
+
+        FRXApps.register('<MODULE_NAME>', (app) => { ... });
+
+    app.root — элемент с вашим html; app.call(action, data) → Promise(ответ Python); app.upload(action, file,
+    data, onProgress) — отправить файл; app.res(name, params) — адрес для <img>/<audio> (идёт в Python
+    с action='res'); app.toast(text, kind); app.alive() — страница ещё открыта (для таймеров опроса).
+
+    Функция-обработчик получает AppRequest: req.action, req.data (dict), req.file (путь к загруженному
+    файлу или None), req.filename. Возвращает dict (уйдёт в браузер как JSON). Для action='res' можно
+    вернуть (bytes, content_type) — так отдаются картинки (например, обложки с чужих сайтов: сайт FRX
+    не грузит картинки с чужих адресов напрямую).
+
+    width — ширина страницы: 'normal' (как у остальных вкладок), 'wide' (до 1700 px) или 'full' (на весь экран).
+    """
+    def deco(func):
+        pages = getattr(func, '_frx_web_pages', [])
+        func._frx_web_pages = pages + [{'title': str(title), 'icon': icon, 'kind': 'app',
+                                        'html': str(html or ''), 'css': str(css or ''), 'js': str(js or ''),
+                                        'width': width if width in ('normal', 'wide', 'full') else 'normal'}]
+        return func
+    return deco
+
+
+class AppRequest:
+    """Запрос со страницы @web.app в Python."""
+
+    def __init__(self, action, data=None, file=None, filename=None, query=None):
+        self.action = str(action or '')
+        self.data = data if isinstance(data, dict) else {}
+        self.file = file              # путь к временному файлу (upload) — удаляется после ответа
+        self.filename = filename
+        self.query = dict(query or {})
 
 
 class Ui:

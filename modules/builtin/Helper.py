@@ -109,59 +109,159 @@ def _module_line(module_name):
         cmd_str = ', '.join([f'<code>.{cmd}</code>' for cmd in cmd_list])
     else:
         cmd_str = "<i>нет команд</i>"
-    return visual.item(f"<b>{display_name}</b>  <code>{module_name}</code> · {cmd_str}")
+    extra = []
+    iq = info.get('bot_inline_queries') or []
+    if iq:
+        extra.append(f"🤖 <code>@{_bot_username() or 'бот'} {iq[0]['name']}</code>" + (f" +{len(iq) - 1}" if len(iq) > 1 else ''))
+    if info.get('bot_commands'):
+        extra.append(f"/{info['bot_commands'][0]['command']}" + (f" +{len(info['bot_commands']) - 1}" if len(info['bot_commands']) > 1 else ''))
+    tail = (" · " + " · ".join(extra)) if extra else ''
+    return visual.item(f"<b>{display_name}</b>  <code>{module_name}</code> · {cmd_str}{tail}")
 
 
-def _modules_list_text():
-    """Текст главного экрана (+ упорядоченный список MODULE_NAME): раздел «Встроенные», затем «Загруженные»."""
+def _bot_username():
+    """username стационарного бота (для подсказок «@бот …»), если он известен."""
+    for attr in ('_bot_username', 'bot_username'):
+        v = getattr(engine, attr, None)
+        if isinstance(v, str) and v:
+            return v.lstrip('@')
+    me = getattr(engine, '_bot_me', None)
+    return getattr(me, 'username', None)
+
+
+ACCESS_LABEL = {'self': '🔒 только вы', 'public': '🌐 все', 'owner': '🔒 только вы'}
+
+
+def _access(entry):
+    label = ACCESS_LABEL.get(entry.get('access'), entry.get('access') or '')
+    if entry.get('for_user'):
+        label += ' + избранные'
+    return label
+
+
+def _list_pages():
+    """Главный экран постранично: [текст страницы, …] + упорядоченный список MODULE_NAME.
+    Всё, что не влезает в одно сообщение, уходит на следующие страницы (стрелки ◂ ▸ под списком)."""
     builtin, loaded = _module_groups()
     total = len(builtin) + len(loaded)
     if not total:
-        return visual.warn('Нет загруженных модулей'), []
+        return [visual.warn('Нет загруженных модулей')], []
 
-    lines = [visual.title('Модули', f"всего: {total}")]
-    used = len(lines[0])
-    hidden = 0
+    blocks = []                      # (заголовок раздела | None, строка)
     for title, names, empty in (
         (visual.section(f"Встроенные · {len(builtin)}"), builtin, visual.hint('нет встроенных модулей')),
         (visual.section(f"Загруженные · {len(loaded)}"), loaded, visual.hint('нет загруженных модулей — <code>.loadmod</code>')),
     ):
-        lines.append("")
-        lines.append(title)
-        used += len(title) + 2
         if not names:
-            lines.append(empty)
-            used += len(empty) + 1
+            blocks.append((title, empty))
         for module_name in names:
-            line = _module_line(module_name)
-            if hidden or used + len(line) + 1 > LIST_TEXT_LIMIT:
-                hidden += 1          # не влезло в одно сообщение — остальное доступно через «Выбрать модуль»
-                continue
-            lines.append(line)
-            used += len(line) + 1
-    if hidden:
-        lines += ["", visual.hint(f"… и ещё {hidden} — см. «Выбрать модуль»")]
-    return "\n".join(lines), builtin + loaded
+            blocks.append((title, _module_line(module_name)))
+
+    # инлайн-запросы и команды бота всех модулей — одной строкой каждый, с доступом
+    bot_name = _bot_username() or 'бот'
+    inline, bcmds = [], []
+    for module_name in builtin + loaded:
+        info = engine.get_module_info(module_name) or {}
+        for e in (info.get('bot_inline_queries') or []) + (info.get('bot_inline_functions') or []):
+            inline.append(f"<code>{e['name']}</code> <i>{_access(e).split(' ', 1)[0]}</i>")
+        for e in info.get('bot_commands') or []:
+            bcmds.append(f"<code>/{e['command']}</code> <i>{_access(e).split(' ', 1)[0]}</i>")
+    for title, items in ((f"Инлайн @{bot_name} · {len(inline)}", inline), (f"Команды бота · {len(bcmds)}", bcmds)):
+        if items:
+            blocks.append((visual.section(title), ", ".join(items)))
+    if inline or bcmds:
+        blocks.append((None, visual.hint("🔒 — только вы · 🌐 — все; подробности — в карточке модуля")))
+
+    pages, cur, used, last_title = [], [], 0, object()
+    budget = LIST_TEXT_LIMIT - 200                 # запас под заголовок страницы
+    for title, line in blocks:
+        add = ([""] + [title] if title is not None and title != last_title else []) + [line]
+        size = sum(len(x) + 1 for x in add)
+        if cur and used + size > budget:
+            pages.append(cur)
+            cur, used = [], 0
+            add = ([""] + [title] if title is not None else []) + [line]      # раздел продолжается — повторяем заголовок
+            size = sum(len(x) + 1 for x in add)
+        cur += add
+        used += size
+        last_title = title if title is not None else last_title
+    if cur:
+        pages.append(cur)
+    n = len(pages)
+    out = []
+    for i, body in enumerate(pages):
+        sub = f"всего: {total}" + (f" · стр. {i + 1}/{n}" if n > 1 else "")
+        out.append("\n".join([visual.title('Модули', sub)] + body))
+    return out, builtin + loaded
 
 
-def _menu_buttons():
-    """Главный экран: ОДНА кнопка."""
-    return [[(visual.btn('Выбрать модуль'), "help_pick:0")]]
+def _modules_list_text(page=0):
+    """(текст страницы page главного экрана, упорядоченный список MODULE_NAME) — для совместимости."""
+    pages, ordered = _list_pages()
+    return pages[max(0, min(page, len(pages) - 1))], ordered
 
 
-def _picker(page):
-    """Экран выбора: до 7 модулей (встроенные, затем загруженные) + навигация снизу. -> (text, buttons, page)."""
-    items = []
+def _menu_buttons(page=0, total=1):
+    """Главный экран: стрелки страниц (если список не влез в одно сообщение) и «Выбрать модуль»."""
+    rows = []
+    if total > 1:
+        rows.append([("◂", f"help_lp:{page - 1}") if page > 0 else ("·", "help_noop"),
+                     (f"{page + 1} / {total}", "help_noop"),
+                     ("▸", f"help_lp:{page + 1}") if page < total - 1 else ("·", "help_noop")])
+    rows.append([(visual.btn('Выбрать модуль'), "help_pick:0", "primary")])
+    return rows
+
+
+def _search_modules(query):
+    """Модули по запросу: имя, MODULE_NAME, команды и описание (без учёта регистра); ничего — ближайшее по написанию."""
+    q = (query or '').strip().lower().lstrip('.')
+    if not q:
+        return _ordered_modules()
+    exact, partial = [], []
     for module_name in _ordered_modules():
+        info = engine.get_module_info(module_name) or {}
+        names = [module_name.lower(), str(info.get('name', '')).lower()]
+        cmds = [c['command'].lower() for c in info.get('commands', [])] + \
+               [a.lower() for c in info.get('commands', []) for a in c.get('aliases', [])]
+        if q in names or q in cmds:
+            exact.append(module_name)
+        elif any(q in x for x in names + cmds) or q in str(info.get('description', '')).lower():
+            partial.append(module_name)
+    found = exact + partial
+    if not found:
+        similar = engine.search_module(q)
+        if similar:
+            found = [similar]
+    return found
+
+
+def _picker(page, query=None):
+    """Экран выбора: до 7 модулей (встроенные, затем загруженные), поиск, навигация. -> (text, buttons, page)."""
+    names = _search_modules(query) if query else _ordered_modules()
+    items = []
+    for module_name in names:
         info = engine.get_module_info(module_name) or {}
         icon = visual.visual('module') if info.get('is_builtin') else visual.visual('file')
         items.append((f"{icon} {info.get('name', module_name)}", f"help_open:{module_name}"))
-    rows, page, total = engine.picker_page(items, page, per_page=PAGE_SIZE, page_callback="help_page:")
+    if items:
+        rows, page, total = engine.picker_page(items, page, per_page=PAGE_SIZE, page_callback="help_page:")
+    else:
+        rows, page, total = [], 0, 1
+    search_row = [engine.InputButton("🔍 Найти модуль", "help_search", hint="название модуля, команда или слово из описания",
+                                     style="primary")]
+    if query:
+        search_row.append((visual.btn('Сбросить поиск', 'close'), "help_search_reset"))
+    rows.insert(0, search_row)
     rows.append([(visual.btn('К списку модулей', 'back'), "help_menu")])
-    text = (
-        visual.title('Модули', f"выберите модуль · страница {page + 1}/{total}") + "\n"
-        + visual.hint(f"{visual.visual('module')} встроенные, затем {visual.visual('file')} загруженные")
-    )
+    if query:
+        head = visual.title('Модули', f"поиск «{html.escape(query)}» · найдено: {len(names)}"
+                            + (f" · стр. {page + 1}/{total}" if total > 1 else ""))
+        text = head + ("" if names else "\n" + visual.hint("ничего не нашлось — попробуйте иначе"))
+    else:
+        text = (
+            visual.title('Модули', f"выберите модуль · страница {page + 1}/{total}") + "\n"
+            + visual.hint(f"{visual.visual('module')} встроенные, затем {visual.visual('file')} загруженные · 🔍 — поиск")
+        )
     return text, rows, page
 
 
@@ -201,6 +301,27 @@ def _module_detail_text(info, module_name):
             lines.append(visual.item(f"{cmd_str} — {cmd_description}"))
     else:
         lines.append(visual.hint('нет зарегистрированных команд'))
+
+    bot_name = _bot_username() or 'бот'
+    iq = info.get('bot_inline_queries') or []
+    inl = info.get('bot_inline_functions') or []
+    if iq or inl:
+        lines += ["", visual.section(f"Инлайн @{bot_name} · {len(iq) + len(inl)}")]
+        for e in iq + inl:
+            al = e.get('aliases') or []
+            s_ = f"<code>@{bot_name} {e['name']}</code>"
+            if al:
+                s_ += " " + visual.hint(', '.join(al))
+            lines.append(visual.item(f"{s_} — {e.get('description') or 'без описания'}  <i>{_access(e)}</i>"))
+    bcmd = info.get('bot_commands') or []
+    if bcmd:
+        lines += ["", visual.section(f"Команды бота · {len(bcmd)}")]
+        for e in bcmd:
+            al = e.get('aliases') or []
+            s_ = f"<code>/{e['command']}</code>"
+            if al:
+                s_ += " " + visual.hint(', '.join('/' + a for a in al))
+            lines.append(visual.item(f"{s_} — {e.get('description') or 'без описания'}  <i>{_access(e)}</i>"))
 
     stats = []
     if info.get('watchers'):
@@ -245,10 +366,10 @@ async def _module_detail_buttons(module_name, show_back=True):
     if show_back:
         rows.append([(visual.btn('К выбору модуля', 'back'), "help_back")])
     if await _has_config(module_name):       # кнопка только если конфиг действительно есть
-        rows.append([(visual.btn('Открыть конфиг'), f"help_cfg:{module_name}")])
+        rows.append([(visual.btn('Открыть конфиг'), f"help_cfg:{module_name}", "primary")])
     rows.append([(visual.btn('Отправить модуль'), f"help_send:{module_name}")])      # тот же .sendmodule
     if not is_builtin:
-        rows.append([(visual.btn('Удалить модуль', 'close'), f"help_del_ask:{module_name}")])
+        rows.append([(visual.btn('Удалить модуль', 'close'), f"help_del_ask:{module_name}", "danger")])
     return rows
 
 
@@ -258,15 +379,48 @@ def _bind_helper_form(form, event, focus=None):
     event — исходное событие команды (нужно кнопке «Открыть конфиг»: engine.exec_modcmd()).
     focus — MODULE_NAME, карточка которого открыта сразу (.help <module>): от него считается страница «назад».
     """
-    state = {'page': _module_page(focus) if focus else 0}
+    state = {'page': _module_page(focus) if focus else 0, 'q': None, 'lp': 0}
 
     async def _show_picker(page):
-        text, buttons, state['page'] = _picker(page)
+        text, buttons, state['page'] = _picker(page, state['q'])
         await form.edit(text, buttons=buttons)
+
+    async def _show_list(page):
+        pages, _ = _list_pages()
+        state['lp'] = max(0, min(page, len(pages) - 1))
+        await form.edit(pages[state['lp']], buttons=_menu_buttons(state['lp'], len(pages)))
+
+    @form.on_click(data_startswith="help_lp:")
+    async def _list_page(click):
+        await click.answer()
+        await _show_list(int(click.data.split(":", 1)[1] or 0))
+
+    @form.on_click(data="help_noop")
+    async def _noop(click):
+        await click.answer()
+
+    @form.on_input(data="help_search")
+    async def _search(inp):
+        q = (inp.value or '').strip()
+        state['q'] = q or None
+        found = _search_modules(q) if q else []
+        if q and len(found) == 1:                   # единственное совпадение — сразу карточка
+            module_name = found[0]
+            info = engine.get_module_info(module_name)
+            await form.edit(_module_detail_text(info, module_name), buttons=await _module_detail_buttons(module_name))
+            return
+        await _show_picker(0)
+
+    @form.on_click(data="help_search_reset")
+    async def _search_reset(click):
+        await click.answer()
+        state['q'] = None
+        await _show_picker(0)
 
     @form.on_click(data_startswith="help_pick:")
     async def _pick(click):
         await click.answer()
+        state['q'] = None
         await _show_picker(int(click.data.split(":", 1)[1] or 0))
 
     @form.on_click(data_startswith="help_page:")
@@ -277,8 +431,7 @@ def _bind_helper_form(form, event, focus=None):
     @form.on_click(data="help_menu")
     async def _menu(click):
         await click.answer()
-        text, _ = _modules_list_text()
-        await form.edit(text, buttons=_menu_buttons())
+        await _show_list(state['lp'])
 
     @form.on_click(data_startswith="help_open:")
     async def _open(click):
@@ -335,7 +488,7 @@ def _bind_helper_form(form, event, focus=None):
                           'Выгрузить с возможностью вернуть — <code>.unloadmod</code>')
         )
         buttons = [
-            [(visual.btn('Да, удалить'), f"help_del_confirm:{module_name}")],
+            [(visual.btn('Да, удалить'), f"help_del_confirm:{module_name}", "danger")],
             [(visual.btn('Отмена', 'close'), f"help_open:{module_name}")],
         ]
         await form.edit(text, buttons=buttons)
@@ -384,18 +537,20 @@ def _bind_helper_form(form, event, focus=None):
 async def list_modules_cmd(event):
     """показывает список всех модулей (инлайн-меню, если доступно)"""
     try:
-        text, sorted_modules = _modules_list_text()
+        pages, sorted_modules = _list_pages()
         if not sorted_modules:
-            await engine.answer(event, text)
+            await engine.answer(event, pages[0])
             return
 
         try:
             form = await engine.create_inlineform(
-                chat_id=event.chat_id, text=text, buttons=_menu_buttons(),
+                chat_id=event.chat_id, text=pages[0], buttons=_menu_buttons(0, len(pages)),
             )
         except Exception:
-            # Стационарный бот не подключён — инлайн недоступен, отдаём как раньше
-            await engine.answer(event, text)
+            # Стационарный бот не подключён — инлайн недоступен: все страницы отдельными сообщениями
+            await engine.answer(event, pages[0])
+            for extra in pages[1:]:
+                await engine.client.send_message(event.chat_id, extra, parse_mode='html')
             return
 
         _bind_helper_form(form, event)
