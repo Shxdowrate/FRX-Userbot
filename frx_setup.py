@@ -14,6 +14,7 @@ frx_setup.py — установка FRX на любую машину: серве
          Linux с systemd — служба frx (от root — системная, иначе — пользовательская + lingering);
          macOS           — LaunchAgent (запуск при входе в систему, перезапуск при падении);
          Windows         — ярлык-скрипт в папке «Автозагрузка» (запуск при входе в Windows, свёрнутым окном).
+         Termux          — скрипт ~/.termux/boot/frx.sh для приложения Termux:Boot (запуск после включения телефона).
        В Docker автозапуск — забота docker compose (restart: on-failure).
     4. Подсказка, как открыть сайт: .web в Telegram, SSH-туннель или публичный адрес (.web tunnel on).
 
@@ -43,6 +44,7 @@ import frx_systemkeeper as keeper  # noqa: E402
 SERVICE = 'frx'
 IS_WIN = os.name == 'nt'
 IS_MAC = sys.platform == 'darwin'
+IS_TERMUX = bool(os.environ.get('TERMUX_VERSION')) or 'com.termux' in os.environ.get('PREFIX', '')
 VENV = ROOT / '.venv'
 VPY = VENV / ('Scripts/python.exe' if IS_WIN else 'bin/python')
 LAUNCHD_LABEL = 'dev.frx.userbot'
@@ -80,7 +82,9 @@ def ensure_venv():
         say(f"    окружение уже есть: {VENV.name}/")
         return
     say(f"    создаю окружение {VENV.name}/ …")
-    r = run([sys.executable, '-m', 'venv', VENV], capture_output=True, text=True)
+    # в Termux окружение видит пакеты системы (python-pillow, python-lxml, … из pkg) — их не нужно собирать на телефоне
+    r = run([sys.executable, '-m', 'venv', *(['--system-site-packages'] if IS_TERMUX else []), VENV],
+            capture_output=True, text=True)
     if r.returncode != 0 or not VPY.is_file():
         say(r.stderr.strip()[-800:])
         if 'ensurepip' in (r.stderr or '') or 'venv' in (r.stderr or ''):
@@ -293,7 +297,44 @@ def install_windows():
     return True
 
 
+TERMUX_BOOT = Path.home() / '.termux' / 'boot' / 'frx.sh'
+
+
+def install_termux_boot() -> bool:
+    """Termux:Boot запускает скрипты из ~/.termux/boot/ после включения телефона."""
+    log = ROOT / 'user' / 'data' / 'termux_boot.log'
+    TERMUX_BOOT.parent.mkdir(parents=True, exist_ok=True)
+    TERMUX_BOOT.write_text(textwrap.dedent(f"""\
+        #!/data/data/com.termux/files/usr/bin/sh
+        # FRX — автозапуск после включения телефона (frx_setup.py). Нужно приложение Termux:Boot: откройте его один раз.
+        termux-wake-lock
+        export ANDROID_API_LEVEL="$(getprop ro.build.version.sdk 2>/dev/null || echo 24)"
+        export PIP_FIND_LINKS="https://github.com/Shxdowrate/FRX-Userbot-APK/releases/expanded_assets/wheels" PIP_PREFER_BINARY=1
+        cd "{ROOT}" || exit 1
+        while true; do
+          .venv/bin/python -u frx_systemkeeper.py >> "{log}" 2>&1
+          code=$?
+          # 0 — остановлен командой (.exit), 78 — ошибка настройки: не перезапускаем
+          if [ "$code" -eq 0 ] || [ "$code" -eq 78 ]; then break; fi
+          sleep 15
+        done
+        termux-wake-unlock
+        """), encoding='utf-8')
+    TERMUX_BOOT.chmod(0o755)
+    say(f"    автозапуск: {TERMUX_BOOT}")
+    say(textwrap.indent(textwrap.dedent("""\
+        Чтобы он срабатывал:
+          1. поставьте приложение Termux:Boot (F-Droid или GitHub — оттуда же, откуда Termux) и откройте его один раз;
+          2. в настройках Android для Termux и Termux:Boot отключите экономию батареи.
+        """), '    '))
+    return True
+
+
 def setup_autostart(args):
+    if IS_TERMUX:
+        if ask("    Запускать FRX после включения телефона (через приложение Termux:Boot)?", args.yes):
+            return install_termux_boot()
+        return False
     if in_docker():
         say("    Docker: автозапуск задаёт docker compose (restart: on-failure) — пропускаю")
         return False
@@ -329,6 +370,14 @@ def final_hints(service_ok):
     user = os.environ.get('SUDO_USER') or os.environ.get('USER') or os.environ.get('USERNAME') or 'пользователь'
     start = 'start.bat' if IS_WIN else './start.sh'
     say("\nГотово.")
+    if IS_TERMUX:
+        say(textwrap.indent(textwrap.dedent(f"""\
+              Запуск: cd {ROOT} && sh start.sh   (Termux должен оставаться открытым в фоне — уведомление Termux висит)
+              Сайт управления: .web в Telegram → откройте http://127.0.0.1:{port} в браузере телефона.
+              Чтобы Android не выгружал FRX: экономию батареи для Termux — выключить; в Termux — «Acquire wakelock»
+              в уведомлении (start.sh делает это сам).
+            """), '  '))
+        return
     if not service_ok:
         say(f"  Запуск юзербота: {start}  (или {VPY.relative_to(ROOT)} frx_systemkeeper.py)")
     say(textwrap.indent(textwrap.dedent(f"""\
@@ -354,7 +403,10 @@ def main() -> int:
         say("Нужен Python 3.10 или новее.")
         return 1
     if args.remove_service:
-        if has_systemd():
+        if IS_TERMUX:
+            TERMUX_BOOT.unlink(missing_ok=True)
+            say("    автозапуск Termux:Boot убран")
+        elif has_systemd():
             remove_systemd()
         elif IS_MAC and launchd_path().exists():
             run(['launchctl', 'unload', launchd_path()])

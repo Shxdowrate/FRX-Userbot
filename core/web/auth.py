@@ -21,6 +21,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import time
 from urllib.parse import parse_qsl
@@ -28,6 +29,7 @@ from urllib.parse import parse_qsl
 from ..paths import DATA_DIR, atomic_write_text
 
 SESSIONS_FILE = DATA_DIR / 'web_sessions.json'
+APP_TICKET_FILE = DATA_DIR / 'web_app_ticket.json'     # билет приложения FRX для Android (use_app_ticket)
 COOKIE = 'frx_session'
 CODE_LEN = 5
 WINDOW_TTL = 10 * 60          # сколько открыт вход после команды .web
@@ -228,6 +230,30 @@ class WebAuth:
         if not t or time.time() > t['until']:
             return None
         return t['via']
+
+    def use_app_ticket(self, token: str):
+        """Вход с кнопки «Сайт FRX» в приложении для Android — без кода. Приложение кладёт одноразовый билет
+        (SHA-256, срок until) в user/data/web_app_ticket.json — эту папку может читать и писать только само приложение —
+        и открывает сайт с #frx_t=<билет>. Файл удаляется при любой попытке. Только на Android (FRX_ANDROID) и только
+        для запросов не через публичный туннель (это проверяет сервер). Возвращает via или None."""
+        if not os.environ.get('FRX_ANDROID') or not token or len(token) > 100:
+            return None
+        try:
+            data = json.loads(APP_TICKET_FILE.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return None
+        try:
+            APP_TICKET_FILE.unlink()
+        except OSError:
+            pass
+        try:
+            if time.time() > float(data.get('until', 0)):
+                return None
+        except (TypeError, ValueError):
+            return None
+        if not hmac.compare_digest(str(data.get('hash', '')), _h(str(token))):
+            return None
+        return 'приложение FRX для Android'
 
     # ------------------------------------------------------------------ Telegram Mini App
     def verify_init_data(self, init_data: str) -> int:

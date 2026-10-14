@@ -646,7 +646,10 @@ class WebPanel:
 
     async def a_auth_ticket(self, request):
         body = await self._json(request)
-        via = self.auth.use_ticket(str(body.get('ticket') or ''))
+        ticket = str(body.get('ticket') or '')
+        via = self.auth.use_ticket(ticket)
+        if not via and not self.is_remote(request):            # кнопка «Сайт FRX» в приложении для Android
+            via = self.auth.use_app_ticket(ticket)
         if not via:
             raise ApiError('Ссылка для входа уже использована или устарела — войдите по коду (.web в Telegram)', 403)
         return await self._set_session(request, via)

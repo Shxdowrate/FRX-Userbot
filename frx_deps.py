@@ -44,7 +44,15 @@ sys.dont_write_bytecode = True
 
 IS_WIN = os.name == 'nt'
 IS_MAC = sys.platform == 'darwin'
-IS_ANDROID = sys.platform == 'android' or bool(os.environ.get('FRX_ANDROID'))   # приложение FRX для Android
+IS_TERMUX = bool(os.environ.get('TERMUX_VERSION')) or 'com.termux' in os.environ.get('PREFIX', '')
+IS_ANDROID = (sys.platform == 'android' or bool(os.environ.get('FRX_ANDROID'))) and not IS_TERMUX   # приложение FRX
+if IS_TERMUX and not os.environ.get('ANDROID_API_LEVEL'):
+    # сборщик Rust-пакетов (maturin) в Termux требует уровень API Android
+    try:
+        os.environ['ANDROID_API_LEVEL'] = subprocess.run(['getprop', 'ro.build.version.sdk'], capture_output=True,
+                                                         text=True, timeout=5).stdout.strip() or '24'
+    except Exception:
+        os.environ['ANDROID_API_LEVEL'] = '24'
 IN_DOCKER = bool(os.environ.get('FRX_IN_DOCKER')) or Path('/.dockerenv').exists()
 
 CORE_REQ = ROOT / 'requirements.txt'
@@ -351,6 +359,12 @@ def module_requirements() -> dict:
     return out
 
 
+def strip_extras(spec: str) -> str:
+    """«yt-dlp[default,deno]>=2025; маркер» → «yt-dlp>=2025; маркер» (без дополнений)."""
+    import re
+    return re.sub(r'\[[^\]]*\]', '', spec, count=1)
+
+
 def marker_ok(spec: str) -> bool:
     if ';' not in spec:
         return True
@@ -380,6 +394,16 @@ def install_module_requirements(force: bool, st: dict) -> None:
     prog = Progress(len(todo))
     for i, spec in enumerate(todo):
         ok1, out1, sec = pip_live(spec, prog, i)
+        base = strip_extras(spec)
+        if not ok1 and base != spec:
+            # «пакет[дополнения]» не встал целиком (дополнение не собирается на этой системе) — ставим сам пакет:
+            # модуль заработает, пусть и без части возможностей; полную установку попробуем позже
+            ok2, out2, sec2 = pip_live(base, prog, i)
+            if ok2:
+                failed[spec] = time.time()
+                prog.done_line(f"  √ {names[i].split('[')[0]} · {sec + sec2} с — без дополнений "
+                               f"[{spec.split('[', 1)[1].split(']')[0]}]: они не собираются на этой системе")
+                continue
         if ok1:
             failed.pop(spec, None)
             prog.done_line(f"  √ {names[i]} · {sec} с")
@@ -428,6 +452,10 @@ def download(url: str, dest: Path, label: str) -> None:
 
 def install_ffmpeg() -> None:
     if ffmpeg_ready() or IN_DOCKER or IS_ANDROID:     # на Android ffmpeg (если есть) приносит само приложение
+        return
+    if IS_TERMUX:                                     # в Termux — из его репозитория (сборки для обычного Linux там не работают)
+        say("ставлю ffmpeg из репозитория Termux…")
+        subprocess.run(['pkg', 'install', '-y', 'ffmpeg'])
         return
     if IS_MAC:
         if shutil.which('brew'):
@@ -641,7 +669,7 @@ def ask_ollama(st: dict, timeout=None) -> None:
 
 
 def install_ollama(st: dict, interactive: bool) -> None:
-    if not st.get('ollama') or IN_DOCKER or IS_ANDROID:
+    if not st.get('ollama') or IN_DOCKER or IS_ANDROID or IS_TERMUX:
         return
     if st.get('ollama_done') and ollama_bin():
         return

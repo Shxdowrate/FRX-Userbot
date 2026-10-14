@@ -1,37 +1,24 @@
-# Всё личное: config.json, БД, сессии и аккаунты Telegram, ключи нейросетей,
-# пользовательские модули и ассеты, резервные копии. НИКОГДА не коммитьте эту папку.
+# Личное — никогда не в git: конфиг, сессии Telegram, база, бэкапы, ваши модули
 /user/
-
-# Старая раскладка (до переезда в user/) — на случай, если она где-то осталась
 /config.json
 /data/
 /modules/loaded/
-
-# Сессии Telethon и прочие секреты, где бы они ни лежали
+/modules/unloaded/
 *.session
 *.session-journal
-.env
-.env.*
 
-# Python
+# Окружение Python — у каждого своё (ставится само через install.bat / install.sh)
+/.venv/
+/venv/
+/env/
+
+# Мусор и сборки
 __pycache__/
-*.py[cod]
-.venv/
-venv/
-env/
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Редакторы и ОС
+*.py[co]
+*.log
+/dist/
 .idea/
 .vscode/
-.vs/
-*.swp
-*.bak
 .DS_Store
 Thumbs.db
-
-# Архивы релиза (python frx_pack.py --zip)
-/dist/
+desktop.ini

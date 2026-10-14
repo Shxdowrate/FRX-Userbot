@@ -19,6 +19,7 @@ import ast
 import asyncio
 import importlib
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -76,6 +77,11 @@ def import_name(spec: str) -> str:
     return KNOWN_IMPORTS.get(name, name.replace('-', '_'))
 
 
+def strip_extras(spec: str) -> str:
+    """«yt-dlp[default,deno]>=2025; маркер» → «yt-dlp>=2025; маркер»."""
+    return re.sub(r'\[[^\]]*\]', '', spec, count=1)
+
+
 def marker_ok(spec: str) -> bool:
     """Маркер окружения после «;» (sys_platform == 'win32', python_version >= '3.13' …) подходит этой системе?"""
     if ';' not in spec:
@@ -103,7 +109,23 @@ def present(names) -> bool:
 
 def missing(reqs):
     """Чего из reqs нет в окружении (с учётом маркеров) → [(строка pip, имена)]."""
-    return [(spec, names) for spec, names in reqs if marker_ok(spec) and not present(names)]
+    # «пакет[дополнения]»: модулю хватает самого пакета — дополнения при каждом старте докачивает frx_deps.py
+    # (с повтором раз в сутки), здесь не ставим заново из-за одного недостающего дополнения
+    return [(spec, names) for spec, names in reqs
+            if marker_ok(spec) and not present(names[:1] if strip_extras(spec) != spec else names)]
+
+
+def _refresh_paths():
+    """Пакет мог встать в пользовательскую папку (pip --user: приложение для Android, PIP_USER), которой при запуске
+    Python ещё не было, — тогда её нет в sys.path, и пакет виден только после перезапуска. Добавляем её сразу."""
+    import site
+    try:
+        user = site.getusersitepackages()
+        if os.path.isdir(user) and user not in sys.path:
+            site.addsitedir(user)
+    except Exception:
+        pass
+    importlib.invalidate_caches()
 
 
 def _pip_install(specs):
@@ -122,7 +144,23 @@ async def install(reqs, log=None):
         if log:
             log(f"ставлю {spec}…")
         ok, out = await asyncio.to_thread(_pip_install, [spec])
-        importlib.invalidate_caches()
+        _refresh_paths()
+        base = strip_extras(spec)
+        if not (ok and present(names)) and base != spec and not present(names[:1]):
+            # с дополнениями не встал (их нечем собрать на этой системе) — ставим сам пакет, без дополнений
+            if log:
+                log(f"{spec} целиком не встал — ставлю без дополнений: {base}")
+            ok2, out2 = await asyncio.to_thread(_pip_install, [base])
+            _refresh_paths()
+            if ok2 and present(names[:1]):
+                done.append(base + ' (без дополнений)')
+                _failed[spec] = time.time()             # полную установку попробуем позже
+                continue
+            out = out2 or out
+        if not (ok and present(names)) and base != spec and present(names[:1]):
+            done.append(base + ' (без дополнений)')
+            _failed[spec] = time.time()
+            continue
         if ok and present(names):
             done.append(spec)
             _failed.pop(spec, None)

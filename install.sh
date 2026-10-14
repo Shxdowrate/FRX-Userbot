@@ -9,6 +9,44 @@
 
 REPO="${FRX_REPO:-Shxdowrate/FRX-Userbot}"
 
+# --------------------------------------------------------------------------- Termux (Android)
+# Termux — полноценный Linux на телефоне: ставим системой всё, что нужно модулям (компиляторы для пакетов с C/Rust,
+# ffmpeg, библиотеки картинок и XML) и готовые сборки тяжёлых Python-пакетов из репозитория Termux.
+# Список пакетов продублирован в тесте CI репозитория FRX-Userbot-APK (tests/termux) — меняете здесь, поменяйте и там.
+TERMUX_PKGS="python git clang make pkg-config binutils rust libjpeg-turbo libpng freetype libwebp libxml2 libxslt libffi openssl ffmpeg"
+TERMUX_PY_PKGS="python-pillow python-lxml python-numpy python-cryptography python-psutil"
+
+is_termux() {
+  [ -n "${TERMUX_VERSION:-}" ] && return 0
+  case "${PREFIX:-}" in *com.termux*) return 0 ;; esac
+  return 1
+}
+
+termux_prepare() {
+  echo "  Termux: ставлю системные пакеты (Python, компиляторы, ffmpeg, библиотеки). Первый раз — 5–15 минут…"
+  # pkg каждый раз выбирает случайное зеркало, и оно бывает битым — до трёх попыток
+  ok=""
+  for try in 1 2 3; do
+    yes | pkg update >/dev/null 2>&1
+    # shellcheck disable=SC2086
+    if pkg install -y $TERMUX_PKGS; then ok=1; break; fi
+    echo "  попытка $try не удалась — пробую другое зеркало…"
+  done
+  if [ -z "$ok" ]; then
+    echo "  Не все пакеты встали. Проверьте интернет, выберите зеркало (termux-change-repo) и запустите install.sh снова."
+    exit 1
+  fi
+  for p in $TERMUX_PY_PKGS; do
+    if pkg install -y "$p" >/dev/null 2>&1; then echo "  √ $p"; else echo "  · $p — нет в репозитории Termux, соберётся через pip"; fi
+  done
+  # готовые сборки под Android тяжёлых пакетов (pydantic-core, lxml, primp, numpy…) из CI FRX-Userbot-APK:
+  # без них pip собирает их на телефоне по 5–15 минут каждый
+  export PIP_FIND_LINKS="https://github.com/Shxdowrate/FRX-Userbot-APK/releases/expanded_assets/wheels" PIP_PREFER_BINARY=1
+  ANDROID_API_LEVEL="$(getprop ro.build.version.sdk 2>/dev/null)"
+  export ANDROID_API_LEVEL="${ANDROID_API_LEVEL:-24}"     # нужен сборщику Rust-пакетов (maturin) под Android
+  command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock
+}
+
 # вопросы задаём через терминал, даже если скрипт пришёл через «curl … | sh»
 has_tty() { ( : < /dev/tty ) 2>/dev/null; }
 
@@ -52,6 +90,10 @@ install_python() {
   esac
   find_python
 }
+
+if is_termux; then
+  termux_prepare
+fi
 
 if ! find_python && ! install_python; then
   echo "Нужен Python 3.10 или новее. Установите его и запустите install.sh снова:"

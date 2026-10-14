@@ -119,7 +119,8 @@ def scan_code(literals: dict) -> list:
             continue
         for no, line in enumerate(text.splitlines(), 1):
             for value, why in literals.items():
-                if value in line and re.search(r'(?<![\w@])' + re.escape(value) + r'(?!\w)', line):
+                # «Имя/Репозиторий», github.com/Имя/… — адрес репозитория на GitHub, а не личные данные
+                if value in line and re.search(r'(?<![\w@])' + re.escape(value) + r'(?![\w/])', line):
                     found.append((rel, no, f'ваше значение из {why}'))
             for rx, why in PATTERNS:
                 if rx.search(line):
