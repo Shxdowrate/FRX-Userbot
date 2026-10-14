@@ -619,7 +619,7 @@ FRX/
 
 | Настройка | По умолчанию | Что делает |
 |---|---|---|
-| `media` | `experience_1` | `experience_1` — встроенная анимация FRX (`assets/experience/experience_1.mp4`), `none` — без медиа, или ссылка / путь к своей картинке (`.jpg`/`.png`/`.webp`) или анимации (`.mp4`/`.gif`/`.webm`) |
+| `media` | `experience_1` | `experience_1` — короткое превью FRX: логотип, канал, GitHub (`assets/experience/experience_1.mp4`), `experience_2` — анимация-презентация FRX (`experience_2.mp4`), `experience_3` — прежняя анимация (`experience_3.mp4`), `none` — без медиа, или ссылка / путь к своей картинке (`.jpg`/`.png`/`.webp`) или анимации (`.mp4`/`.gif`/`.webm`) |
 
 ### AccountManager — `.accounts`
 
@@ -696,6 +696,7 @@ FRX/
 ### Startup — стационарный бот без ручной настройки
 
 Работает при каждом запуске и при переключении аккаунта, подробно — [раздел 9](#9-стационарный-бот).
+Новому боту ставит аватарку — логотип FRX (`assets/logo/frx_avatar.png`); свою аватарку бота не перезаписывает.
 Команд и настроек нет.
 
 ### Changelog — «что нового»

@@ -1405,10 +1405,17 @@ def tg_reachable(timeout: float = 4.0) -> bool:
     return False
 
 
-_WAKE_PAGE = """<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>FRX</title><style>html,body{height:100%;margin:0;background:#1d3f86;color:#fff;font:400 18px system-ui,sans-serif}
-body{display:grid;place-items:center;text-align:center}small{display:block;opacity:.65;margin-top:10px;font-size:14px}</style></head>
-<body><div>@TITLE@<small>@NOTE@</small></div><script>setTimeout(function(){location.reload()},@MS@)</script></body></html>"""
+_LOGO_SVG = ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='30 28 48 52'><defs><linearGradient id='a' x1='0' y1='0' x2='1' y2='1'>"
+             "<stop offset='0' stop-color='#ff2a1c'/><stop offset='.55' stop-color='#ff5a14'/><stop offset='1' stop-color='#ff8a00'/>"
+             "</linearGradient></defs><path fill='url(#a)' d='M38,32h34l-5,8h-21v10h17l-5,8h-12v18h-8z'/>"
+             "<path fill='#ff8a00' fill-opacity='.6' d='M60,62l12,7l-12,7z'/></svg>")   # логотип FRX (как assets/logo/frx.svg)
+_WAKE_PAGE = ("""<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FRX</title><link rel="icon" href="data:image/svg+xml,@LOGOURI@"><style>html,body{height:100%;margin:0;background:#050506;color:#fff;font:700 18px 'Century Gothic','Jost',system-ui,sans-serif}
+body{display:grid;place-items:center;text-align:center;background:radial-gradient(ellipse 60% 50% at 50% 45%,#140b08,#050506 75%)}
+.m{width:56px;height:61px;margin:0 auto 18px;filter:drop-shadow(0 0 18px rgba(255,70,20,.6))}small{display:block;opacity:.65;margin-top:10px;font-size:14px}</style></head>
+<body><div><div class="m">@LOGO@</div>@TITLE@<small>@NOTE@</small></div><script>setTimeout(function(){location.reload()},@MS@)</script></body></html>"""
+              .replace('@LOGOURI@', _LOGO_SVG.replace('<', '%3C').replace('>', '%3E').replace('#', '%23'))
+              .replace('@LOGO@', _LOGO_SVG))
 
 
 def _wake_page(title, note, ms):

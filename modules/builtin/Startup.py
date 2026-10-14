@@ -44,6 +44,11 @@ modules/builtin/Startup.py
        Что уже настроено, запоминается в БД (ключ inline_configured = username бота),
        повторно диалог не проводится. Ошибка настройки не роняет запуск: она пишется
        в терминал, а попытка повторится при следующем старте.
+    5а. Аватарка бота — логотип FRX (assets/logo/frx_avatar.png). Ставится один раз
+       на каждого бота (БД: avatar_set = username) и только если у бота ещё нет фото —
+       своя аватарка владельца не перезаписывается, а удалённую FRX заново не вернёт.
+       Сначала через Bot API (setMyProfilePhoto), если не вышло — диалогом /setuserpic
+       с @BotFather.
     6. При переключении на другой аккаунт (@decorators.on_account_switch())
        — бота НЕ создаёт (он один на весь юзербот, user/config.json общий для
        всех аккаунтов), только проверяет ЧС и пишет /start от лица НОВОГО
@@ -78,9 +83,9 @@ import accounts
 
 NAME = "Startup"
 MODULE_NAME = "startup"
-VERSION = "2.2"
+VERSION = "2.3"
 AUTHOR = "FRX"
-DESCRIPTION = "Автосоздание/восстановление стационарного бота через BotFather, включение его инлайн-режима и инлайн-фидбэка (100%), снятие с ЧС и старт диалога при запуске/смене аккаунта"
+DESCRIPTION = "Автосоздание/восстановление стационарного бота через BotFather, включение его инлайн-режима и инлайн-фидбэка (100%), аватарка-логотип FRX, снятие с ЧС и старт диалога при запуске/смене аккаунта"
 
 from core.paths import CONFIG_PATH
 BOTFATHER = 'BotFather'
@@ -380,6 +385,67 @@ async def _ensure_inline_configured():
         )
 
 
+
+# --: аватарка стационарного бота — логотип FRX ------------------
+
+_AVATAR = ('logo', 'frx_avatar.png')
+
+
+async def _set_avatar_via_botfather(username: str, path: str):
+    """Запасной путь: /setuserpic -> @бот -> фото, диалогом с @BotFather от лица аккаунта."""
+    handle = f"@{username}"
+    try:
+        await _botfather_ask('/cancel')
+    except Exception:
+        pass
+    await _botfather_ask('/setuserpic')
+    reply = await _botfather_ask(handle)
+    if 'photo' not in reply.lower() and 'фото' not in reply.lower():
+        raise RuntimeError(f"BotFather не принял бота {handle} на шаге /setuserpic: {reply[:300]}")
+    await engine.client.send_file(BOTFATHER, path)
+    msg = await engine.wait_message(chat_id=BOTFATHER, user_id=BOTFATHER, timeout=_BOTFATHER_TIMEOUT)
+    text = (msg.raw_text or '').lower()
+    if 'success' not in text and 'updated' not in text and 'обновл' not in text:
+        raise RuntimeError(f"BotFather ответил неожиданно после отправки фото: {(msg.raw_text or '')[:300]}")
+
+
+async def _ensure_bot_avatar():
+    """
+    Ставит боту аватарку-логотип FRX (см. докстринг модуля, п. 5а). Идемпотентно: для каждого
+    username — один раз (БД: avatar_set); если у бота уже есть фото — не трогает. Ошибка не роняет
+    запуск: попытка повторится при следующем старте.
+    """
+    token = engine.config.get('aiogram_token')
+    if not token:
+        return
+    try:
+        path = str(engine.asset_path(*_AVATAR))
+    except FileNotFoundError:
+        return
+    tmp_bot = AiogramBot(token=token)
+    try:
+        me = await tmp_bot.get_me()
+        username = me.username
+        if await db.get('avatar_set') == username:
+            return
+        photos = await tmp_bot.get_user_profile_photos(me.id, limit=1)
+        if photos.total_count:
+            await db.set('avatar_set', username)          # своя аватарка уже есть — не перезаписываем
+            return
+        try:
+            from aiogram.types import FSInputFile, InputProfilePhotoStatic
+            await tmp_bot.set_my_profile_photo(photo=InputProfilePhotoStatic(photo=FSInputFile(path, filename='frx.png')))
+        except Exception as e:
+            engine.tlog(f"{visual.visual('info')} [Startup] Bot API не поставил аватарку ({e}) — ставлю через BotFather")
+            await _set_avatar_via_botfather(username, path)
+        await db.set('avatar_set', username)
+        engine.tlog(f"{visual.visual('status_success')} [Startup] Аватарка бота @{username} — логотип FRX")
+    except Exception as e:
+        engine.tlog(f"{visual.visual('status_warning')} [Startup] не удалось поставить аватарку бота: {e} (повторю при следующем запуске)")
+    finally:
+        await tmp_bot.session.close()
+
+
 async def _ensure_bot_not_blocked():
     """
     если владелец аккаунта лично добавил стационарного бота
@@ -483,6 +549,7 @@ async def startup_sequence():
     """
     await _ensure_bot_exists()
     await _ensure_inline_configured()
+    await _ensure_bot_avatar()
     await _ensure_bot_not_blocked()
     await _ensure_dialog_started()
 

@@ -14,7 +14,9 @@ modules/builtin/Info.py · 2.0
 
 Оформление — visual.title/section/field; над информацией — медиа (настройка media).
 Конфиг `media`:
-    experience_1        — встроенная анимация-презентация FRX (assets/experience/experience_1.mp4);
+    experience_1        — короткое превью FRX: логотип, канал, GitHub (assets/experience/experience_1.mp4, 5 с, без звука);
+    experience_2        — анимация-презентация FRX (assets/experience/experience_2.mp4, 1:40, со звуком);
+    experience_3        — прежняя анимация FRX (assets/experience/experience_3.mp4);
     none                — без медиа;
     https://… или путь  — любая своя картинка (.jpg/.png/.webp) или анимация (.mp4/.gif/.webm).
 """
@@ -36,14 +38,14 @@ AUTHOR = "FRX"
 DESCRIPTION = "Полная информация о юзерботе и системе (.info) с анимацией; конфиденциальные сведения — по инлайн-кнопке; проверка окружения (.doctor)"
 
 _STARTED_AT = _time.monotonic()
-PRESETS = {'experience_1': ('experience', 'experience_1.mp4')}     # встроенные медиа (assets/…)
+PRESETS = {f'experience_{n}': ('experience', f'experience_{n}.mp4') for n in (1, 2, 3)}     # встроенные медиа (assets/…)
 
 
 @decorators.on_start()
 async def _configs():
     await engine.create_config(
         key='media',
-        description='Медиа над .info: experience_1 — встроенная анимация FRX, none — без медиа, '
+        description='Медиа над .info: experience_1 — превью FRX, experience_2 — презентация, experience_3 — прежняя анимация, none — без медиа, '
                     'или прямая ссылка / путь к своей картинке (.jpg/.png/.webp) или анимации (.mp4/.gif/.webm)',
         data_type='str', default='experience_1',
     )

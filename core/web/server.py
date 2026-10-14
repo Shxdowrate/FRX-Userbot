@@ -49,7 +49,7 @@ from ..emulate import EmuSession, describe_commands
 from . import ui as ui_mod
 
 STATIC_DIR = Path(__file__).parent / 'static'
-STATIC_FILES = {'login.html', 'login.css', 'login.js', 'style.css', 'app.js', 'font.woff2', 'botchat.js', 'botchat.css', 'webide.js', 'webide.css', 'sandbox.js', 'lab_core.js', 'lab.js', 'lab.css', 'panel.js', 'panel.css', 'neuro.js', 'neuro.css', 'accent.css', 'fx.js', 'access.js', 'access.css', 'depth.js', 'depth.css', 'mobile.css', 'mobile.js'}
+STATIC_FILES = {'login.html', 'login.css', 'login.js', 'style.css', 'app.js', 'font.woff2', 'botchat.js', 'botchat.css', 'webide.js', 'webide.css', 'sandbox.js', 'lab_core.js', 'lab.js', 'lab.css', 'panel.js', 'panel.css', 'neuro.js', 'neuro.css', 'accent.css', 'fx.js', 'access.js', 'access.css', 'depth.js', 'depth.css', 'mobile.css', 'mobile.js', 'logo.svg', 'icon.png'}
 DEFAULT_PORT = 8878
 IDLE_TIMEOUT = 5 * 60          # значение по умолчанию (конфиг `autostop_minutes` модуля Web); секунд без запросов -> сайт выключается
 WEB_MODULE = 'web_panel'       # MODULE_NAME модуля Web: его конфиги (автозапуск, автовыключение, настройки Emulate)
@@ -685,7 +685,7 @@ class WebPanel:
             raise web.HTTPNotFound()
         ctype = mimetypes.guess_type(name)[0] or 'application/octet-stream'
         # шрифт кэшируется, остальное — нет: иначе после обновления браузер (или кэш туннеля Cloudflare) отдаёт старые скрипты
-        headers = {'Cache-Control': 'max-age=3600'} if name in ('font.woff2',) else {'Cache-Control': 'no-cache'}
+        headers = {'Cache-Control': 'max-age=3600'} if name in ('font.woff2', 'logo.svg', 'icon.png') else {'Cache-Control': 'no-cache'}
         return web.Response(body=(STATIC_DIR / name).read_bytes(), content_type=ctype, headers=headers)
 
     # ------------------------------------------------------------------ #

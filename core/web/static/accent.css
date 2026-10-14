@@ -247,3 +247,13 @@ html.fx-stack .fx-cover {
   box-shadow: 0 -1px 0 var(--acc), 0 -2px 18px rgba(255, 60, 20, .35), 0 -30px 60px rgba(0, 0, 0, .55); }
 html.fx-stack .fx-row.fx-cover { box-shadow: inset 3px 0 0 var(--acc), 0 -1px 0 var(--acc), 0 -2px 18px rgba(255, 60, 20, .35), 0 -30px 60px rgba(0, 0, 0, .55); }
 @media (prefers-reduced-motion: reduce) { .fx-scan { display: none; } }
+
+/* логотип FRX (logoMark() в app.js): «F» с острием в фирменном градиенте */
+.frx-mark { display: inline-block; flex: none; width: .82em; height: .9em; vertical-align: -.1em; margin-right: .4em; filter: drop-shadow(0 0 8px rgba(255, 70, 20, .5)); }
+.frx-mark svg { display: block; width: 100%; height: 100%; }
+.brand .frx-mark { width: 1.08em; height: 1.17em; vertical-align: -.24em; margin-right: .32em; }
+.brand small { margin-left: 0; }
+.drawer-brand .frx-mark { align-self: center; width: 1.05em; height: 1.14em; margin-right: 0; }
+.home .home-mark { width: clamp(40px, 5.5vw, 66px); height: auto; aspect-ratio: 48 / 52; margin: 0 0 4px; vertical-align: 0; filter: drop-shadow(0 0 22px rgba(255, 70, 20, .6)); }
+:root .drawer-brand { align-items: center; }
+:root .drawer-brand small, :root .drawer-brand .drawer-home { align-self: center; }

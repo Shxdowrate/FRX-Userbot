@@ -49,6 +49,17 @@ function h(tag, attrs, ...kids) {
   return el;
 }
 
+/* логотип FRX («F» с острием, как иконка FRX.apk) — inline SVG, у каждого экземпляра свой id градиента */
+let LOGO_N = 0;
+function logoMark(cls) {
+  const id = 'frx-acc-' + (++LOGO_N);
+  const e = document.createElement('span');
+  e.className = 'frx-mark' + (cls ? ' ' + cls : '');
+  e.setAttribute('aria-hidden', 'true');
+  e.innerHTML = `<svg viewBox="30 28 48 52"><defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff2a1c"/><stop offset=".55" stop-color="#ff5a14"/><stop offset="1" stop-color="#ff8a00"/></linearGradient></defs><path fill="url(#${id})" d="M38,32h34l-5,8h-21v10h17l-5,8h-12v18h-8z"/><path fill="#ff8a00" fill-opacity=".6" d="M60,62l12,7l-12,7z"/></svg>`;
+  return e;
+}
+
 class SleepError extends Error {}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let SLEEP = false, SLEEP_TIMER = null, LAST_TARGET = null;
@@ -593,8 +604,8 @@ function renderNav() {
   Object.assign(NAV, { tabsEl, left, right, more, wrap });
   NAV.el.classList.toggle('open', NAV.open);
   NAV.el.replaceChildren(h('div', { class: 'nav-in' },
-    h('a', { class: 'brand', href: '#/', onclick: (e) => { if (mobileNav()) { e.preventDefault(); openDrawer(); } } },
-      'frx', h('small', {}, s.version), h('span', { class: 'burger', 'aria-hidden': 'true' }, h('i'), h('i'), h('i'))),
+    h('a', { class: 'brand', href: '#/', 'aria-label': 'frx', onclick: (e) => { if (mobileNav()) { e.preventDefault(); openDrawer(); } } },
+      logoMark(), h('small', {}, s.version), h('span', { class: 'burger', 'aria-hidden': 'true' }, h('i'), h('i'), h('i'))),
     wrap, h('div', { class: 'nav-end' }, more, window.D3 ? D3.button() : null, logout, off)));
 
   buildDrawer(s, tabs);
@@ -652,7 +663,7 @@ function buildDrawer(s, tabs) {
   const logout = h('button', { class: 'link', type: 'button', onclick: () => act(async () => { await api('/auth/logout', {}); location.replace('/'); }) }, 'выйти');
   DRAWER.list = h('nav', { class: 'drawer-tabs' }, tabs.map((t) => h('a', { class: 'tab', href: t.href, onclick: closeDrawer }, t.label)));
   DRAWER.el.replaceChildren(
-    h('a', { class: 'drawer-brand', href: '#/', onclick: closeDrawer }, 'frx', h('small', {}, s.version), h('span', { class: 'drawer-home' }, 'на главную')),
+    h('a', { class: 'drawer-brand', href: '#/', onclick: closeDrawer, 'aria-label': 'frx — на главную' }, logoMark(), h('small', {}, s.version), h('span', { class: 'drawer-home' }, 'на главную')),
     DRAWER.list,
     h('div', { class: 'drawer-foot' }, window.D3 ? D3.button() : null, logout, off));
 }
@@ -729,6 +740,7 @@ async function home(T) {
 
   const node = h('div', { class: 'shell' },
     h('div', { class: 'home' },
+      logoMark('home-mark'),
       h('div', { class: 'word' }, 'FRX'),
       h('div', { class: 'desc' }, s.description),
       h('div', { class: 'ver' }, 'версия ' + s.version),
