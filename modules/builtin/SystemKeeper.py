@@ -495,7 +495,7 @@ async def setup():
     await engine.create_config(
         key='github_repo',
         description='Репозиторий GitHub для .update git: https://github.com/owner/name или owner/name',
-        data_type='str', default='',
+        data_type='str', default='https://github.com/Shxdowrate/FRX-Userbot',
     )
     await engine.create_config(
         key='github_branch',
