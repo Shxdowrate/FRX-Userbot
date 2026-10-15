@@ -807,6 +807,45 @@ class SbCallbackEvent:
 
 # ---- сторона aiogram (стационарный бот) ---- #
 
+class SbBotClick:
+    """Кнопка под обычным сообщением бота в Sandbox — как core.bot_events.BotClick (для @bot.callback)."""
+
+    def __init__(self, session, chat, sender, data, message):
+        self._s = session
+        self.data = data
+        self.user_id = sender.id
+        self.username = sender.username or ''
+        self.first_name = sender.first_name or ''
+        self.from_user = _ag_user(sender)
+        self.chat_id = chat.id
+        self.message_id = message.id if message is not None else None
+        self.message = SbBotMessage(message) if message is not None else None
+        self._chat = chat
+        self._msg = message
+        self._answered = False
+
+    async def answer(self, text=None, show_alert=False, url=None):
+        if self._answered:
+            return
+        self._answered = True
+        if text:
+            self._s.toast(text, 'error' if show_alert else 'info')
+
+    async def edit(self, text, buttons=None, styles=None):
+        if self._msg is None:
+            raise SbError("message to edit not found")
+        self._msg._text = text
+        self._msg._html = True
+        self._msg._buttons = buttons
+        self._msg.edit_date = self._s.dt_now()
+        self._msg._publish()
+        self._s.note('send', f"bot.edit #{self._msg.id}: {preview(text, 120)}", chat=self._chat.key)
+
+    async def delete(self):
+        if self._msg is not None:
+            await self._msg.delete()
+
+
 def _ag_user(u: SbUser):
     return types.SimpleNamespace(id=u.id, is_bot=u.bot, first_name=u.first_name, last_name=u.last_name, username=u.username,
                                  full_name=u.name, language_code=None)
@@ -1600,6 +1639,8 @@ class SbForm:
             return False
         allowed = 'me' if self.for_user is None else self.for_user
         for rule in (allowed if isinstance(allowed, list) else [allowed]):
+            if rule == 'all':
+                return True
             if rule == 'me':
                 if user_id == self._s.owner.id:
                     return True
@@ -2547,6 +2588,10 @@ class Session:
                 info.bot_on_start_handlers.append(value)
             elif bt == 'on_load':
                 info.bot_on_load_handlers.append(value)
+            elif bt == 'callback':
+                info.bot_callbacks.append(value)
+            elif bt == 'start_link':
+                info.bot_start_links.append(value)
             elif bt == 'cycle':
                 info.bot_cycle_handlers.append((value, value._frx_bot_cycle))
 
@@ -2625,6 +2670,11 @@ class Session:
         text = event.raw_text
         token = current_event.set(event)
         try:
+            payload = text[len('/start'):].strip() if text.startswith('/start') else ''
+            link = next((f for f in info.bot_start_links if payload and payload.startswith(f._frx_bot_start_prefix)), None)
+            if link is not None:                                 # t.me/<бот>?start=<prefix>… — @bot.start_link модуля
+                await self.call(info.module_name, link, event, payload[len(link._frx_bot_start_prefix):], bot=True)
+                return
             if text.startswith('/'):
                 cmd = text[1:].split(maxsplit=1)[0].split('@')[0].lower()
                 func = info.bot_commands.get(cmd)
@@ -2720,6 +2770,23 @@ class Session:
         if chat is None or sender is None:
             raise ValueError('Чат или участник не найдены')
         msg = self.find_message(chat, message_id) if message_id else None
+        info = self.module
+        bot_msg = msg is not None and msg.sender is not None and msg.sender.id == self.bot_user.id
+        if info is not None and (bot_msg or chat.side == 'bot'):
+            func = next((f for f in info.bot_callbacks if str(data).startswith(getattr(f, '_frx_bot_click_prefix', '') or '')), None)
+            if func is not None:                                # кнопка под сообщением бота — @bot.callback модуля
+                self.note('event', f"кнопка бота data={data!r} от {sender.name}", chat=chat.key)
+                click = SbBotClick(self, chat, sender, str(data), msg)
+                if getattr(func, '_frx_bot_access', 'public') == 'self' and sender.id != self.owner.id:
+                    await click.answer("Эта кнопка не для вас", show_alert=True)
+                    return
+
+                async def run_bot_click():
+                    await self.call(info.module_name, func, click, bot=True)
+                    await click.answer()
+                self.spawn(run_bot_click(), 'bot.callback')
+                await self.settle()
+                return
         ev = SbCallbackEvent(self, chat, sender, str(data).encode('utf-8'), msg)
         self.note('event', f"callback-кнопка data={data!r} от {sender.name}", chat=chat.key)
         info = self.module

@@ -157,6 +157,57 @@ class BotMessageEvent:
         return f"<BotMessageEvent chat_id={self.chat_id} sender_id={self.sender_id} text={self.raw_text!r}>"
 
 
+class BotClick:
+    """
+    Нажатие кнопки под ОБЫЧНЫМ сообщением бота (engine.bot.send_message(..., buttons=...)) — для @bot.callback.
+
+        click.data, click.user_id, click.username, click.first_name, click.chat_id, click.message_id
+        click.message            — aiogram.types.Message с кнопкой (или None, если сообщение слишком старое)
+        await click.answer(text=None, show_alert=False, url=None)
+        await click.edit(text, buttons=None, styles=None)   # переписать это сообщение (buttons=None — без кнопок)
+        await click.delete()
+    """
+
+    def __init__(self, core, callback):
+        u = callback.from_user
+        self._core = core
+        self.raw = callback
+        self.data = callback.data or ''
+        self.user_id = u.id if u else None
+        self.username = (u.username or '') if u else ''
+        self.first_name = (u.first_name or '') if u else ''
+        self.from_user = u
+        msg = getattr(callback, 'message', None)
+        self.message = msg
+        self.chat_id = msg.chat.id if msg is not None and getattr(msg, 'chat', None) is not None else None
+        self.message_id = getattr(msg, 'message_id', None)
+        self._answered = False
+
+    async def answer(self, text=None, show_alert=False, url=None):
+        if self._answered:
+            return
+        self._answered = True
+        try:
+            await self.raw.answer(text=(str(text)[:200] if text else None), show_alert=show_alert, url=url)
+        except Exception:
+            pass
+
+    async def edit(self, text, buttons=None, styles=None):
+        markup = self._core._build_markup(buttons, styles) if buttons else None
+        try:
+            await self._core._aiogram_bot.edit_message_text(
+                text=text, chat_id=self.chat_id, message_id=self.message_id, reply_markup=markup, parse_mode='HTML')
+        except Exception as e:
+            if 'message is not modified' not in str(e).lower():
+                raise
+
+    async def delete(self):
+        return await self._core._aiogram_bot.delete_message(self.chat_id, self.message_id)
+
+    def __repr__(self):
+        return f"<BotClick data={self.data!r} user_id={self.user_id} chat_id={self.chat_id}>"
+
+
 class BotChatMemberEvent:
     """
     Обёртка над aiogram.types.ChatMemberUpdated — аналог

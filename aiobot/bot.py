@@ -317,7 +317,11 @@ def register_decorated_handlers(dp: Dispatcher, core=None):
             )
             # Только клики НЕ по инлайн-формам юзербота (те без message_id,
             # см. handle_callback_query ниже и F.inline_message_id.is_not(None)).
-            dp.callback_query.register(handler, F.inline_message_id.is_(None))
+            prefix = getattr(value, '_frx_bot_click_prefix', '') or ''
+            if prefix:
+                dp.callback_query.register(handler, F.inline_message_id.is_(None), F.data.startswith(prefix))
+            else:
+                dp.callback_query.register(handler, F.inline_message_id.is_(None))
         elif ftype == 'on_start':
             on_start_handlers.append(value)
         elif ftype == 'on_error':
@@ -577,6 +581,17 @@ def create_bot(token: str, core=None):
     # этом файле с подходящим фильтром, aiogram остановится на нём первом
     # (стандартное поведение Dispatcher — один хэндлер на апдейт), и сюда
     # сообщение не дойдёт.
+
+    @dp.callback_query(F.inline_message_id.is_(None))
+    async def handle_module_bot_callbacks(callback: types.CallbackQuery):
+        """Кнопки под обычными сообщениями бота — @bot.callback(...) модулей юзербота (`import bot`).
+        «Сырые» @bot.callback из этого файла зарегистрированы раньше и забирают свои клики первыми."""
+        if core is not None and await core.dispatch_bot_callback(callback):
+            return
+        try:
+            await callback.answer()
+        except Exception:
+            pass
 
     @dp.message()
     async def handle_module_bot_messages(message: types.Message):

@@ -144,6 +144,7 @@ class ModuleInfo:
     bot_inline_queries: dict = field(default_factory=dict)    # name -> func
     bot_inline_clicks: list = field(default_factory=list)
     bot_start_links: list = field(default_factory=list)
+    bot_callbacks: list = field(default_factory=list)
 
     @property
     def is_builtin(self) -> bool:
@@ -242,6 +243,7 @@ class Core:
         self.bot_inline_function_map: dict[str, tuple] = {}  # alias -> (module_name, func, access, for_user, for_chat, black_list, black_chats) — bot.inline_function()
         self.bot_inline_query_map: dict[str, tuple] = {}    # name -> (module_name, func, access, for_user, for_chat, black_list, black_chats)
         self.bot_inline_clicks: list = []                # [(module_name, prefix, func, access), ...]
+        self.bot_callbacks: list = []                    # @bot.callback модулей: [(module_name, prefix, func, access), ...]
         self.bot_start_links: list = []                  # [(module_name, prefix, func), ...]
         self.edit_handlers: list = []                    # [(module_name, func), ...] — @decorators.on_edit
         self.delete_handlers: list = []                  # [(module_name, func), ...] — @decorators.on_delete
@@ -1197,12 +1199,9 @@ class Core:
                 elif bftype == 'cycle':
                     info.bot_cycle_handlers.append((value, value._frx_bot_cycle))
                 elif bftype == 'callback':
-                    self.tlog(
-                        f"[FRX] bot.callback() в модуле '{module_name}' пока не "
-                        f"подключается на уровне модулей (см. докстринг "
-                        f"core/bot_decorators.py:callback()) — хэндлер '{value.__name__}' "
-                        f"не будет вызван"
-                    )
+                    self.bot_callbacks.append((module_name, getattr(value, '_frx_bot_click_prefix', '') or '',
+                                               value, value._frx_bot_access))
+                    info.bot_callbacks.append(value)
 
         self.modules[module_name] = info
 
@@ -1304,6 +1303,7 @@ class Core:
         for alias in list(info.bot_inline_queries.keys()):
             self.bot_inline_query_map.pop(alias, None)
         self.bot_inline_clicks = [e for e in self.bot_inline_clicks if e[0] != module_name]
+        self.bot_callbacks = [e for e in self.bot_callbacks if e[0] != module_name]
         self.bot_start_links = [e for e in self.bot_start_links if e[0] != module_name]
         self.bot_watchers_bot = [e for e in self.bot_watchers_bot if e[0] != module_name]
         self.bot_watchers_userbot = [e for e in self.bot_watchers_userbot if e[0] != module_name]
@@ -2605,6 +2605,8 @@ class Core:
             None (по умолчанию) или 'me'  -> только владелец юзербота
             int > 0                        -> конкретный user_id
             int < 0                        -> все участники этого чата/канала
+            'all'                          -> кто угодно, кто видит сообщение
+                                               (открытая игра, голосование)
             list из перечисленного выше    -> любое совпадение (можно
                                                мешать юзеров и чаты)
         black_list — id или список id, которым доступ запрещён ВСЕГДА,
@@ -2927,6 +2929,30 @@ class Core:
             return True
         return False
 
+    async def dispatch_bot_callback(self, callback_query):
+        """
+        Кнопка под ОБЫЧНЫМ сообщением бота (engine.bot.send_message(..., buttons=...)) — @bot.callback модулей.
+        Вызывается ботом на callback_query без inline_message_id. True — обработано модулем.
+        """
+        from .bot_events import BotClick
+        data = callback_query.data or ''
+        for module_name, prefix, func, access in list(self.bot_callbacks):
+            if prefix and not data.startswith(prefix):
+                continue
+            click = BotClick(self, callback_query)
+            if not self._bot_access_ok(access, click.user_id):
+                await click.answer("Эта кнопка не для вас", show_alert=True)
+                return True
+            await self._click_bucket.acquire()
+            gtoken = current_guest.set(None if click.user_id == self._owner_id else click.user_id)
+            try:
+                await self._safe_call(module_name, func, click)
+            finally:
+                current_guest.reset(gtoken)
+            await click.answer()
+            return True
+        return False
+
     async def dispatch_start_link(self, message, payload):
         """/start <payload> у бота: модуль с @bot.start_link(prefix). True — обработано."""
         from .bot_events import BotMessageEvent
@@ -3131,6 +3157,16 @@ class Core:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     async def _inline_edit(self, inline_message_id, text, buttons, media=None, styles=None):
+        try:
+            await self._inline_edit_raw(inline_message_id, text, buttons, media, styles)
+        except Exception as e:
+            # форма уже показывает ровно это (например, клик не в свой ход — модуль перерисовал то же самое):
+            # для Telegram это ошибка, для формы — нет
+            if 'message is not modified' in str(e).lower():
+                return
+            raise
+
+    async def _inline_edit_raw(self, inline_message_id, text, buttons, media=None, styles=None):
         markup = self._build_markup(buttons, styles) if buttons is not None else None
         if text is not None and media:                      # форма с картинкой/анимацией — меняем подпись
             await self._aiogram_bot.edit_message_caption(
@@ -3178,7 +3214,7 @@ class Core:
                     targets.add(self._owner_id)
             elif isinstance(rule, int) and rule > 0:
                 targets.add(rule)
-        return targets
+        return targets          # 'all' и id чатов сюда не разворачиваются: ввод ждут от конкретных людей
 
     def _register_input_targets(self, form, buttons):
         """
@@ -3428,6 +3464,8 @@ class Core:
             allowed = [allowed]
 
         for rule in allowed:
+            if rule == 'all':                       # кто угодно, кто видит сообщение формы
+                return True
             if rule == 'me':
                 if user_id == self._owner_id:
                     return True

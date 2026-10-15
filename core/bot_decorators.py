@@ -350,23 +350,37 @@ def on_error():
     return deco
 
 
-def callback(access='public'):
+def callback(data_startswith='', access='public'):
     """
-    @bot.callback(access='public')
-    ЗАРЕЗЕРВИРОВАНО: реакция на клики по inline-кнопкам под ОБЫЧНЫМИ
-    сообщениями стационарного бота. На уровне модулей юзербота (`import
-    bot`) пока НЕ подключается к диспетчеру (при загрузке модуля такой
-    хэндлер будет замечен, но проигнорирован с предупреждением в лог) —
-    используйте @bot.callback() внутри aiobot/bot.py напрямую (см. README,
-    README «Стационарный бот в модулях») либо buttons= у event.reply()/event.respond() с обработкой
-    через core.dispatch_inline_click() / инлайн-формы (README «Инлайн-формы»), пока
-    для этого случая не появится отдельная задача.
+    @bot.callback(data_startswith='game:', access='public')
+    Нажатие кнопки под ОБЫЧНЫМ сообщением стационарного бота — тем, что модуль отправил сам через
+    engine.bot.send_message(chat_id, text, buttons=[[("Ок", "game:ok")]]) (не инлайн-формой и не
+    @bot.inline_query). Удобно для личных сообщений: карты игрока, личное меню, подтверждение.
+
+        async def f(click)
+            click.data, click.user_id, click.username, click.first_name, click.chat_id, click.message_id
+            await click.answer(text=None, show_alert=False, url=None)
+            await click.edit(text, buttons=None)      # переписать это сообщение
+            await click.delete()
+
+    data_startswith — какие кнопки ловить (по началу callback_data); '' — любые, которые не поймал
+    модуль с более точным префиксом. access='self' — нажимать может только владелец (остальным — «не для вас»).
+    В aiobot/bot.py тот же декоратор подключается напрямую к aiogram (там click — aiogram CallbackQuery).
     """
+    if callable(data_startswith):                      # @bot.callback без скобок
+        func, data_startswith = data_startswith, ''
+        func._frx_bot_type = 'callback'
+        func._frx_bot_access = 'public'
+        func._frx_bot_click_prefix = ''
+        return func
+    if data_startswith in ('public', 'self') and access == 'public':
+        data_startswith, access = '', data_startswith   # старый вызов @bot.callback('self')
     access = _check_access(access)
 
     def deco(func):
         func._frx_bot_type = 'callback'
         func._frx_bot_access = access
+        func._frx_bot_click_prefix = str(data_startswith or '')
         return func
 
     return deco

@@ -16,6 +16,7 @@ FRX — Fractal Runtime Extension: Telegram-юзербот на Telethon (раб
 - .accounts (.acc) — аккаунты; .botchat (.bc) — чат со стационарным ботом; .forms, .closeform — инлайн-формы.
 - .neuro (.n) — нейросеть NeuroDash (диалог); .neurotool (.nt) — инструменты нейросети.
 - .access (.acs) — доступ других людей к командам юзербота: ответом на сообщение человека — меню «Выдать доступ» (класс или разрешение на модуль / команду) и «Отозвать доступ»; текстом .access grant|revoke|check [пользователь] <что>, .access list. Классы (FULL, LOADED, свои с idn/названием/описанием) — на сайте, вкладка «доступ». Опасные модули помечены ⚠.
+- .hikka (.hk) — модули Hikka и Heroku: у них своё пространство со своим префиксом (по умолчанию «,»): ,help, ,dlm <название|ссылка>, ,lm, ,ulm, ,config, ,setprefix; .hikka on|off|restart|prefix <символ>|mods|errors — управление из FRX. Файлы — hikka_compat/ (код) и user/data/hikka/ (БД и модули).
 - .alias <команда> [аргументы] <новое_имя> — свой алиас команды (.alias help h2, .alias config helper cs); .alias — список; .unalias <имя> — удалить. На сайте — внизу вкладки «конфиги».
 
 ## Модули
