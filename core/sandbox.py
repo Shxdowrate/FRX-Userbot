@@ -1449,7 +1449,7 @@ class SbFiles:
 # --------------------------------------------------------------------------- #
 
 from .waiters import Waiter, WaiterCancelled                       # noqa: E402
-from .inline_forms import InlineClick, InlineInput, InputButton, normalize_button_rows   # noqa: E402
+from .inline_forms import InlineClick, InlineInput, InputButton, SearchButton, normalize_button_rows, picker_page, search_items   # noqa: E402
 
 
 class SbWaiter(Waiter):
@@ -1563,6 +1563,9 @@ class SbForm:
             self._input_handlers.append((data, func))
             return func
         return deco
+
+    def on_search(self, data='search'):
+        return self.on_input(data=data)
 
     def _show(self, text, buttons, closed=False):
         if self._msg is None:
@@ -1680,9 +1683,12 @@ class SandboxEngine:
         self.config = {'prefix': session.prefix}
 
     InputButton = InputButton
+    SearchButton = SearchButton
     InlineInput = InlineInput
     InlineClick = InlineClick
     safe_html = staticmethod(safe_html)
+    picker_page = staticmethod(picker_page)
+    search_items = staticmethod(search_items)
 
     # ---- у настоящего Core берём как есть ---- #
     def _bind(name):                                                # noqa: N805
@@ -1692,6 +1698,7 @@ class SandboxEngine:
         return method
 
     _config_key = _bind('_config_key')
+    module_links = _bind('module_links')
     _check_valid_spec = _bind('_check_valid_spec')
     _validate_config_value = _bind('_validate_config_value')
     _bot_access_ok = _bind('_bot_access_ok')

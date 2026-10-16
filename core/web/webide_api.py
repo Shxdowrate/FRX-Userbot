@@ -78,7 +78,8 @@ class WebIdeApi:
                 disk = self._disk_source(info)
                 stamp, lab = self._stamp_of(disk), is_lab(disk)
             items.append({'module': module_name, 'name': info.name, 'version': info.version,
-                          'author': info.author, 'builtin': info.is_builtin, 'stamp': stamp, 'lab': lab,
+                          'author': info.author, 'tg_url': info.tg_url, 'git_url': info.git_url,
+                          'builtin': info.is_builtin, 'stamp': stamp, 'lab': lab,
                           'history': len(self.history_store.list(module_name))})
         items.sort(key=lambda m: (m['builtin'], m['name'].lower()))
         return {'modules': items}
@@ -87,7 +88,8 @@ class WebIdeApi:
         module = request.query.get('module', '')
         info = self._info(module)
         source = self._disk_source(info)
-        meta = {'name': info.name, 'module_name': module, 'author': info.author, 'version': info.version}
+        meta = {'name': info.name, 'module_name': module, 'author': info.author, 'version': info.version,
+                'tg_url': info.tg_url, 'git_url': info.git_url}
         return {'module': module, 'source': source, 'editable': not info.is_builtin, 'path': info.path,
                 'builtin': info.is_builtin, 'stamp': self._stamp_of(source), 'meta': meta, 'lab': is_lab(source),
                 'history': len(self.history_store.list(module)), 'hash': source_hash(source)}

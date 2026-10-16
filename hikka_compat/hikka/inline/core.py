@@ -166,11 +166,18 @@ class InlineManager(InlineUnit):
     async def attach(self, aiogram_bot, dp) -> bool:
         if self.init_complete:
             return True
+        if getattr(self, "_attaching", False):       # уже подключается (старт пространства и старт бота — одновременно)
+            return False
+        self._attaching = True
         try:
             me = await aiogram_bot.get_me()
         except Exception:
             logger.exception("Стационарный бот FRX недоступен — инлайн Hikka выключен")
             return False
+        finally:
+            self._attaching = False
+        if self.init_complete:
+            return True
         self._raw_bot = aiogram_bot
         self._dp = dp
         self.bot = self._bot = BotFacade(aiogram_bot, self)

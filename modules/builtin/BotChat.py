@@ -19,6 +19,8 @@ MODULE_NAME = "botchat"
 VERSION = "1.2"
 AUTHOR = "FRX"
 DESCRIPTION = "Аккаунт стационарного бота на сайте: чаты, переписка и отправка от имени бота (вкладка botchat)"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/BotChat.py"
 
 import decorators
 import engine

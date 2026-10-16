@@ -25,6 +25,8 @@ MODULE_NAME = "aliases"
 VERSION = "1.0"
 AUTHOR = "FRX"
 DESCRIPTION = "Алиасы команд: .alias <команда> [аргументы] <новое_имя>"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/Aliases.py"
 
 
 def _esc(x):

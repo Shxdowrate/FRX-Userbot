@@ -386,6 +386,9 @@ class EmuForm:
             return func
         return deco
 
+    def on_search(self, data='search'):
+        return self.on_input(data=data)
+
     def _sync(self, text, buttons, closed=False):
         fields = {'form': self.form_id, 'closed': closed,
                   'nodes': html_to_nodes(safe_html(text)) if text is not None else self._entry_nodes(),

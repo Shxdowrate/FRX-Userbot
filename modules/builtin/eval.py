@@ -52,6 +52,8 @@ MODULE_NAME = "eval"
 VERSION = "2.2"
 AUTHOR = "FRX"
 DESCRIPTION = "Выполнение произвольного Python-кода из чата (.eval/.ev/.exec), инлайн, без ограничений"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/eval.py"
 
 
 def _env(event):

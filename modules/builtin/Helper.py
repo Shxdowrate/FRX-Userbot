@@ -18,6 +18,7 @@ modules/builtin/Helper.py — помощь по модулям, проверка
 
 import ast
 import html
+import re
 import os
 
 import engine
@@ -30,6 +31,8 @@ MODULE_NAME = "helper"
 VERSION = "2.4"
 AUTHOR = "FRX"
 DESCRIPTION = "Информация о модулях (инлайн-меню), проверка файлов и помощь"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/Helper.py"
 
 
 def format_commands_for_list(commands, max_length=40):
@@ -247,8 +250,7 @@ def _picker(page, query=None):
         rows, page, total = engine.picker_page(items, page, per_page=PAGE_SIZE, page_callback="help_page:")
     else:
         rows, page, total = [], 0, 1
-    search_row = [engine.InputButton("🔍 Найти модуль", "help_search", hint="название модуля, команда или слово из описания",
-                                     style="primary")]
+    search_row = [engine.SearchButton("🔍 Найти модуль", "help_search", hint="название модуля, команда или слово из описания")]
     if query:
         search_row.append((visual.btn('Сбросить поиск', 'close'), "help_search_reset"))
     rows.insert(0, search_row)
@@ -271,6 +273,12 @@ def _module_page(module_name):
     return ordered.index(module_name) // PAGE_SIZE if module_name in ordered else 0
 
 
+def _link(url):
+    """Ссылка из шапки модуля коротко: https://t.me/x → t.me/x, https://github.com/a/b → github.com/a/b."""
+    from core.module_meta import short_link
+    return f'<a href="{html.escape(url, quote=True)}">{html.escape(short_link(url))}</a>'
+
+
 def _module_detail_text(info, module_name):
     """Подробная карточка модуля — используется и .help <module>, и инлайн-меню."""
     display_name = info.get('name', module_name)
@@ -286,8 +294,12 @@ def _module_detail_text(info, module_name):
         visual.field('версия', version),
         visual.field('автор', author, code=False),
         visual.field('тип', kind, code=False),
-        "",
     ]
+    if info.get('tg_url'):
+        lines.append(visual.field('канал', _link(info['tg_url']), code=False))
+    if info.get('git_url'):
+        lines.append(visual.field('исходник', _link(info['git_url']), code=False))
+    lines.append("")
 
     if commands:
         lines.append(visual.section(f"Команды · {len(commands)}"))
@@ -362,7 +374,7 @@ async def _module_detail_buttons(module_name, show_back=True):
     module_info = engine.modules.get(module_name)
     is_builtin = module_info is not None and module_info.is_builtin
 
-    rows = []
+    rows = list(engine.module_links(module_name))          # ↗ Канал автора · ↗ GitHub (TG_URL / GIT_URL из шапки)
     if show_back:
         rows.append([(visual.btn('К выбору модуля', 'back'), "help_back")])
     if await _has_config(module_name):       # кнопка только если конфиг действительно есть
@@ -811,6 +823,19 @@ def validate_module_file(file_path):
         missing_vars = [var for var in required_vars if var not in found_vars]
         if missing_vars:
             errors.append(f"Отсутствуют обязательные переменные: {', '.join(missing_vars)}")
+
+        # Ссылки автора (необязательные): TG_URL — канал, GIT_URL — исходник модуля
+        from core.module_meta import normalize_module_link
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id in ('TG_URL', 'GIT_URL'):
+                        kind = 'tg' if target.id == 'TG_URL' else 'git'
+                        if node.value.value and not normalize_module_link(node.value.value, kind):
+                            warnings.append(f"{target.id} = {node.value.value!r} — не похоже на ссылку "
+                                            + ("(нужно @канал или https://t.me/…)" if kind == 'tg' else "(нужно https://…)"))
+        if 'TG_URL' not in content and 'GIT_URL' not in content:
+            warnings.append("Можно указать ссылки автора: TG_URL = 'https://t.me/канал', GIT_URL = 'https://github.com/…'")
         
         # Проверяем импорты
         has_engine_import = False

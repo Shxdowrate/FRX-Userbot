@@ -513,9 +513,11 @@ FRX/
 | `.logs` / `.logshelp` | Logging | справка по пересылке логов в ЛС |
 | `.changelog` / `.cl` `[версия \| list]` | Changelog | что нового: запись версии, выбор версии кнопками, `list` — список |
 | `.restart` / `.rs` | SystemKeeper | перезапустить юзербот |
-| `.update` / `.upd` `[git] [yes]` | SystemKeeper | обновить FRX: ответом на `.zip` или `.update git` из GitHub; `yes` — без подтверждения |
+| `.update` / `.upd` `[yes]` | SystemKeeper | обновить FRX из GitHub (по умолчанию `Shxdowrate/FRX-Userbot`); ответом на `.zip` — из файла; `yes` — без подтверждения |
 | `.sk` / `.systemkeeper` | SystemKeeper | статус keeper'а, настройки GitHub, резервные копии |
 | `.exit` | SystemKeeper | бэкап данных в ЛС от бота и полное выключение (без перезапуска) |
+| `.autostart` / `.autorun` `[on \| off]` | Autostart | автозапуск FRX вместе с системой: Windows, Linux (systemd), macOS, Termux |
+| `.fclean` / `.cleanfiles` `[all \| категория]` | FilesCleaner | уборка файлов FRX: кэш, скачанное, временное, логи, старые бэкапы |
 | `.createbackup` | Backup | бэкап папки `user/` файлом в ЛС от бота |
 | `.restorebackup` `[yes]` | Backup | ответом на файл бэкапа — восстановить данные |
 | `.web` / `.site` `[stop \| tunnel on\|off\|new\|setup \| logout]` | Web | поднять сайт и прислать ссылки; `stop` — выключить; `tunnel` — публичный адрес, `tunnel setup` — постоянный адрес; `logout` — выйти на всех устройствах |
@@ -622,10 +624,11 @@ FRX/
   префикс, `.hikka mods` показывает список модулей, `.hikka errors` — какие модули не загрузились и почему.
 - **Ошибки модулей Hikka** приходят вам в личку от бота FRX, как в Hikka: кратко (причина, место, ошибка) и кнопка
   «🪐 Полный traceback». Уровень — `,config Tester` (`tglog_level`, по умолчанию ERROR).
-- При смене аккаунта (`.accounts`) пространство само переезжает на новый клиент. Модули и БД у пространства
+- При смене аккаунта (`.accounts`) пространство само переезжает на новый клиент (старый аккаунт FRX и Hikka
+  отпускают полностью). Модули и БД у пространства
   общие для всех аккаунтов.
 - Не поддерживаются модули на Pyrogram (Dragon) и модули, которые сами строят объекты aiogram 2 (в FRX — aiogram 3).
-  Боты не могут отправлять премиум-эмодзи, поэтому в формах Hikka они показываются обычными.
+  Премиум-эмодзи в формах Hikka показываются, если у владельца бота есть Telegram Premium, иначе — обычными.
 - **В WebIDE Sandbox:** откройте HikkaCompat в WebIDE и запустите песочницу — внутри поднимется своё
   пространство Hikka. Команды `,help`, `,dlm`, `,lm` (ответом на приложенный .py), `,config`… пишутся в чат
   песочницы, формы и кнопки рисуются на сайте, клики и ввод значений работают. У пространства песочницы своя БД
@@ -710,6 +713,24 @@ FRX/
 | `member_cache_ttl` | `300` | сколько секунд помнить результат проверки «участник чата» (`for_user=<id чата>`) |
 | `clicks_per_second` | `5` | общий лимит обработки кликов по всем формам, кликов/с |
 
+### Autostart — автозапуск `.autostart`
+
+`.autostart` — состояние и кнопка «включить / выключить»; `.autostart on` / `.autostart off` — без формы.
+Ставит те же файлы, что установщик (`frx_setup.py --remove-service` их тоже уберёт): Windows — `FRX.bat` в папке
+«Автозагрузка», Linux — служба systemd `frx` (от root — системная, иначе — служба пользователя + lingering), macOS —
+LaunchAgent `dev.frx.userbot`, Termux — `~/.termux/boot/frx.sh` для Termux:Boot. Вторую копию юзербота включение не
+запускает: автозапуск сработает при следующем старте системы / входе. FRX.apk работает службой Android сам, в Docker
+автозапуск задаёт docker compose.
+
+### FilesCleaner — уборка файлов `.fclean`
+
+`.fclean` — панель: сколько занимает каждая категория и кнопки очистки; `.fclean all` — всё безопасное сразу;
+`.fclean <категория>` — одну. Категории: `cache` (user/data/cache), `files` (скачанное модулями старше
+`files_max_age_days` дней), `tmp` (остатки обновлений; во время обновления не трогается), `uploads` (файлы команд с
+сайта), `botchat` (кэш медиа BotChat), `logs` (обнуляются), `backups` (остаётся по одной свежей копии каждого вида),
+`pycache`, `bak`. Сессии, база, конфиги и модули не трогаются никогда. `auto_clean` в `.config filescleaner` — раз в
+сутки чистить кэш, временное, загрузки сайта и старые скачанные файлы.
+
 ### Waiters
 
 Команд нет, одна настройка: `default_timeout` (`60` с) — таймаут `wait_message()`, если модуль не передал
@@ -762,7 +783,7 @@ FRX/
 
 | Настройка SystemKeeper | По умолчанию | Что делает |
 |---|---|---|
-| `github_repo` | `""` | репозиторий для `.update git`: `https://github.com/owner/name` или `owner/name` |
+| `github_repo` | `""` | репозиторий для `.update`: `https://github.com/owner/name` или `owner/name`; пусто — `Shxdowrate/FRX-Userbot` |
 | `github_branch` | `main` | ветка |
 | `github_token` | `""` | токен GitHub, только для приватного репозитория (достаточно права чтения содержимого) |
 | `notify_details` | `true` | присылать подробности обновления/восстановления в ЛС от бота |
@@ -872,9 +893,9 @@ keeper (main.py остановлен): резервная копия → зам�
 
 ### Обновление
 
-- **`.update`** ответом на `.zip`: в корне архива должна быть папка `FRX/` (`FRX/main.py`, `FRX/core/…`).
-- **`.update git`**: архив ветки скачивается с GitHub (настройки `github_repo`, `github_branch`,
-  `github_token` в `.config systemkeeper`). Используется `api.github.com` и стандартная библиотека — git не
+- **`.update`** (по умолчанию): архив ветки скачивается с GitHub — официальный репозиторий `Shxdowrate/FRX-Userbot`,
+  если в `.config systemkeeper` не задан свой (`github_repo`, `github_branch`, `github_token`).
+- **`.update`** ответом на `.zip`: в корне архива должна быть папка `FRX/` (`FRX/main.py`, `FRX/core/…`). Используется `api.github.com` и стандартная библиотека — git не
   нужен; токен отправляется только на `api.github.com`. Автопроверки обновлений нет: команда сама сравнивает
   версии.
 - Показывается превью: версии «было → станет», нужно ли обновлять зависимости, списки добавленных (`+`),
@@ -1727,11 +1748,22 @@ MODULE_NAME = "unique_name"      # технический ID, уникальны
 VERSION = "1.0"                  # строка; другая версия при .loadmod = обновление
 AUTHOR = "Ваше имя"
 DESCRIPTION = "Что делает модуль"
+TG_URL = "https://t.me/ваш_канал"   # необязательно: канал автора («@канал» тоже можно)
+GIT_URL = "https://github.com/вы/репозиторий/blob/main/модуль.py"   # необязательно: исходник модуля
 ```
 
 Без `MODULE_NAME` модуль не загрузится. `MODULE_NAME` — единственный идентификатор модуля в движке: по нему
 хранятся данные `db`, настройки, формы. Пользователь может обращаться к модулю и по `NAME` (`.help`,
 `.config`, `.unloadmod` принимают оба).
+
+**Ссылки автора — `TG_URL` и `GIT_URL`** (необязательно). Показываются в карточке `.help`, в превью `.loadmod` /
+`.dlm` / `.modlist` и на сайте (модули, WebIDE) — строками «канал» / «исходник» и кнопками «↗ Канал автора» /
+«↗ GitHub». `TG_URL` принимает `@канал`, `t.me/канал`, `https://t.me/…`; `GIT_URL` — любую `https://` ссылку.
+Неправильная ссылка модуль не ломает — просто не показывается (`.checkmodule` предупредит). Как в Hikka: если
+после установки модуля аккаунт не подписан на канал из `TG_URL`, под сообщением «модуль загружен» появляется
+кнопка «Подписаться на канал автора» (подписка — по нажатию, от текущего аккаунта). В пространстве Hikka то же
+делает `# meta developer: @канал`. В коде: `engine.get_module_info(name)['tg_url' / 'git_url']`,
+`engine.module_links(name)` — готовый ряд кнопок-ссылок для своей формы.
 
 **Пакеты модуля — `REQUIREMENTS`** (необязательно). Модуль сам объявляет, какие pip-пакеты ему нужны:
 
@@ -1912,6 +1944,7 @@ await engine.reply(message, text, file=None)         # всегда новое �
 await engine.noreply(message, text, file=None)       # в тот же чат, без ответа
 await engine.send_message(chat_id, text, file=None)  # в любой чат по id
 engine.get_args()                                     # СИНХРОННО: аргументы текущей команды строкой ('' вне события)
+engine.get_args_html()                                # то же с разметкой: жирный, ссылки, премиум-эмодзи (<tg-emoji>)
 ```
 
 - `answer` — паттерн «ожидание → результат»: первый `answer(event, "…")` на вашу команду правит саму команду,
@@ -1952,7 +1985,10 @@ await engine.bot_send_to_owner(text, file=None, buttons=None)   # ЛС влад�
 `await engine.create_inlineform(...)` — [раздел 27](#27-инлайн-формы); `engine.bot.*` —
 [раздел 28](#28-стационарный-бот-в-модулях-import-bot-inline_function-enginebot); `engine.InputButton`,
 `engine.InlineForm`, `engine.InlineClick`, `engine.InlineInput` — классы форм;
-`engine.picker_page(...)` — постраничный выбор; `engine.safe_html(text)` — экранирование не-тегов.
+`engine.picker_page(...)` — постраничный выбор; `engine.SearchButton`, `engine.search_items(items, query, key=None)`
+— поиск по списку; `engine.safe_html(text)` — экранирование не-тегов; `engine.module_links(name)` — кнопки
+«канал / GitHub» модуля; `await engine.channel_subscription(url)` → `(entity, подписан?)`,
+`await engine.join_channel(url)` — подписка текущего аккаунта.
 
 ### Остановка и файлы
 
@@ -2188,6 +2224,9 @@ async def _(click): ...
 @form.on_input(data=None)                         # обработчик ввода через InputButton
 async def _(inp): ...
 
+@form.on_search(data='search')                    # запрос из SearchButton (то же, что on_input(data='search'))
+async def _(inp): ...
+
 await form.edit(text, buttons=None)               # переписать текст и кнопки (None — убрать кнопки)
 await form.close(remove_buttons=True)             # прекратить обработку; сообщение остаётся в чате
 form.chat_id, form.text, form.page, form.owner_module, form.for_user, form.black_list, form.media
@@ -2207,6 +2246,7 @@ form.chat_id, form.text, form.page, form.owner_module, form.for_user, form.black
 | `InlineClick` | `.data`, `.from_user` (`telethon.types.User` или `None`), `.chat_id`, `.inline_message_id`, `await .answer(text=None, show_alert=False)` |
 | `InlineInput` | `.data` (ключ поля), `.value` (введённый текст), `.from_user`, `.chat_id`, `.form` |
 | `InputButton(text, data, hint="Введите значение", for_user=None, style=None, prefill="")` | кнопка «введите значение»: поле ввода остаётся **пустым**, `hint` — подсказка в строке над клавиатурой; `prefill` — если поле всё-таки нужно заполнить (например, текущим значением); `style` — цвет |
+| `SearchButton(text="🔍 Поиск", data="search", hint=…, style="primary", prefill="")` | кнопка поиска для длинных списков — та же `InputButton` с готовой подписью; запрос приходит в `form.on_search(data=…)` |
 | `form.delete()` / `form.close(remove_buttons=True)` | удалить сообщение формы целиком (для кнопки «Закрыть») / перестать слушать клики и снять кнопки, оставив текст |
 
 **Цветные кнопки** (Bot API, нужен `aiogram` ≥ 3.25 — на старом кнопки просто без цвета):
@@ -2276,6 +2316,34 @@ async def _(click):
 
 Каждый элемент — свой ряд; ряд навигации добавляется, только если страниц больше одной; номер целевой
 страницы зашит в `callback_data` ◂/▸, навигацию обрабатывает модуль.
+
+**Поиск по списку — `SearchButton` + `engine.search_items()`.** Длинный список (модули, настройки, версии,
+модели нейросети) лучше снабдить кнопкой «🔍 Поиск»: тап → пользователь набирает запрос после `@бота` →
+запрос приходит в `form.on_search`. `engine.search_items(items, query, key=...)` отбирает подходящие элементы
+и сортирует: точное совпадение → начинается с запроса → слово начинается с запроса → содержит → похожее по
+написанию; без учёта регистра и «е/ё». `picker_page(..., search=кнопка)` ставит поиск первым рядом:
+
+```python
+state = {'q': None}
+
+def screen(page=0):
+    found = engine.search_items(names, state['q'], key=lambda n: [n, descr[n]]) if state['q'] else names
+    items = [(n, f"pick:{n}") for n in found]
+    search = [engine.SearchButton("🔍 Найти", "find", hint="название или слово из описания")]
+    if state['q']:
+        search.append(("✕ Сбросить", "find_reset"))
+    rows, page, total = engine.picker_page(items, page, 7, "pg:", search=search)
+    return f"Найдено: {len(found)}", rows
+
+@form.on_search(data="find")
+async def _(inp):
+    state['q'] = inp.value.strip() or None
+    await form.edit(*screen())
+```
+
+Так устроены `.help`, `.config` (поиск по всем настройкам всех модулей), `.modlist`, `.restoremods`,
+`.changelog`, `.access` (люди и модули) и выбор модели в `.neuro`. Пока форма ждёт поиск, другие инлайн-запросы
+(`@бот wh …` и т. п.) работают как обычно: «Отправить в форму» — последним вариантом.
 
 ### Как это работает внутри
 
@@ -2635,6 +2703,19 @@ tag`), а Telethon молча выбрасывает такой «тег» вм�
 | лишний `</b>`, перепутанная вложенность, незакрытый тег | эти теги — буквально, остальной текст цел |
 | одиночные `<`, `>`, `&` | экранируются |
 | готовые сущности `&lt; &gt; &amp; &quot; &#123;` | не трогаются |
+
+**Премиум-эмодзи:** `<tg-emoji emoji-id="5368324170671202286">🔥</tg-emoji>` и в стиле Hikka
+`<emoji document_id=5368324170671202286>🔥</emoji>` — оба варианта работают и от юзербота, и от бота (второй
+переводится в первый, в том числе в `parse_mode='html'` у Telethon). Бот может слать премиум-эмодзи, только если у
+владельца бота есть Telegram Premium (Bot API 9.4); если Telegram отказал, `FRXBot` повторяет запрос с обычными
+эмодзи. Премиум-эмодзи в начале подписи кнопки формы становится иконкой кнопки (`icon_custom_emoji_id`).
+Аргументы команды с премиум-эмодзи — `engine.get_args_html()`.
+
+**`message.text` и `message.raw_text`.** Клиент Telegram во FRX работает с HTML (как в Hikka): `message.text` —
+HTML с тегами и премиум-эмодзи (`<tg-emoji emoji-id="…">🔥</tg-emoji>`), `message.raw_text` — простой текст с
+обычными эмодзи. `event.edit()`, `event.reply()`, `client.send_message()` без `parse_mode` тоже разбирают HTML, так
+что `.text` чужого сообщения можно отправить как есть — премиум-эмодзи сохранятся. Теги — как в Telegram: `<b> <i> <u> <s>
+<code> <pre> <tg-spoiler> <blockquote> <a href> <tg-emoji>`.
 
 Функция идемпотентна. Применяется автоматически в `engine.answer/reply/noreply/send_message` и в каждом
 запросе стационарного бота с HTML-разметкой (`FRXBot`). Сами вызывать её нужно, когда вставляете в текст

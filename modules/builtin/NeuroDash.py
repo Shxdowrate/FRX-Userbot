@@ -39,6 +39,8 @@ MODULE_NAME = "neurodash"
 VERSION = "5.6"
 AUTHOR = "FRX"
 DESCRIPTION = "Нейросети в Telegram: любые модели и ключи, расход токенов, инструменты-файлы по категориям"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/NeuroDash.py"
 
 EDIT_INTERVAL = 1.0           # как часто обновлять сообщение при потоковом ответе, сек
 MAX_LEN = 4000                # предел сообщения Telegram (с запасом)
@@ -210,10 +212,19 @@ async def neuro_command(event):
         cid = conns[k]['conn']
         models = engine.llm.models()
         mine = [(i, m) for i, m in enumerate(models) if m['conn'] == cid]
+        total_models = len(mine)
+        st['mk'] = k
+        if st.get('mq'):                     # 🔍 по названию модели (у OpenRouter их сотни)
+            mine = engine.search_items(mine, st['mq'], key=lambda im: [im[1]['model'], im[1]['model'].split('/')[-1]])
         pages = max(1, (len(mine) + PAGE - 1) // PAGE)
         page = max(0, min(page, pages - 1))
         cur = engine.llm.selected('chat')
         rows = []
+        if total_models > PAGE or st.get('mq'):
+            search = [engine.SearchButton("🔍 Найти модель", "nd_mq", hint="название модели, например gpt-4o")]
+            if st.get('mq'):
+                search.append((visual.btn('Сбросить', 'close'), f'nd_mq_reset:{k}'))
+            rows.append(search)
         for i, m in mine[page * PAGE:(page + 1) * PAGE]:
             rows.append([((('◉ ' if m['ref'] == cur else '○ ') + m['model'])[:48], f'nd_m:{i}')])
         nav = []
@@ -223,8 +234,22 @@ async def neuro_command(event):
         if page < pages - 1:
             nav.append(('▸', f'nd_c:{k}:{page + 1}'))
         rows.append(nav)
-        return (visual.title(_esc(conns[k]['name']), 'выберите модель') + "\n"
+        sub = f"поиск «{_esc(st['mq'])}»" if st.get('mq') else 'выберите модель'
+        return (visual.title(_esc(conns[k]['name']), sub) + "\n"
                 + visual.field('моделей', len(mine)) + "\n" + visual.field('страница', f"{page + 1}/{pages}")), rows
+
+    @form.on_search(data='nd_mq')
+    async def search_models(inp):
+        st['mq'] = (inp.value or '').strip()[:60] or None
+        text, rows = picker_models(st.get('mk') or 0, 0)
+        await form.edit(text=text, buttons=rows)
+
+    @form.on_click(data_startswith='nd_mq_reset:')
+    async def reset_model_search(click):
+        st['mq'] = None
+        text, rows = picker_models(int(click.data.split(':', 1)[1]), 0)
+        await click.answer()
+        await form.edit(text=text, buttons=rows)
 
     @form.on_click(data='nd_models')
     async def open_models(click):
@@ -232,6 +257,7 @@ async def neuro_command(event):
             await click.answer("Подождите, идёт ответ")
             return
         await engine.llm.scan_local()
+        st['mq'] = None
         if len(_conns()) == 1:
             text, rows = picker_models(0, 0)
         else:

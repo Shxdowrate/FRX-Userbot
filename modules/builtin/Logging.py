@@ -74,6 +74,8 @@ MODULE_NAME = "logging"
 VERSION = "1.2"
 AUTHOR = "FRX"
 DESCRIPTION = "Дублирует ошибки/важные события юзербота в ЛС владельцу через стационарного бота"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/Logging.py"
 
 # module_name+function -> monotonic-время последней отправки в ЛС —
 # используется throttle_seconds ниже; живёт только в памяти процесса

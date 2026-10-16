@@ -831,6 +831,7 @@ class WebPanel:
                                             'on_load', 'on_error', 'cycles', 'bot_commands', 'bot_watchers')}
             loaded.append({
                 'module': module_name, 'name': info.name, 'version': info.version, 'author': info.author,
+                'tg_url': info.tg_url, 'git_url': info.git_url,
                 'description': info.description, 'builtin': info.is_builtin, 'commands': d['commands'],
                 'bot_commands': d['bot_commands'], 'cycles': d['cycles'], 'other': other,
                 'pages': len(info.web_pages), 'emulate': bool(info.commands) and module_name not in hidden_emu,

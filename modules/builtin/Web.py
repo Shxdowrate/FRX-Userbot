@@ -44,6 +44,8 @@ MODULE_NAME = "web_panel"
 VERSION = "2.2"
 AUTHOR = "FRX"
 DESCRIPTION = "Сайт управления FRX: конфиги, модули (IDE, Emulate), аккаунты, страницы модулей; вход по коду из Telegram, публичный адрес"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/Web.py"
 
 
 def _esc(x):

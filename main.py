@@ -233,6 +233,23 @@ async def _net_monitor(core, config):
             return
 
 
+async def _run_client(core):
+    """
+    Работает, пока подключён ТЕКУЩИЙ клиент Telegram. При переключении аккаунта (.acc) старый клиент отключается
+    намеренно — тогда просто переходим к новому, а не считаем это обрывом связи.
+    """
+    while True:
+        client = core.client
+        try:
+            await client.run_until_disconnected()
+        except Exception:
+            if core.client is client:
+                raise
+        if core.client is client:
+            return
+        await asyncio.sleep(0)
+
+
 _STOPPING = False          # идёт остановка — обрывы соединений при ней ожидаемы
 
 
@@ -280,7 +297,7 @@ async def main() -> int:
         print(f"[FRX] Нет связи с Telegram при запуске ({type(e).__name__}) — гибернация")
         return EXIT_HIBERNATE
 
-    tasks = [asyncio.create_task(core.client.run_until_disconnected()), asyncio.create_task(_net_monitor(core, config))]
+    tasks = [asyncio.create_task(_run_client(core)), asyncio.create_task(_net_monitor(core, config))]
     bot = None
 
     if config.get('aiogram_token'):

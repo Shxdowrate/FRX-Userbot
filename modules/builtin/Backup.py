@@ -43,6 +43,8 @@ MODULE_NAME = "backup"
 VERSION = "1.2"
 AUTHOR = "FRX"
 DESCRIPTION = "Резервные копии данных FRX: .createbackup (в ЛС от бота) и .restorebackup (через SystemKeeper)"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/Backup.py"
 
 # лимит Bot API на отправку файла ботом — 50 МБ (с небольшим запасом)
 MAX_SEND_SIZE = 49 * 1024 * 1024

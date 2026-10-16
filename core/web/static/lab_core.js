@@ -2,7 +2,7 @@
  * Не зависит от DOM (проверяется в Node). Редактор — lab.js.
  *
  * Модель проекта:
- *   { v: 1, meta: {name, module_name, version, description, author_extra, locked_author?},
+ *   { v: 1, meta: {name, module_name, version, description, author_extra, tg_url?, git_url?, locked_author?},
  *     configs: [{key, description, type, default, options}],
  *     scripts: [{id, type, side, p: {…параметры…}, blocks: [block…]}] }
  *   block = {id, t: 'id блока из LAB_BLOCKS', f: {поля}, off?: true, kids?: {имя_слота: [block…]}}
@@ -957,6 +957,8 @@ function labCompile(project) {
   push(`VERSION = ${labPyStr(meta.version || '1.0')}`);
   push(`AUTHOR = ${labPyStr(author)}`);
   push(`DESCRIPTION = ${labPyStr(meta.description || '')}`);
+  if (String(meta.tg_url || '').trim()) push(`TG_URL = ${labPyStr(String(meta.tg_url).trim())}`);
+  if (String(meta.git_url || '').trim()) push(`GIT_URL = ${labPyStr(String(meta.git_url).trim())}`);
   const helperOrder = Object.keys(LAB_HELPERS).filter((h) => allHelpers.has(h));
   if (helperOrder.length) {
     push(''); push('');
@@ -1041,7 +1043,8 @@ function labSanitize(project) {
   const clean = { v: 1, meta: {}, configs: [], scripts: [] };
   const m = project.meta || {};
   clean.meta = { name: String(m.name || 'Мой модуль').slice(0, 80), module_name: String(m.module_name || 'my_module').slice(0, 64), version: String(m.version || '1.0').slice(0, 20),
-    description: String(m.description || '').slice(0, 300), author_extra: String(m.author_extra || '').slice(0, 60) };
+    description: String(m.description || '').slice(0, 300), author_extra: String(m.author_extra || '').slice(0, 60),
+    tg_url: String(m.tg_url || '').slice(0, 200), git_url: String(m.git_url || '').slice(0, 300) };
   if (m.locked_author !== undefined && m.locked_author !== null) clean.meta.locked_author = String(m.locked_author);
   clean.configs = (Array.isArray(project.configs) ? project.configs : []).slice(0, 60).map((x) => ({ key: String(x.key || '').slice(0, 40), description: String(x.description || '').slice(0, 200), type: ['str', 'int', 'float', 'bool', 'list', 'choice', 'choices', 'link'].includes(x.type) ? x.type : 'str', default: x.default === undefined ? '' : x.default, options: String(x.options || '') }));
   const walk = (list, depth) => (Array.isArray(list) ? list : []).slice(0, 500).map((b) => {

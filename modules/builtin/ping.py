@@ -3,6 +3,8 @@ MODULE_NAME = "ping"
 VERSION = "2.0"
 AUTHOR = "FRX"
 DESCRIPTION = "Задержка бота, пинг любого хоста, скорость интернета, check-host из разных стран и данные IP"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/ping.py"
 
 import asyncio
 import html

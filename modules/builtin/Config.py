@@ -21,6 +21,8 @@ MODULE_NAME = "config"
 VERSION = "2.12"
 AUTHOR = "FRX"
 DESCRIPTION = "Интерактивный просмотр и редактирование конфигов модулей через Inline-формы"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/Config.py"
 
 # Константы для типов конфигов
 TYPE_STR = "str"
@@ -197,7 +199,8 @@ async def config_cmd(event):
         for mod, display_name, count, _g in mods:
             lines.append(visual.item(f"<b>{_esc(mod)}</b> — {_esc(display_name)} · <i>конфигов: {count}</i>"))
             buttons.append([(visual.btn(f"{display_name} · {mod}"), f"open_mod:{mod}")])
-        lines += ["", visual.hint("выберите модуль")]
+        lines += ["", visual.hint("выберите модуль · 🔍 — поиск по всем настройкам")]
+        buttons.insert(0, [engine.SearchButton("🔍 Найти настройку", "cfg_search", hint="модуль, название настройки или слово из описания")])
         if with_back:
             buttons.append([(visual.btn("Назад", "back"), "back_to_main")])
         return "\n".join(lines), buttons
@@ -218,7 +221,25 @@ async def config_cmd(event):
         lines = [visual.title("Конфиги"), ""]
         lines += [visual.field(GROUP_TITLES[g].lower(), counts[g]) for g in present]
         lines += ["", visual.hint("выберите, чьи настройки открыть")]
-        buttons = [[(visual.btn(f"{GROUP_TITLES[g]} · {counts[g]}"), f"open_grp:{g}")] for g in present]
+        buttons = [[engine.SearchButton("🔍 Найти настройку", "cfg_search", hint="модуль, название настройки или слово из описания")]] + [[(visual.btn(f"{GROUP_TITLES[g]} · {counts[g]}"), f"open_grp:{g}")] for g in present]
+        return "\n".join(lines), buttons
+
+    async def build_search_menu(query: str) -> tuple[str, list]:
+        """Поиск по всем настройкам всех модулей: модуль, его название, ключ настройки, описание."""
+        items = []
+        for mod, display_name, count, _g in await get_modules_with_configs():
+            items.append({"label": visual.btn(f"{display_name} · {count}"), "data": f"open_mod:{mod}",
+                          "texts": [mod, display_name]})
+            configs = await db.gget(f"{mod}:__config__", {})
+            for key, data in sorted(configs.items()):
+                items.append({"label": f"{visual.visual('config')} {display_name} · {key}", "data": f"open_cfg:{mod}:{key}",
+                              "texts": [key, key.replace("_", " "), data.get("description", ""), f"{mod} {key}"]})
+        found = engine.search_items(items, query, key=lambda it: it["texts"], limit=30)
+        lines = [visual.title("Конфиги", sub=f"поиск «{_esc(query)}» · найдено: {len(found)}")]
+        if not found:
+            lines.append(visual.hint("ничего не нашлось — попробуйте иначе"))
+        buttons = [[engine.SearchButton("🔍 Найти настройку", "cfg_search", hint="модуль, название настройки или слово из описания")]] + [[(it["label"][:60], it["data"])] for it in found]
+        buttons.append([(visual.btn("Назад", "back"), "back_to_main")])
         return "\n".join(lines), buttons
 
     async def build_module_configs_menu(module_name: str) -> tuple[str, list]:
@@ -391,6 +412,15 @@ async def config_cmd(event):
     )
 
     # ---- Обработчики событий ----
+
+    @form.on_search(data="cfg_search")
+    async def search_configs(inp):
+        query = (inp.value or "").strip()
+        if not query:
+            text, buttons = await build_main_menu()
+        else:
+            text, buttons = await build_search_menu(query[:60])
+        await form.edit(text=text, buttons=buttons)
 
     @form.on_click(data="back_to_main")
     async def back_to_main(click: InlineClick):

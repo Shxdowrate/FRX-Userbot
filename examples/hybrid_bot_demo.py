@@ -33,6 +33,8 @@ MODULE_NAME = "hybrid_bot_demo"
 VERSION = "1.0"
 AUTHOR = "FRX"
 DESCRIPTION = "Демонстрация bot.command/watcher/on_start/on_load/cycle/telegram_event/on_error"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/examples/hybrid_bot_demo.py"
 
 
 # --------------------------------------------------------------------- #

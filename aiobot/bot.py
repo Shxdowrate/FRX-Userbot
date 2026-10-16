@@ -44,7 +44,8 @@ from . import decorators as bot
 from core.time_utils import parse_interval
 from core.engine import build_inline_function_text
 from core import visual as visual_module
-from core.html_utils import sanitize_bot_method
+from core.html_utils import sanitize_bot_method, strip_bot_method_custom_emoji
+from aiogram.exceptions import TelegramBadRequest
 
 
 class FRXBot(Bot):
@@ -63,7 +64,14 @@ class FRXBot(Bot):
         except Exception as e:                       # санитайзер не должен ронять отправку
             print(f"[FRX] [WARN] safe_html: не удалось обработать {type(method).__name__}: {e}")
         from core.apilog import note_bot       # запрос Bot API виден в Emulate
-        result = await note_bot(method, super().__call__(method, request_timeout=request_timeout))
+        try:
+            result = await note_bot(method, super().__call__(method, request_timeout=request_timeout))
+        except TelegramBadRequest:
+            # Премиум-эмодзи бот может слать, только если у владельца бота есть Telegram Premium (Bot API 9.4),
+            # и не везде. Не вышло — тот же запрос с обычными эмодзи вместо премиум, а не ошибка.
+            if not strip_bot_method_custom_emoji(method):
+                raise
+            result = await note_bot(method, super().__call__(method, request_timeout=request_timeout))
         # BotChat — всё, что бот отправил/изменил/удалил (в т.ч. модулями), попадает в историю сайта
         if _core_ref is not None:
             try:
@@ -475,31 +483,34 @@ def create_bot(token: str, core=None):
 
         user_id = iq.from_user.id if iq.from_user else None
         pending_input = core.get_pending_input(user_id) if user_id is not None else None
-        if pending_input is not None:
+
+        def input_result():
+            """Эхо набранного текста — «отправить значение в форму» (InputButton ждёт ввода)."""
             value = iq.query or ""
             hint = str(pending_input.get('hint') or '').strip()
             if value:
-                title, descr = visual_module.btn("Отправить: ") + value[:60], hint or "значение уйдёт в форму"
+                title, descr = visual_module.btn("Отправить в форму: ") + value[:60], hint or "значение уйдёт в форму"
             else:
                 title = "✏️ " + (hint or "Введите значение")
                 descr = f"«{pending_input.get('title') or ''}» — наберите после @бота и нажмите сюда".strip()
-            result = InlineQueryResultArticle(
+            return InlineQueryResultArticle(
                 id=f"{_INPUT_RESULT_PREFIX}{uuid.uuid4().hex}",
                 title=title,
                 description=descr,
                 input_message_content=InputTextMessageContent(message_text=value or "…"),
             )
-            # cache_time=0 — query меняется на каждое нажатие клавиши, кэш не нужен
-            await iq.answer([result], cache_time=0, is_personal=True)
-            return
 
-        # @bot.inline_query модулей — настоящие инлайн-результаты (core/inline_results.py)
+        # @bot.inline_query модулей — настоящие инлайн-результаты (core/inline_results.py).
+        # Работают и пока форма ждёт ввода: «@bot wh …» — это Whisper, а не значение для формы;
+        # вариант «отправить в форму» тогда идёт последним в списке.
         try:
             module_results = await core.dispatch_inline_query(iq)
         except Exception as e:
             core.tlog(f"[bot] инлайн-запрос «{(iq.query or '')[:40]}»: {e}")
             module_results = []
-        if module_results is not None:
+        if module_results is not None and (module_results or pending_input is None):
+            if pending_input is not None:
+                module_results = list(module_results)[:49] + [input_result()]
             await iq.answer(module_results, cache_time=0, is_personal=True)
             return
 
@@ -519,7 +530,14 @@ def create_bot(token: str, core=None):
                 )
                 for m in matches
             ]
+            if pending_input is not None:
+                results = results[:49] + [input_result()]
             await iq.answer(results, cache_time=0, is_personal=True)
+            return
+
+        if pending_input is not None:
+            # cache_time=0 — query меняется на каждое нажатие клавиши, кэш не нужен
+            await iq.answer([input_result()], cache_time=0, is_personal=True)
             return
 
         await iq.answer([], cache_time=1, is_personal=True)

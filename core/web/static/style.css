@@ -249,6 +249,9 @@ code { background: rgba(255, 255, 255, .14); padding: 1px 7px; border-radius: 2p
 .btn.danger { color: var(--danger); border-color: rgba(255, 211, 217, .42); }
 .btn.danger:hover { background: rgba(255, 150, 165, .18); border-color: rgba(255, 211, 217, .7); }
 .btn.small { padding: 4px 13px; font-size: 13px; }
+a.btn { display: inline-block; text-decoration: none; text-align: center; box-sizing: border-box; }
+.kv a { color: var(--ink); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.kv a:hover { text-decoration-color: var(--ink); }
 .btn.busy { animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .55; } }
 

@@ -211,7 +211,7 @@ def render_page_rows(pages, page_index, total_pages):
 PICKER_PAGE_SIZE = 7   # сколько кнопок-вариантов на одной странице выбора
 
 
-def picker_page(items, page=0, per_page=PICKER_PAGE_SIZE, page_callback="pick_page:"):
+def picker_page(items, page=0, per_page=PICKER_PAGE_SIZE, page_callback="pick_page:", search=None):
     """
     Одна страница списка вариантов для form.edit(): по кнопке в ряду, максимум
     per_page штук, и снизу ряд навигации ◀️ / "N/M" / ▶️ (только если страниц
@@ -224,6 +224,7 @@ def picker_page(items, page=0, per_page=PICKER_PAGE_SIZE, page_callback="pick_pa
     items — список готовых кнопок (text, callback_data). page — номер страницы
     с нуля (за границами — зажимается). Возвращает (rows, page, total_pages);
     rows — список рядов, к нему можно дописать свои ряды (например "Назад").
+    search — кнопка SearchButton (или ряд кнопок): ставится первым рядом над вариантами.
     """
     items = list(items)
     total = max(1, -(-len(items) // per_page))
@@ -237,6 +238,8 @@ def picker_page(items, page=0, per_page=PICKER_PAGE_SIZE, page_callback="pick_pa
         if page < total - 1:
             nav.append((PAGE_NEXT_LABEL, f"{page_callback}{page + 1}"))
         rows.append(nav)
+    if search is not None:
+        rows.insert(0, list(search) if isinstance(search, (list, tuple)) else [search])
     return rows, page, total
 
 
@@ -350,6 +353,82 @@ class InputButton:
         self.prefill = prefill or ""
         self.for_user = for_user
         self.style = normalize_style(style)   # цвет кнопки: 'primary' | 'success' | 'danger'
+
+
+class SearchButton(InputButton):
+    """
+    Кнопка «🔍 Поиск» для длинных списков — та же InputButton (тап открывает «@бот …», пользователь набирает
+    запрос и отправляет), но со своими значениями по умолчанию и своим хендлером:
+
+        buttons = [[engine.SearchButton()], *rows]          # подпись «🔍 Поиск», data='search'
+
+        @form.on_search()                                   # = form.on_input(data='search')
+        async def _(inp):
+            found = engine.search_items(items, inp.value, key=lambda it: it['name'])
+            ...
+
+    text / data / hint / style / prefill / for_user — как у InputButton.
+    """
+    __slots__ = ()
+
+    def __init__(self, text="🔍 Поиск", data="search", hint="что найти: название, команда или слово",
+                 for_user=None, style="primary", prefill=""):
+        super().__init__(text, data, hint=hint, for_user=for_user, style=style, prefill=prefill)
+
+
+def _norm_search(text) -> str:
+    return str(text or '').lower().replace('ё', 'е').strip()
+
+
+def search_items(items, query, key=None, limit=None, fuzzy=True):
+    """
+    Поиск по списку для кнопки SearchButton (и вообще): возвращает элементы items, подходящие под query,
+    лучшие — первыми: точное совпадение → начинается с запроса → слово начинается с запроса → содержит
+    запрос → (если ничего) похожее по написанию. Без учёта регистра и разницы «е/ё».
+
+    key(item) -> строка или список строк, по которым искать (по умолчанию str(item)).
+    Пустой query — все items как есть. limit — не больше стольких результатов.
+    """
+    import difflib
+    items = list(items)
+    q = _norm_search(query)
+    if not q:
+        return items[:limit] if limit else items
+    words_q = q.split()
+
+    def texts(it):
+        v = key(it) if key else it
+        if isinstance(v, (list, tuple, set)):
+            return [_norm_search(x) for x in v if x is not None]
+        return [_norm_search(v)]
+
+    ranked = []
+    for idx, it in enumerate(items):
+        best = None
+        for t in texts(it):
+            if not t:
+                continue
+            if t == q:
+                score = 0
+            elif t.startswith(q):
+                score = 1
+            elif any(w.startswith(q) for w in t.replace('_', ' ').replace('.', ' ').split()):
+                score = 2
+            elif q in t or all(w in t for w in words_q):
+                score = 3
+            else:
+                continue
+            best = score if best is None else min(best, score)
+        if best is not None:
+            ranked.append((best, idx, it))
+    if not ranked and fuzzy:
+        for idx, it in enumerate(items):
+            words = [w for t in texts(it) for w in [t] + t.replace('_', ' ').split()]
+            if difflib.get_close_matches(q, words, n=1, cutoff=0.72):
+                ranked.append((4, idx, it))
+    ranked.sort(key=lambda r: (r[0], r[1]))
+    out = [it for _s, _i, it in ranked]
+    return out[:limit] if limit else out
 
 
 class InlineInput:
@@ -466,6 +545,13 @@ class InlineForm:
             self._click_handlers.append((data, data_startswith, func))
             return func
         return deco
+
+    def on_search(self, data='search'):
+        """
+        @form.on_search() — запрос из кнопки SearchButton (data='search' по умолчанию). То же самое, что
+        form.on_input(data=...): функция получает inp (InlineInput), запрос — inp.value.
+        """
+        return self.on_input(data=data)
 
     def on_input(self, data=None):
         """

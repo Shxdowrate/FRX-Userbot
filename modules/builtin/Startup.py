@@ -86,6 +86,8 @@ MODULE_NAME = "startup"
 VERSION = "2.3"
 AUTHOR = "FRX"
 DESCRIPTION = "Автосоздание/восстановление стационарного бота через BotFather, включение его инлайн-режима и инлайн-фидбэка (100%), аватарка-логотип FRX, снятие с ЧС и старт диалога при запуске/смене аккаунта"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/Startup.py"
 
 from core.paths import CONFIG_PATH
 BOTFATHER = 'BotFather'

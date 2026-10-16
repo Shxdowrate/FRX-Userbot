@@ -34,6 +34,8 @@ MODULE_NAME = "access"
 VERSION = "2.0"
 AUTHOR = "FRX"
 DESCRIPTION = "Доступ других пользователей к командам юзербота: классы и отдельные разрешения на модули и команды"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/Access.py"
 
 PAGE = 7
 DANGER = '⚠️'
@@ -267,8 +269,17 @@ async def _open_form(event, uid=None, name='', username=''):
         items = []
         for i, x in enumerate(st['users']):
             u = engine.access.get_user(x)
-            items.append((f"{u.get('name') or x}" + (f" · {u['class']}" if u.get('class') else ''), f"u:{i}"))
-        rows, _p, _ = engine.picker_page(items, page, PAGE, 'lp:') if items else ([], 0, 1)
+            items.append(((f"{u.get('name') or x}" + (f" · {u['class']}" if u.get('class') else ''), f"u:{i}"),
+                          [str(u.get('name') or ''), str(x), str(u.get('username') or ''), str(u.get('class') or '')]))
+        if st.get('uq'):
+            items = engine.search_items(items, st['uq'], key=lambda it: it[1])
+        items = [it[0] for it in items]
+        search = None
+        if len(st['users']) > PAGE or st.get('uq'):
+            search = [engine.SearchButton("🔍 Найти человека", "acc_uq", hint="имя, @username или id")]
+            if st.get('uq'):
+                search.append((visual.btn('Сбросить', 'close'), 'uq_reset'))
+        rows, _p, _ = engine.picker_page(items, page, PAGE, 'lp:', search=search) if items or search else ([], 0, 1)
         rows.append([(visual.btn('Классы'), 'classes')])
         rows.append(close_row())
         await form.edit(_list_text(prefix), buttons=rows)
@@ -324,7 +335,13 @@ async def _open_form(event, uid=None, name='', username=''):
         for i, (mname, title, builtin, danger) in enumerate(st['mods']):
             has = engine.access.module_allowed(st['uid'], mname, builtin)[0] if engine.access.get_user(st['uid']) else False
             items.append(((f"{DANGER} " if danger else '') + title + (' ✓' if has else ''), f"m:{i}"))
-        rows, page, _ = engine.picker_page(items, page, PAGE, 'gperm:')
+        if st.get('mq'):
+            titles = {f"m:{i}": [mname, title] for i, (mname, title, _b, _d) in enumerate(st['mods'])}
+            items = engine.search_items(items, st['mq'], key=lambda it: titles.get(it[1], [it[0]]))
+        search = [engine.SearchButton("🔍 Найти модуль", "acc_mq", hint="название модуля")]
+        if st.get('mq'):
+            search.append((visual.btn('Сбросить', 'close'), 'mq_reset'))
+        rows, page, _ = engine.picker_page(items, page, PAGE, 'gperm:', search=search)
         st['page'] = page
         rows.append(back('give'))
         await form.edit(visual.title("Выдать разрешение", sub=who()) + "\n"
@@ -407,10 +424,30 @@ async def _open_form(event, uid=None, name='', username=''):
 
     form = await engine.create_inlineform(event.chat_id, visual.wait("Открываю…"), buttons=[[('…', 'noop')]])
 
+    @form.on_search(data='acc_uq')
+    async def _search_users(inp):
+        st['uq'] = (inp.value or '').strip()[:60] or None
+        await show_list()
+
+    @form.on_search(data='acc_mq')
+    async def _search_mods(inp):
+        st['mq'] = (inp.value or '').strip()[:60] or None
+        await show_mods(0)
+
     @form.on_click()
     async def _click(click):
         d = click.data
         try:
+            if d == 'uq_reset':
+                await click.answer()
+                st['uq'] = None
+                await show_list()
+                return
+            if d == 'mq_reset':
+                await click.answer()
+                st['mq'] = None
+                await show_mods(0)
+                return
             if d == 'close':
                 await click.answer()
                 await form.delete()

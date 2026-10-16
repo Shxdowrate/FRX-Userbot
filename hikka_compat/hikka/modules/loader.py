@@ -288,8 +288,38 @@ class LoaderMod(loader.Module):
             return False
 
         if isinstance(message, Message):
+            markup = await self._developer_markup(instance)
+            if markup:
+                try:
+                    await utils.answer(message, self._loaded_text(instance, url), reply_markup=markup)
+                    return instance
+                except Exception:
+                    logger.debug("кнопка канала разработчика не показалась", exc_info=True)
             await utils.answer(message, self._loaded_text(instance, url))
         return instance
+
+    async def _developer_markup(self, instance):
+        """Как в Hikka: разработчик (# meta developer: @канал) — канал, а вы на него не подписаны → кнопка «Перейти на канал»."""
+        dev = None
+        for line in (getattr(instance, "__source__", "") or "").splitlines():
+            m = re.match(r"^\s*# ?meta developer: ?(\S+)", line)
+            if m:
+                dev = m.group(1).strip()
+                break
+        if not dev:
+            return None
+        try:
+            from core.module_meta import normalize_module_link
+
+            url = normalize_module_link(dev, "tg")
+            if not url:
+                return None
+            _entity, joined = await _frx.engine.channel_subscription(url)
+        except Exception:
+            return None
+        if joined is not False:
+            return None
+        return [[{"text": "💫 Перейти на канал разработчика", "url": url}]]
 
     def _loaded_text(self, instance, url=None) -> str:
         prefix = self.get_prefix()

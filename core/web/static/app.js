@@ -868,6 +868,32 @@ function configRow(m, it) {
  * модули (аналог Loader + Help, установка, удаление)
  * ------------------------------------------------------------------ */
 
+/* ссылка автора модуля (TG_URL / GIT_URL из шапки) — коротко, открывается в новой вкладке */
+function extLink(url) {
+  let shown = String(url).replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, '');
+  const gh = /^(?:github|gitlab)\.com\/[^/]+\/([^/]+)\/(?:-\/)?(?:blob|tree)\/[^/]+\/(.+)$/.exec(shown);
+  if (gh) shown = `${gh[1]}/${gh[2]}`;
+  return h('a', { href: url, target: '_blank', rel: 'noopener noreferrer' }, shown.length > 48 ? shown.slice(0, 47) + '…' : shown);
+}
+
+function linkKv(m) {
+  const out = [];
+  if (m.tg_url) out.push(h('span', {}, 'канал'), h('span', {}, extLink(m.tg_url)));
+  if (m.git_url) out.push(h('span', {}, 'исходник'), h('span', {}, extLink(m.git_url)));
+  return out;
+}
+
+/* поле «поиск» над списком: прячет строки, в тексте которых нет запроса */
+function searchBox(placeholder, items) {
+  const norm = (x) => String(x || '').toLowerCase().replace(/ё/g, 'е');
+  const inp = h('input', { class: 'field', type: 'search', placeholder, autocomplete: 'off', spellcheck: 'false' });
+  inp.addEventListener('input', () => {
+    const q = norm(inp.value).trim();
+    for (const { el, text } of items) el.style.display = !q || norm(text).includes(q) ? '' : 'none';
+  });
+  return inp;
+}
+
 async function modulesView(T) {
   const d = await api('/modules');
   const fileInput = h('input', { type: 'file', accept: '.py,.txt', style: 'display:none' });
@@ -883,8 +909,12 @@ async function modulesView(T) {
     nameSub(m.name, `${m.module} · v${m.version} · ${m.author}`, m.builtin ? 'встроенный' : ''),
     h('span', { class: 'val' }, `${m.commands.length} ${plural(m.commands.length, 'команда', 'команды', 'команд')}`),
     { click: () => { location.hash = '#/modules/' + encodeURIComponent(m.module); } }));
+  const searchable = d.loaded.map((m, i) => ({ el: loaded[i],
+    text: [m.name, m.module, m.author, m.description, ...m.commands.map((c) => [c.command, ...c.aliases].join(' '))].join(' ') }));
 
-  const parts = [glass(loaded.length ? loaded : empty('модулей нет'))];
+  const parts = [];
+  if (loaded.length > 6) parts.push(h('div', { class: 'block' }, searchBox('🔍 поиск: название, команда, автор', searchable)));
+  parts.push(glass(loaded.length ? loaded : empty('модулей нет')));
 
   if (d.unloaded.length) {
     parts.push(h('div', { class: 'block' }, h('div', { class: 'h2', style: 'padding-left:6px' }, 'выгруженные')));
@@ -919,6 +949,7 @@ async function startInstall(fileName, source) {
     h('span', {}, 'id'), h('span', {}, p.meta.module_name),
     h('span', {}, 'версия'), h('span', {}, upd ? `${p.existing_version} → ${p.meta.version}` : p.meta.version),
     h('span', {}, 'автор'), h('span', {}, p.meta.author),
+    ...linkKv(p.meta),
     h('span', {}, 'описание'), h('span', {}, p.meta.description || '—'),
     h('span', {}, 'команды'), h('span', {}, cmds));
   modal(upd ? 'обновить модуль?' : 'установить модуль?', kv, (close) => [
@@ -951,6 +982,7 @@ async function moduleDetail(T, moduleId) {
     h('span', {}, 'id'), h('span', {}, m.module),
     h('span', {}, 'версия'), h('span', {}, m.version),
     h('span', {}, 'автор'), h('span', {}, m.author),
+    ...linkKv(m),
     h('span', {}, 'описание'), h('span', {}, m.description || '—'));
 
   const cmds = m.commands.length
@@ -966,6 +998,8 @@ async function moduleDetail(T, moduleId) {
     m.emulate ? h('button', { class: 'btn primary', type: 'button', onclick: () => { location.hash = '#/modules/' + encodeURIComponent(m.module) + '/emulate'; } }, '> emulate') : null,
     h('button', { class: 'btn', onclick: () => { location.hash = '#/webide/' + encodeURIComponent(m.module); } }, m.builtin ? 'посмотреть код' : 'редактировать'),
     h('button', { class: 'btn', onclick: () => act(async () => { await api('/modules/reload', { module: m.module }); toast('модуль перезагружен', 'ok'); route(); }) }, 'перезагрузить'),
+    m.tg_url ? h('a', { class: 'btn', href: m.tg_url, target: '_blank', rel: 'noopener noreferrer' }, '↗ канал автора') : null,
+    m.git_url ? h('a', { class: 'btn', href: m.git_url, target: '_blank', rel: 'noopener noreferrer' }, /github\.com/i.test(m.git_url) ? '↗ github' : '↗ исходник') : null,
     m.builtin ? null : confirmBtn('выгрузить', () => act(async () => {
       await api('/modules/unload', { module: m.module });
       toast('модуль выгружен — вернуть можно в списке «выгруженные»', 'ok'); location.hash = '#/modules';

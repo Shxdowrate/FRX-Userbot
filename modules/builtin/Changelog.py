@@ -53,6 +53,8 @@ MODULE_NAME = "changelog"
 VERSION = "1.2"
 AUTHOR = "FRX"
 DESCRIPTION = "Журнал обновлений (CHANGELOG.md): описание обновления в ЛС при первом запуске новой версии и команда .changelog"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/Changelog.py"
 
 CHANGELOG_PATH = Path('CHANGELOG.md')
 README_PATH = Path('README.md')
@@ -303,23 +305,44 @@ def _card_text(entry) -> str:
     return body
 
 
-def _picker(entries_sorted, page):
+def _picker(entries_sorted, page, query=None):
+    if query:                                # 🔍: по номеру версии, заголовку и тексту записи
+        entries_sorted = engine.search_items(
+            entries_sorted, query, key=lambda e: [e['version'], e.get('title') or '', ' '.join(e.get('lines') or [])])
     items = [
         (f"{e['version']}" + (f" — {e['title']}" if e['title'] else ""), f"cl_open:{e['version']}")
         for e in entries_sorted
     ]
-    rows, page, total = engine.picker_page(items, page, per_page=CL_PAGE_SIZE, page_callback="cl_page:")
+    search = [engine.SearchButton("🔍 Найти в журнале", "cl_search", hint="версия или слово из описания")]
+    if query:
+        search.append((visual.btn('Сбросить', 'close'), "cl_search_reset"))
+    rows, page, total = engine.picker_page(items, page, per_page=CL_PAGE_SIZE, page_callback="cl_page:", search=search)
     rows.append([(visual.btn('К последней версии', 'back'), "cl_latest", "primary")])
-    text = visual.title('Журнал обновлений', f"выберите версию · страница {page + 1}/{total}")
+    if query:
+        text = visual.title('Журнал обновлений', f"поиск «{html.escape(query)}» · найдено: {len(items)}"
+                            + (f" · стр. {page + 1}/{total}" if total > 1 else ""))
+    else:
+        text = visual.title('Журнал обновлений', f"выберите версию · страница {page + 1}/{total}")
     return text, rows, page
 
 
 def _bind_form(form, entries_sorted):
-    state = {'page': 0}
+    state = {'page': 0, 'q': None}
 
     async def _show_picker(page):
-        text, buttons, state['page'] = _picker(entries_sorted, page)
+        text, buttons, state['page'] = _picker(entries_sorted, page, state['q'])
         await form.edit(text, buttons=buttons)
+
+    @form.on_search(data="cl_search")
+    async def _search(inp):
+        state['q'] = (inp.value or '').strip()[:60] or None
+        await _show_picker(0)
+
+    @form.on_click(data="cl_search_reset")
+    async def _search_reset(click):
+        await click.answer()
+        state['q'] = None
+        await _show_picker(0)
 
     async def _show_entry(entry):
         await form.edit(_card_text(entry), buttons=[[(visual.btn('Перейти к версии…'), f"cl_pick:{state['page']}")]])

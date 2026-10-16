@@ -36,6 +36,8 @@ MODULE_NAME = "info"
 VERSION = "2.1"
 AUTHOR = "FRX"
 DESCRIPTION = "Полная информация о юзерботе и системе (.info) с анимацией; конфиденциальные сведения — по инлайн-кнопке; проверка окружения (.doctor)"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/Info.py"
 
 _STARTED_AT = _time.monotonic()
 PRESETS = {f'experience_{n}': ('experience', f'experience_{n}.mp4') for n in (1, 2, 3)}     # встроенные медиа (assets/…)

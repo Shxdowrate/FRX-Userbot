@@ -11,9 +11,9 @@ modules/builtin/SystemKeeper.py
     .exit               — резервная копия данных (файлом в ЛС от бота), затем полное
                           выключение юзербота (без перезапуска, в отличие от .restart).
     .update  / .upd     — обновление FRX:
-                            ответом на .zip-файл (внутри должна быть папка FRX/) — из файла;
-                            `.update git` — из GitHub (репозиторий/ветка/токен — конфиги модуля,
-                            `.config systemkeeper`).
+                            просто `.update` — из GitHub (по умолчанию официальный репозиторий
+                            Shxdowrate/FRX-Userbot; репозиторий/ветка/токен — `.config systemkeeper`);
+                            ответом на .zip-файл (внутри должна быть папка FRX/) — из файла.
                           Перед установкой показывается инлайн-превью (версии, что изменится);
                           без стационарного бота подтверждение — словом `yes` в команде.
     .sk / .systemkeeper — статус keeper'а, настройки обновления, резервные копии.
@@ -30,7 +30,7 @@ modules/builtin/SystemKeeper.py
 Logging (учитывает его конфиги enabled / log_chat_id).
 
 Конфиги (`.config systemkeeper`):
-    github_repo     — репозиторий: https://github.com/owner/name или owner/name
+    github_repo     — репозиторий: https://github.com/owner/name или owner/name (пусто — Shxdowrate/FRX-Userbot)
     github_branch   — ветка (по умолчанию main)
     github_token    — токен доступа (нужен только для приватного репозитория;
                       достаточно fine-grained токена с правом чтения содержимого)
@@ -54,6 +54,8 @@ MODULE_NAME = "systemkeeper"
 VERSION = "1.3"
 AUTHOR = "FRX"
 DESCRIPTION = "Перезагрузка и обновление юзербота (из файла и из GitHub) через frx_systemkeeper.py"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/SystemKeeper.py"
 
 MAX_UPDATE_ZIP = 300 * 1024 * 1024
 PREVIEW_LINES = 12
@@ -236,50 +238,39 @@ async def exit_cmd(event):
 # .update
 # --------------------------------------------------------------------- #
 
+DEFAULT_REPO = 'Shxdowrate/FRX-Userbot'     # .update без настроек — отсюда
+
+
 @decorators.command('update', 'upd')
 async def update_cmd(event):
-    """обновление FRX: ответом на .zip (папка FRX/) или `.update git` из GitHub; `yes` — без инлайн-подтверждения"""
+    """обновление FRX из GitHub; ответом на .zip (папка FRX/) — из файла; `yes` — без инлайн-подтверждения"""
     if not keeper.keeper_active():
         await _no_keeper(event)
         return
 
     tokens = engine.get_args().lower().split()
     yes = 'yes' in tokens
-    from_git = any(t in ('git', 'github', 'gh') for t in tokens)
-
-    if not from_git and not event.is_reply:
-        await engine.answer(
-            event,
-            visual.title("Обновление FRX") + "\n"
-            + visual.item("из файла: ответьте <code>.update</code> на .zip-архив (внутри папка <code>FRX/</code>)") + "\n"
-            + visual.item("из GitHub: <code>.update git</code> (настройки — <code>.config systemkeeper</code>)"),
-        )
-        return
+    # по умолчанию — из GitHub; из файла — если команда отправлена ответом на сообщение с файлом
+    replied_file = None
+    if event.is_reply and not any(t in ('git', 'github', 'gh') for t in tokens):
+        replied_file = await event.get_reply_message()
+        if not replied_file or not replied_file.file:
+            replied_file = None
+    from_git = replied_file is None
 
     zip_path = keeper.INCOMING_DIR / 'update.zip'
     try:
         keeper.INCOMING_DIR.mkdir(parents=True, exist_ok=True)
 
         if from_git:
-            repo = (await _cfg('github_repo') or '').strip()
-            if not repo:
-                await engine.answer(
-                    event,
-                    visual.err("Не указан репозиторий GitHub") + "\n"
-                    + visual.hint("задайте") + " <code>github_repo</code> " + visual.hint("в")
-                    + " <code>.config systemkeeper</code>",
-                )
-                return
+            repo = (await _cfg('github_repo') or '').strip() or DEFAULT_REPO
             branch = await _cfg('github_branch')
             token = await _cfg('github_token')
             await engine.answer(event, visual.wait("Скачиваю обновление с GitHub…"))
             slug = await asyncio.to_thread(keeper.download_github, repo, branch, token, str(zip_path))
             source_kind, source_label = 'github', f"GitHub {slug}"
         else:
-            replied = await event.get_reply_message()
-            if not replied or not replied.file:
-                await engine.answer(event, visual.err("Ответьте на .zip-файл, а не на текст"))
-                return
+            replied = replied_file
             file_name = replied.file.name or ''
             if not file_name.lower().endswith('.zip'):
                 await engine.answer(event, visual.err("Нужен файл с расширением .zip"))
@@ -365,13 +356,11 @@ async def sk_cmd(event):
         "",
         visual.section("GitHub"),
     ]
-    if repo:
-        lines += [
-            visual.field("репозиторий", f"{_esc(repo)}@{_esc(branch)}"),
-            visual.field("токен", "задан" if has_token else "не задан", code=False),
-        ]
-    else:
-        lines.append(visual.item("не настроен — <code>.config systemkeeper</code>"))
+    lines += [
+        visual.field("репозиторий", f"{_esc(repo or DEFAULT_REPO)}@{_esc(branch or 'main')}"
+                     + ("" if repo else " (по умолчанию)")),
+        visual.field("токен", "задан" if has_token else "не задан", code=False),
+    ]
     backups = keeper.list_backups()
     if backups:
         lines += ["", visual.section("Резервные копии"), visual.hint("user/data/backup")]
@@ -380,7 +369,7 @@ async def sk_cmd(event):
     lines += [
         "",
         visual.section("Команды"),
-        "<code>.restart</code> · <code>.update</code> · <code>.update git</code> · "
+        "<code>.restart</code> · <code>.update</code> (GitHub; ответом на .zip — из файла) · "
         "<code>.createbackup</code> · <code>.restorebackup</code>",
     ]
     await engine.answer(event, "\n".join(lines))
@@ -494,12 +483,12 @@ async def setup():
     global _pending_details
     await engine.create_config(
         key='github_repo',
-        description='Репозиторий GitHub для .update git: https://github.com/owner/name или owner/name',
+        description='Репозиторий GitHub для .update: https://github.com/owner/name или owner/name (пусто — Shxdowrate/FRX-Userbot)',
         data_type='str', default='',
     )
     await engine.create_config(
         key='github_branch',
-        description='Ветка репозитория для .update git',
+        description='Ветка репозитория для .update',
         data_type='str', default='main',
     )
     await engine.create_config(

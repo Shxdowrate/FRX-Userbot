@@ -54,14 +54,15 @@ from .files import FileRegistry
 from .waiters import Waiter, WaiterCancelled
 from .accounts import AccountManager
 from .inline_forms import (
-    InlineForm, InlineClick, InputButton, InlineInput, TokenBucket, resolve_form_reply,
+    InlineForm, InlineClick, InputButton, SearchButton, InlineInput, TokenBucket, resolve_form_reply, search_items,
     PAGE_PREV, PAGE_NEXT, PAGE_NOOP, paginate_button_rows, render_page_rows,
     parse_button, normalize_style,
 )
 from .stationary_bot import BotFacade
 from .inline_results import InlineResult, InlineQueryEvent, InlineQueryClick, link_preview_options
-from .html_utils import safe_html
-from .module_meta import parse_module_meta
+from .html_utils import safe_html, html_with_entities, install_telethon_emoji_tags, split_button_emoji
+install_telethon_emoji_tags()    # parse_mode="html" у Telethon понимает и <emoji document_id=…>
+from .module_meta import parse_module_meta, normalize_module_link, tg_username
 from .command_event import CommandEvent
 from .botlog import BotLogLimiter
 from .inline_forms import picker_page
@@ -74,7 +75,7 @@ from .paths import ASSETS_DIR, BUILTIN_DIR, FILES_DIR, MODULES_DIR, SESSION_PATH
 # Версия ЯДРА FRX (не путать с VERSION отдельных модулей, см. ModuleInfo) —
 # правится вручную при каждом обновлении движка. Показывается в .about
 # (modules/builtin/Helper.py) и в баннере запуска (main.py).
-FRX_VERSION = "1.0.0"
+FRX_VERSION = "1.0.1"
 
 # Папки (подробно — core/paths.py):
 #   ASSETS_DIR      — стоковые статичные файлы FRX (assets/ проекта, обновляются вместе с кодом);
@@ -110,6 +111,8 @@ class ModuleInfo:
     path: str
     source: str
     namespace: dict
+    tg_url: str = ''                                       # TG_URL из шапки — канал автора (см. core/module_meta.py)
+    git_url: str = ''                                      # GIT_URL из шапки — модуль на GitHub
 
     commands: dict = field(default_factory=dict)          # alias -> func
     watchers: list = field(default_factory=list)
@@ -182,12 +185,14 @@ class Core:
     # InputButton нужен модулю, чтобы СОБРАТЬ buttons=[[engine.InputButton(...)]]
     # для create_inlineform()/form.edit() — см. core/inline_forms.py и README 16а.
     InputButton = InputButton
+    SearchButton = SearchButton                        # «🔍 Поиск» для длинных списков, form.on_search()
     InlineInput = InlineInput
     InlineForm = InlineForm
     InlineClick = InlineClick
 
     # утилиты, доступные модулям как engine.<имя>
     picker_page = staticmethod(picker_page)            # постраничный выбор (по 7), см. core/inline_forms.py
+    search_items = staticmethod(search_items)          # поиск по списку для SearchButton, см. core/inline_forms.py
     safe_html = staticmethod(safe_html)                # экранирование НЕ-тегов в HTML, см. core/html_utils.py
     parse_module_meta = staticmethod(parse_module_meta)  # статический разбор исходника модуля, см. core/module_meta.py
 
@@ -231,6 +236,7 @@ class Core:
         self._bot_username = None
         self._bot_id = None                          # кэш id стационарного бота, см. _get_bot_id()
         self._owner_id = None                        # (await client.get_me()).id, кешируется в start()
+        self._prefix_cache = (self.config or {}).get('prefix', '.') if isinstance(self.config, dict) else '.'   # последний известный префикс — для синхронного get_args()
         self._dialog_lock = asyncio.Lock()            # bot_send_to_owner() -> _open_bot_dialog()
         self._bot_ready = False                       # True после set_bot(bot, dp) — "все инициализации" завершены
         # лимитер engine.botlog() (core/botlog.py)
@@ -700,6 +706,10 @@ class Core:
         """
         from .apilog import wrap_client          # запросы к Telegram во время Emulate видны на сайте
         wrap_client(client)
+        # Разметка клиента — HTML, как у engine.answer() и в Hikka: message.text — HTML с тегами и премиум-эмодзи
+        # (<tg-emoji emoji-id="…">), message.raw_text — простой текст с обычными эмодзи; event.edit/reply/
+        # client.send_message без parse_mode тоже понимают HTML (и <emoji document_id=…>).
+        client.parse_mode = 'html'
         client.remove_event_handler(self._on_new_message, events.NewMessage())
         client.remove_event_handler(self._on_chat_action, events.ChatAction())
         client.remove_event_handler(self._on_callback, events.CallbackQuery())
@@ -840,6 +850,10 @@ class Core:
         parts = rest.split(maxsplit=1)
         cmd = parts[0].lower()
         run_event = event
+        # «. cmd аргументы» — пробелы между префиксом и командой: модуль получает текст «.cmd аргументы»,
+        # иначе engine.get_args() и модули, читающие event.raw_text сами, приняли бы команду за аргумент
+        if text[len(prefix):len(prefix) + 1].isspace():
+            run_event = CommandEvent(event, prefix + text[len(prefix):].lstrip())
         entry = self.command_map.get(cmd)
         if entry is None:
             expanded = self.aliases.expand(cmd, parts[1] if len(parts) > 1 else '') if self.aliases._data is not None else None
@@ -1056,6 +1070,8 @@ class Core:
             path=source_path or str((BUILTIN_DIR if target == 'builtin' else LOADED_DIR) / f'{module_name}.py'),
             source=source,
             namespace=namespace,
+            tg_url=normalize_module_link(namespace.get('TG_URL'), 'tg'),
+            git_url=normalize_module_link(namespace.get('GIT_URL'), 'git'),
         )
 
         # Сохраняем файл модуля на диск — НО НЕ для встроенных (target='builtin'):
@@ -1727,6 +1743,60 @@ class Core:
             except Exception:
                 pass
 
+    def module_links(self, module_name_or_meta, row: bool = True):
+        """
+        Кнопки-ссылки автора модуля (TG_URL / GIT_URL из шапки) для инлайн-формы:
+        [[('↗ Канал автора', 'url:https://t.me/…'), ('↗ GitHub', 'url:https://github.com/…')]] — один ряд
+        (row=False — плоский список кнопок). Ссылок нет — []. Принимает MODULE_NAME или dict с 'tg_url'/'git_url'
+        (результат get_module_info() / parse_module_meta()).
+        """
+        if isinstance(module_name_or_meta, dict):
+            tg, git = module_name_or_meta.get('tg_url') or '', module_name_or_meta.get('git_url') or ''
+        else:
+            info = self.modules.get(module_name_or_meta)
+            tg, git = (info.tg_url, info.git_url) if info else ('', '')
+        link = visual_module.visual('link')
+        buttons = []
+        if tg:
+            buttons.append((f"{link} Канал автора", 'url:' + tg))
+        if git:
+            buttons.append((f"{link} " + ('GitHub' if 'github.com' in git.lower() else 'Исходник'), 'url:' + git))
+        return ([buttons] if buttons else []) if row else buttons
+
+    async def channel_subscription(self, url):
+        """
+        Подписан ли текущий аккаунт на канал по ссылке (t.me/name). -> (entity | None, joined: bool | None).
+        None — не канал, приватная ссылка или узнать не удалось. Канал находится по username один раз —
+        дальше он в кэше сессии.
+        """
+        name = tg_username(url or '')
+        if not name or self.client is None:
+            return None, None
+        try:
+            entity = await self.client.get_entity(name)
+        except Exception:
+            return None, None
+        from telethon.tl.types import Channel
+        if not isinstance(entity, Channel):
+            return entity, None
+        left = getattr(entity, 'left', None)
+        return entity, (None if left is None else not left)
+
+    async def join_channel(self, url) -> bool:
+        """Подписаться на канал по ссылке t.me/name от текущего аккаунта. True — подписан."""
+        entity, joined = await self.channel_subscription(url)
+        if entity is None:
+            return False
+        if joined:
+            return True
+        from telethon.tl.functions.channels import JoinChannelRequest
+        try:
+            await self.client(JoinChannelRequest(entity))
+            return True
+        except Exception as e:
+            self.tlog(f"[modules] не удалось подписаться на {url}: {e}")
+            return False
+
     def get_module_info(self, module_name: str) -> dict:
         """
         Вся инфа о модуле — команды (с алиасами и докстрингом) и остальные
@@ -1811,6 +1881,8 @@ class Core:
             'version': info.version,
             'author': info.author,
             'description': info.description,
+            'tg_url': info.tg_url,
+            'git_url': info.git_url,
             'is_builtin': info.is_builtin,
             'commands': commands,
             'watchers': _handlers(info.watchers),
@@ -2406,14 +2478,54 @@ class Core:
         self._tl_loading = uploaded          # пока не отправлен — InputFile; после первой отправки — ссылка на документ
         return uploaded
 
+    def _command_text(self, text: str) -> str:
+        """«.  cmd args» → «.cmd args»: пробелы между префиксом и командой не делают команду аргументом."""
+        text = (text or '').lstrip()
+        prefix = self._prefix_cache
+        if prefix and text.startswith(prefix) and text[len(prefix):len(prefix) + 1].isspace():
+            text = prefix + text[len(prefix):].lstrip()
+        return text
+
+    def _args_offset(self, text: str) -> int:
+        """Индекс в text, с которого начинаются аргументы команды (len(text) — аргументов нет)."""
+        text = text or ''
+        i = len(text) - len(text.lstrip())
+        prefix = self._prefix_cache
+        if prefix and text.startswith(prefix, i):
+            i += len(prefix)
+            while i < len(text) and text[i].isspace():
+                i += 1
+        while i < len(text) and not text[i].isspace():      # сама команда
+            i += 1
+        while i < len(text) and text[i].isspace():
+            i += 1
+        return i
+
     def get_args(self):
         """Возвращает аргументы текущей команды одной строкой (без самой команды)."""
         event = current_event.get()
         if event is None:
             return ''
-        text = event.raw_text or ''
-        parts = text.split(maxsplit=1)
+        parts = self._command_text(event.raw_text or '').split(maxsplit=1)
         return parts[1] if len(parts) > 1 else ''
+
+    def get_args_html(self):
+        """
+        Аргументы текущей команды с разметкой — HTML, как у engine.answer(): жирный, ссылки и
+        ПРЕМИУМ-ЭМОДЗИ (<tg-emoji emoji-id="…">) из сообщения команды сохраняются. Для команд,
+        которые повторяют или сохраняют то, что написал пользователь (тексты, подписи, иконки).
+        """
+        event = current_event.get()
+        if event is None:
+            return ''
+        msg = getattr(event, 'message', None) or event
+        text = getattr(msg, 'raw_text', None) or ''
+        entities = list(getattr(msg, 'entities', None) or [])
+        if isinstance(event, CommandEvent) or not entities:
+            from html import escape
+            return escape(self.get_args(), quote=False)
+        off = self._args_offset(text)
+        return html_with_entities(text, entities, off)
 
     # ------------------------------------------------------------------ #
     # Файлы
@@ -2507,9 +2619,12 @@ class Core:
     # ------------------------------------------------------------------ #
 
     async def get_prefix(self):
-        return await self.db.get('core:prefix', self.config.get('prefix', '.'))
+        prefix = await self.db.get('core:prefix', self.config.get('prefix', '.'))
+        self._prefix_cache = prefix
+        return prefix
 
     async def edit_prefix(self, new_prefix):
+        self._prefix_cache = new_prefix
         self._guest_guard('смена префикса', 'config')
         await self.db.set('core:prefix', new_prefix)
         return new_prefix
@@ -2522,18 +2637,57 @@ class Core:
     # ------------------------------------------------------------------ #
 
     async def set_account(self, number):
-        """Переключает активный аккаунт "на лету" и перевешивает обработчики событий."""
+        """
+        Переключает активный аккаунт "на лету" и ПЕРЕНОСИТ на него юзербот: обработчики снимаются со старого
+        клиента и вешаются на новый, а старый клиент отключается. Раньше старый клиент оставался подключённым
+        со всеми обработчиками — и юзербот после «переноса» продолжал работать на обоих аккаунтах сразу.
+        """
         self._guest_guard('переключение аккаунта', 'account_manager')
+        old = self.client
         client = await self.accounts.set_account(number)
+        if not client.is_connected():
+            await client.connect()
+        me = await client.get_me()
+        if me is None:
+            raise RuntimeError(f"Аккаунт {number}: сессия недействительна — войдите в него заново (.acc)")
+        if old is not None and old is not client:
+            self._detach_handlers(old)                 # старый аккаунт сразу перестаёт отвечать на команды
         self.client = client
-        self._owner_id = (await self.client.get_me()).id
+        self._owner_id = me.id
         self._attach_handlers(self.client)
         # даём знать модулям (см. decorators.on_account_switch(),
         # modules/builtin/Startup.py), что юзербот перешёл на другой аккаунт —
         # ПОСЛЕ того, как self.client/self._owner_id уже обновлены, чтобы
         # хэндлеры сразу видели актуальный аккаунт.
         await self._fire_account_switch(number)
+        if old is not None and old is not client:
+            # модули (пространство Hikka и др.) уже сняли свои обработчики со старого клиента — отключаем его
+            for num, c in list(self.accounts.clients.items()):
+                if c is old:
+                    self.accounts.clients.pop(num, None)
+            try:
+                await old.disconnect()
+            except Exception as e:
+                self.tlog(f"[accounts] старый клиент не отключился: {e}")
         return client
+
+    def _detach_handlers(self, client):
+        """Снимает с client все обработчики событий, которые вешает _attach_handlers()."""
+        for cb, ev in ((self._on_new_message, events.NewMessage), (self._on_chat_action, events.ChatAction),
+                       (self._on_callback, events.CallbackQuery), (self._on_edit, events.MessageEdited),
+                       (self._on_delete, events.MessageDeleted)):
+            try:
+                while client.remove_event_handler(cb, ev):
+                    pass
+            except Exception:
+                pass
+        try:
+            cross = getattr(self.botchat, '_on_cross', None)
+            if cross is not None:
+                while client.remove_event_handler(cross, events.NewMessage):
+                    pass
+        except Exception:
+            pass
 
     async def _fire_account_switch(self, number):
         for module_name, func in list(self.on_account_switch_handlers):
@@ -2695,7 +2849,7 @@ class Core:
             # который падал ValueError'ом, если юзербот ещё не "видел" этого
             # пользователя/чат в этой сессии (нет диалога/апдейта с ним) — см.
             # _resolve_entity() выше по файлу.
-            chat_entity = await self._resolve_entity(chat_id)
+            chat_entity = await self._resolve_input_entity(chat_id)   # из кэша сессии, без запроса к Telegram
 
             # client.inline_query() = аналог GetInlineBotResultsRequest, но
             # без ручной сборки RPC; entity=chat_entity сразу задаёт чат,
@@ -3068,10 +3222,29 @@ class Core:
         return True
 
     async def _get_bot_entity(self):
+        """
+        Стационарный бот глазами юзербота. Резолвится по username ОДИН раз (ResolveUsername — сетевой запрос
+        с жёстким флуд-лимитом), дальше берётся из кэша: раньше каждая инлайн-форма делала этот запрос заново.
+        """
+        cached = getattr(self, '_bot_entity_cache', None)
+        if cached is not None and cached[0] is self.client:
+            return cached[1]
         if self._bot_username is None:
             me = await self._aiogram_bot.get_me()
             self._bot_username = me.username
-        return await self.client.get_entity(self._bot_username)
+        entity = await self.client.get_entity(self._bot_username)
+        self._bot_entity_cache = (self.client, entity)
+        return entity
+
+    async def _resolve_input_entity(self, entity_id, chat_id=None):
+        """
+        Как _resolve_entity(), но для отправки хватает InputPeer: сначала берётся из кэша сессии Telethon
+        (get_input_entity — без сетевого запроса), и только если его там нет — полный резолв.
+        """
+        try:
+            return await self.client.get_input_entity(entity_id)
+        except (ValueError, TypeError):
+            return await self._resolve_entity(entity_id, chat_id=chat_id)
 
     async def _get_bot_id(self):
         if self._bot_id is None:
@@ -3127,11 +3300,18 @@ class Core:
         rows = self._normalize_button_rows(buttons)
 
         def make(style, **kw):
-            if style:
-                try:
-                    return InlineKeyboardButton(style=style, **kw)
-                except Exception:                 # старый aiogram (< 3.25) не знает style — кнопка без цвета
-                    pass
+            # премиум-эмодзи в начале подписи → иконка кнопки (icon_custom_emoji_id), остальные — обычным эмодзи
+            text, icon = split_button_emoji(kw.get('text'))
+            kw['text'] = text
+            if icon:
+                kw['icon_custom_emoji_id'] = icon
+            for attempt in (dict(kw, style=style) if style else None, kw, {k: v for k, v in kw.items() if k != 'icon_custom_emoji_id'}):
+                if attempt is None:
+                    continue
+                try:                              # старый aiogram не знает style / icon_custom_emoji_id — без них
+                    return InlineKeyboardButton(**attempt)
+                except Exception:
+                    continue
             return InlineKeyboardButton(**kw)
 
         keyboard = []
@@ -3600,7 +3780,16 @@ class Core:
         покрывает больше случаев "юзер вне кэша", не только участника
         текущего чата.
         """
+        cache = self.__dict__.setdefault('_clicker_cache', {})
+        now = time.monotonic()
+        hit = cache.get(user_id)
+        if hit is not None and hit[1] is self.client and now - hit[2] < 600:
+            return hit[0]                       # раньше — запрос к Telegram на КАЖДЫЙ клик, до вызова хэндлера
         try:
-            return await self._resolve_entity(user_id, chat_id=chat_id)
+            user = await self._resolve_entity(user_id, chat_id=chat_id)
         except Exception:
             return None
+        if len(cache) > 2000:
+            cache.clear()
+        cache[user_id] = (user, self.client, now)
+        return user

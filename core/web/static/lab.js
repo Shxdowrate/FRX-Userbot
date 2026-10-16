@@ -1122,7 +1122,9 @@ async function labEditor(T, param) {
       wiFld('Версия (VERSION)', wiText(m, 'version', ui)),
       wiFld('Описание (DESCRIPTION)', wiText(m, 'description', ui, { area: true, rows: 2 })),
       wiFld('Ваше имя в авторах (необязательно)', wiText(m, 'author_extra', ui, { disabled: locked }), locked ? 'AUTHOR у созданного модуля защищён' : 'в файл попадёт «ваше имя | FRX WebIDE Lab»'),
-      h('div', { class: 'wi-hint' }, 'AUTHOR в файле: ', prev)], null, (close) => [
+      h('div', { class: 'wi-hint' }, 'AUTHOR в файле: ', prev),
+      wiFld('Ваш канал (TG_URL, необязательно)', wiText(m, 'tg_url', ui, { placeholder: 'https://t.me/канал или @канал' }), 'кнопка «канал автора» в .help и при установке модуля'),
+      wiFld('Модуль на GitHub (GIT_URL, необязательно)', wiText(m, 'git_url', ui, { placeholder: 'https://github.com/вы/репозиторий' }))], null, (close) => [
       h('button', { class: 'btn', onclick: close }, 'отмена'),
       h('button', { class: 'btn primary', onclick: () => { project.meta = m; close(); markDirty(); pushHist(); recompile(true); title.textContent = m.name || m.module_name; } }, 'готово')]);
   }

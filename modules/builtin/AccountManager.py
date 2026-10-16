@@ -23,6 +23,8 @@ MODULE_NAME = "account_manager"
 VERSION = "2.3"
 AUTHOR = "FRX"
 DESCRIPTION = "Управление аккаунтами юзербота"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/AccountManager.py"
 
 def _esc(value) -> str:
     return html.escape(str(value), quote=False)

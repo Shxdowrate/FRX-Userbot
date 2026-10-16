@@ -17,6 +17,8 @@ MODULE_NAME = "inline_stuff"
 VERSION = "1.2"
 AUTHOR = "FRX"
 DESCRIPTION = "Настройки и обслуживание системы инлайн-форм (create_inlineform)"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/InlineStuff.py"
 
 
 @decorators.on_start()

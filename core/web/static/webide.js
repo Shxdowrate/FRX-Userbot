@@ -689,7 +689,7 @@ const WI_VISUAL_DESC = {
 /* значения из шапки открытого файла */
 function wiReadHeader(source) {
   const out = {};
-  const re = /^(NAME|MODULE_NAME|VERSION|AUTHOR|DESCRIPTION)[ \t]*=[ \t]*(?:"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)')[ \t]*(?:#.*)?$/gm;
+  const re = /^(NAME|MODULE_NAME|VERSION|AUTHOR|DESCRIPTION|TG_URL|GIT_URL)[ \t]*=[ \t]*(?:"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)')[ \t]*(?:#.*)?$/gm;
   let m;
   while ((m = re.exec(source)) !== null) {
     let v = m[2] !== undefined ? m[2] : m[3];
@@ -1118,12 +1118,13 @@ function wiSmooth(box, mutate) {
 /* ---------- Конструкция: шапка модуля ---------- */
 
 const WI_C_STATIC = {
-  id: 'static', title: 'Шапка модуля', desc: 'NAME, MODULE_NAME, VERSION, AUTHOR, DESCRIPTION',
+  id: 'static', title: 'Шапка модуля', desc: 'NAME, MODULE_NAME, VERSION, AUTHOR, DESCRIPTION, TG_URL, GIT_URL',
   init(ctx) {
     const cur = wiReadHeader(ctx.source);
     return { exists: !!cur, locked: !!(cur && ctx.locked),
       name: cur && cur.NAME || 'Мой модуль', module_name: cur && cur.MODULE_NAME || 'my_module', version: cur && cur.VERSION || '1.0',
-      author: cur && cur.AUTHOR || 'me', description: cur && cur.DESCRIPTION || 'Что делает модуль' };
+      author: cur && cur.AUTHOR || 'me', description: cur && cur.DESCRIPTION || 'Что делает модуль',
+      tg_url: cur && cur.TG_URL || '', git_url: cur && cur.GIT_URL || '' };
   },
   form(st, ui) {
     const lock = st.locked;
@@ -1134,6 +1135,8 @@ const WI_C_STATIC = {
       wiFld('VERSION', wiText(st, 'version', ui)),
       wiFld('AUTHOR', wiText(st, 'author', ui, { disabled: lock })),
       wiFld('DESCRIPTION', wiText(st, 'description', ui, { area: true, rows: 2 })),
+      wiFld('TG_URL — ваш канал', wiText(st, 'tg_url', ui, { placeholder: 'https://t.me/канал или @канал' }), 'кнопка «канал автора» в .help и при установке; кто не подписан — получит кнопку «подписаться»'),
+      wiFld('GIT_URL — модуль на GitHub', wiText(st, 'git_url', ui, { placeholder: 'https://github.com/вы/репозиторий' }), 'необязательно'),
     ];
   },
   build(st) {
@@ -1141,33 +1144,46 @@ const WI_C_STATIC = {
     if (!/^[A-Za-z0-9_\-]{1,64}$/.test(st.module_name)) errors.push('MODULE_NAME: только латиница, цифры, _ и - (до 64 символов)');
     if (!String(st.name).trim()) errors.push('NAME не может быть пустым');
     if (!String(st.version).trim()) errors.push('VERSION не может быть пустым');
+    const tg = String(st.tg_url || '').trim(), git = String(st.git_url || '').trim();
+    if (tg && !/^(@[A-Za-z][\w]{3,31}|(https?:\/\/)?(t\.me|telegram\.me)\/\S+|tg:\/\/\S+)$/i.test(tg)) errors.push('TG_URL: нужно @канал или https://t.me/канал');
+    if (git && !/^(https?:\/\/)?[a-z0-9.-]+\.[a-z]{2,}(\/\S*)?$/i.test(git)) errors.push('GIT_URL: нужна ссылка https://…');
     const lines = [`NAME = ${wiPyStr(st.name)}`, `MODULE_NAME = ${wiPyStr(st.module_name)}`, `VERSION = ${wiPyStr(st.version)}`,
       `AUTHOR = ${wiPyStr(st.author)}`, `DESCRIPTION = ${wiPyStr(st.description)}`];
+    const links = [];
+    if (tg) links.push(['TG_URL', `TG_URL = ${wiPyStr(tg)}`]);
+    if (git) links.push(['GIT_URL', `GIT_URL = ${wiPyStr(git)}`]);
     if (st.exists) {
-      const shown = [lines[2], lines[4]].join('\n');
-      return { code: shown, kind: 'top', errors, note: 'В файле шапка уже есть — будут обновлены только строки VERSION и DESCRIPTION.',
+      const upd = [['VERSION', lines[2]], ['DESCRIPTION', lines[4]], ...links];
+      const shown = upd.map((x) => x[1]).join('\n');
+      return { code: shown, kind: 'top', errors, note: 'В файле шапка уже есть — обновятся VERSION, DESCRIPTION и ссылки (TG_URL / GIT_URL допишутся после DESCRIPTION, если их нет).',
         apply(ed) {
           let n = 0;
-          [['VERSION', lines[2]], ['DESCRIPTION', lines[4]]].forEach(([key, line]) => {
+          upd.forEach(([key, line]) => {
             const v = ed.value, re = new RegExp('^' + key + '[ \\t]*=.*$', 'm'), m = re.exec(v);
             if (m && m[0] !== line) { ed.edit(m.index, m.index + m[0].length, line, m.index + line.length); n++; }
+            else if (!m) {                                        // ссылки ещё нет — новая строка после шапки
+              const anchor = /^(GIT_URL|TG_URL|DESCRIPTION)[ \t]*=.*$/gm;
+              let last = null, a2;
+              while ((a2 = anchor.exec(v)) !== null) last = a2;
+              if (last) { const at = last.index + last[0].length; ed.edit(at, at, '\n' + line, at + 1 + line.length); n++; }
+            }
           });
           return { note: n ? '' : 'значения уже такие же' };
         } };
     }
-    return { code: lines.join('\n'), kind: 'top', needs: [], errors };
+    return { code: lines.concat(links.map((x) => x[1])).join('\n'), kind: 'top', needs: [], errors };
   },
 };
 
 /* каждая конструкция: init / form / build (форма → код) и scan (код → найденные блоки с состоянием для «править») */
 
 WI_C_STATIC.scan = (src) => {
-  const re = /^(NAME|MODULE_NAME|VERSION|AUTHOR|DESCRIPTION)[ \t]*=.*$/gm;
+  const re = /^(NAME|MODULE_NAME|VERSION|AUTHOR|DESCRIPTION|TG_URL|GIT_URL)[ \t]*=.*$/gm;
   let m, a = -1, b = -1, n = 0;
   while ((m = re.exec(src)) !== null) { if (a < 0) a = m.index; b = m.index + m[0].length; n++; }
   const cur = wiReadHeader(src);
   if (n < 2 || !cur) return [];
-  return [{ a, b, ra: a, rb: b, indent: '', st: { exists: true, name: cur.NAME || '', module_name: cur.MODULE_NAME || '', version: cur.VERSION || '1.0', author: cur.AUTHOR || '', description: cur.DESCRIPTION || '' } }];
+  return [{ a, b, ra: a, rb: b, indent: '', st: { exists: true, name: cur.NAME || '', module_name: cur.MODULE_NAME || '', version: cur.VERSION || '1.0', author: cur.AUTHOR || '', description: cur.DESCRIPTION || '', tg_url: cur.TG_URL || '', git_url: cur.GIT_URL || '' } }];
 };
 
 /* ---------- Конструкция: декоратор (чистый — декоратор, функция и докстринг, без кода внутри) ---------- */
@@ -1905,6 +1921,8 @@ MODULE_NAME = "my_module"
 VERSION = "1.0"
 AUTHOR = "me"
 DESCRIPTION = "Что делает модуль"
+TG_URL = ""          # ваш канал: "https://t.me/канал"
+GIT_URL = ""         # модуль на GitHub
 
 
 @decorators.command("hello")
@@ -2017,19 +2035,31 @@ function wiKeyBar(ed) {
 async function webideList(T) {
   const d = await api('/webide/modules');
   const mine = d.modules.filter((m) => !m.builtin), system = d.modules.filter((m) => m.builtin);
-  const mk = (m) => row(
-    nameSub(m.name, `${m.module} · v${m.version} · ${m.author}`, m.builtin ? 'встроенный' : (m.lab ? 'собран в Lab' : (m.stamp ? 'изменён в WebIDE' : ''))),
-    m.history ? h('span', { class: 'val' }, `${m.history} ${plural(m.history, 'версия', 'версии', 'версий')} в истории`) : null,
-    { click: () => { location.hash = (m.lab ? '#/lab/' : '#/webide/') + enc(m.module); } });
+  const searchable = [];
+  const mk = (m) => {
+    const links = [
+      m.tg_url ? h('a', { class: 'btn small', href: m.tg_url, target: '_blank', rel: 'noopener noreferrer', title: m.tg_url }, '↗ канал') : null,
+      m.git_url ? h('a', { class: 'btn small', href: m.git_url, target: '_blank', rel: 'noopener noreferrer', title: m.git_url }, /github\.com/i.test(m.git_url) ? '↗ github' : '↗ код') : null,
+      m.history ? h('span', { class: 'val' }, `${m.history} ${plural(m.history, 'версия', 'версии', 'версий')} в истории`) : null,
+    ].filter(Boolean);
+    const el = row(
+      nameSub(m.name, `${m.module} · v${m.version} · ${m.author}`, m.builtin ? 'встроенный' : (m.lab ? 'собран в Lab' : (m.stamp ? 'изменён в WebIDE' : ''))),
+      links.length ? links : null,
+      { click: () => { location.hash = (m.lab ? '#/lab/' : '#/webide/') + enc(m.module); } });
+    searchable.push({ el, text: [m.name, m.module, m.author].join(' ') });
+    return el;
+  };
+  const mineRows = mine.map(mk), systemRows = system.map(mk);
   const side = [h('button', { class: 'btn', title: 'визуальный конструктор модулей — без программирования', onclick: () => { location.hash = '#/lab'; } }, 'FRX WebIDE Lab'),
     h('button', { class: 'btn primary', onclick: () => { location.hash = '#/webide/__new__'; } }, 'новый модуль')];
   mount(T, shell('FRX WebIDE', { side },
     h('div', { class: 'faint', style: 'margin:-4px 0 18px 6px;max-width:680px' },
       'Редактор модулей FRX: подсветка кода, поиск и замена, история изменений и конструкции, которые собирают код из форм. Встроенные модули открываются только для просмотра.'),
+    d.modules.length > 6 ? h('div', { class: 'block' }, searchBox('🔍 поиск: название, id, автор', searchable)) : null,
     h('div', { class: 'block' }, h('div', { class: 'h2', style: 'padding-left:6px' }, 'ваши модули')),
-    glass(mine.length ? mine.map(mk) : empty('своих модулей пока нет — создайте первый')),
+    glass(mineRows.length ? mineRows : empty('своих модулей пока нет — создайте первый')),
     h('div', { class: 'block' }, h('div', { class: 'h2', style: 'padding-left:6px' }, 'встроенные')),
-    glass(system.map(mk))));
+    glass(systemRows)));
 }
 
 async function webideEditor(T, param) {

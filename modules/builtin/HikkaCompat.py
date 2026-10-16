@@ -35,6 +35,8 @@ MODULE_NAME = "hikkacompat"
 VERSION = "1.0"
 AUTHOR = "FRX"
 DESCRIPTION = "Модули Hikka / Heroku в FRX: своё пространство со своим префиксом, командами и инлайн-формами"
+TG_URL = "https://t.me/mescr_m"
+GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/HikkaCompat.py"
 
 try:
     from core.paths import DATA_DIR, PROJECT_DIR
