@@ -75,7 +75,7 @@ from .paths import ASSETS_DIR, BUILTIN_DIR, FILES_DIR, MODULES_DIR, SESSION_PATH
 # Версия ЯДРА FRX (не путать с VERSION отдельных модулей, см. ModuleInfo) —
 # правится вручную при каждом обновлении движка. Показывается в .about
 # (modules/builtin/Helper.py) и в баннере запуска (main.py).
-FRX_VERSION = "1.0.1"
+FRX_VERSION = "1.0.2"
 
 # Папки (подробно — core/paths.py):
 #   ASSETS_DIR      — стоковые статичные файлы FRX (assets/ проекта, обновляются вместе с кодом);
@@ -334,7 +334,8 @@ class Core:
             import cache        -> тот же интерфейс, что и db, но in-memory (до перезапуска)
             import accounts     -> add_account()/set_account()/delete_account()/account_list()/
                                     account_list_full()/account_info()/set_tag()/remove_tag()/
-                                    get_tags()/refresh_info()/new_login()
+                                    get_tags()/refresh_info()/new_login()/
+                                    find_forgotten()/restore_forgotten()
             import time_utils   -> get_time()/time_format()/edit_time()
         """
         # engine — сам объект Core: в нём уже есть answer/reply/get_args/
@@ -385,6 +386,8 @@ class Core:
         accounts_module.get_tags = self.accounts.get_tags
         accounts_module.refresh_info = self.accounts.refresh_account_info
         accounts_module.new_login = self.accounts.new_login
+        accounts_module.find_forgotten = self.accounts.find_forgotten
+        accounts_module.restore_forgotten = self.accounts.restore_forgotten
         sys.modules['accounts'] = accounts_module
 
     def set_bot(self, bot, dp=None, reserved_aliases=None):

@@ -130,16 +130,79 @@ class AccountManager:
         self._save()
         return self.clients[number]
 
-    async def delete_account(self, number: str):
+    async def delete_account(self, number: str, logout: bool = True) -> dict:
         """
         Удаляет сохранённый аккаунт — из user/data/accounts.json и из
         self.clients (с корректным disconnect, если клиент был поднят).
-        Не даёт ничего повиснуть в памяти.
+
+        logout=False — «забыть»: аккаунт пропадает из списка, но его сессия
+        остаётся в Telegram и в data['forgotten']; при повторном добавлении
+        того же номера restore_forgotten() войдёт по ней без кода и 2FA.
+
+        logout=True (по умолчанию) — сначала завершает сессию FRX на стороне
+        Telegram (auth.logOut): она пропадает из «Устройств» в том аккаунте,
+        а сохранённая строка сессии становится недействительной. Если сессия
+        уже мертва (её завершили вручную, аккаунт удалён/забанен) — это не
+        ошибка, аккаунт просто убирается из базы.
+
+        Возвращает {'logged_out': bool, 'error': str | None}:
+          logged_out=True  — сессия точно завершена в Telegram;
+          logged_out=False и error=None — выход не запрашивали (logout=False)
+                             или сессия уже была недействительна;
+          error            — выйти не удалось (нет сети и т.п.); аккаунт всё
+                             равно удалён из базы, сессию стоит завершить
+                             вручную в «Настройки → Устройства».
         """
         number = str(number)
-        self._require_account(number)
-        del self.data['accounts'][number]
+        entry = self._require_account(number)
+        result = {'logged_out': False, 'error': None}
 
+        client = self.clients.pop(number, None)
+
+        if logout:
+            own_client = False
+            try:
+                if client is None:
+                    client = TelegramClient(
+                        StringSession(entry.get('session') or ''), self.api_id, self.api_hash
+                    )
+                    own_client = True
+                if not client.is_connected():
+                    await client.connect()
+                if await client.is_user_authorized():
+                    # log_out() сам делает auth.LogOut и отключает клиента
+                    result['logged_out'] = bool(await client.log_out())
+                    if not result['logged_out']:
+                        result['error'] = 'Telegram не подтвердил выход'
+            except Exception as e:
+                # AuthKeyUnregistered / SessionRevoked и т.п. — сессия уже мертва
+                name = type(e).__name__
+                if any(k in name for k in ('AuthKey', 'SessionRevoked', 'SessionExpired',
+                                            'UserDeactivated', 'Unauthorized')):
+                    result['error'] = None
+                else:
+                    result['error'] = f'{name}: {e}'
+            finally:
+                if own_client or not result['logged_out']:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+        elif client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+
+        del self.data['accounts'][number]
+        forgotten = self.data.setdefault('forgotten', {})
+        if logout:
+            # вышли (или сессия мертва) — помнить нечего
+            forgotten.pop(number, None)
+        else:
+            # «забыть»: из списка убираем, а сессию держим про запас —
+            # при повторном добавлении этого номера войдём без кода
+            forgotten[number] = entry
         if not self.data['accounts']:
             self.data['active'] = None
         elif self.data.get('active') == number:
@@ -149,12 +212,68 @@ class AccountManager:
         if self.active == number:
             self.active = None
 
-        client = self.clients.pop(number, None)
-        if client is not None:
+        return result
+
+    @staticmethod
+    def _digits(number) -> str:
+        return ''.join(ch for ch in str(number) if ch.isdigit())
+
+    def find_forgotten(self, number: str):
+        """Ключ «забытого» аккаунта с этим номером (с «+» или без) или None."""
+        want = self._digits(number)
+        for key in self.data.get('forgotten', {}):
+            if want and self._digits(key) == want:
+                return key
+        return None
+
+    async def restore_forgotten(self, number: str) -> dict:
+        """
+        Пробует вернуть «забытый» аккаунт по сохранённой сессии, без кода и 2FA.
+          {'status': 'success', 'phone': ...}  — сессия жива, аккаунт снова в списке;
+          {'status': 'expired'}                — сессию завершили (или аккаунта нет),
+                                                 запись стёрта, нужен обычный вход;
+          {'status': 'not_found'}              — такого номера среди забытых нет;
+          {'status': 'error', 'message': ...}  — не удалось проверить (сеть и т.п.),
+                                                 запись сохранена, можно повторить.
+        """
+        key = self.find_forgotten(number)
+        if key is None:
+            return {'status': 'not_found'}
+        entry = self.data['forgotten'][key]
+        client = TelegramClient(StringSession(entry.get('session') or ''), self.api_id, self.api_hash)
+        try:
+            await client.connect()
+            authorized = await client.is_user_authorized()
+        except Exception as e:
             try:
                 await client.disconnect()
             except Exception:
                 pass
+            name = type(e).__name__
+            if any(k in name for k in ('AuthKey', 'SessionRevoked', 'SessionExpired',
+                                        'UserDeactivated', 'Unauthorized')):
+                authorized = False
+            else:
+                return {'status': 'error', 'message': f'{name}: {e}'}
+
+        if not authorized:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            self.data['forgotten'].pop(key, None)
+            self._save()
+            return {'status': 'expired'}
+
+        self.data['forgotten'].pop(key, None)
+        entry.setdefault('tags', {})
+        entry.setdefault('info', {})
+        self.data['accounts'][key] = entry
+        if not self.data.get('active'):
+            self.data['active'] = key
+        self._save()
+        self.clients[key] = client
+        return {'status': 'success', 'phone': key}
 
     def account_list(self):
         """Список номеров аккаунтов, где авторизован юзербот."""
@@ -459,9 +578,13 @@ class AddAccount:
         self.state = self.STATE_DONE
 
         if self._manager is not None:
+            old_tags = {}
+            key = self._manager.find_forgotten(self.phone)
+            if key is not None:
+                old_tags = dict(self._manager.data['forgotten'].pop(key, {}).get('tags') or {})
             self._manager.data['accounts'][self.phone] = {
                 'session': session_str,
-                'tags': {},
+                'tags': old_tags,
                 'info': {},
             }
             if not self._manager.data.get('active'):

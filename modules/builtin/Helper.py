@@ -589,24 +589,30 @@ async def help_cmd(event):
 
     query = args.strip()
 
+    async def open_module(resolved, note=''):
+        info = engine.get_module_info(resolved)
+        if not info:
+            return False
+        text = _module_detail_text(info, resolved)
+        if note:
+            text = note + "\n" + text
+        try:
+            form = await engine.create_inlineform(
+                chat_id=event.chat_id, text=text, buttons=await _module_detail_buttons(resolved),
+            )
+        except Exception:
+            await show_module_info(event, info, resolved, note=note)
+            return True
+        _bind_helper_form(form, event, focus=resolved)
+        await engine.answer(event, visual.ok('Карточка модуля') + "  " + visual.hint('ниже'))
+        return True
+
     try:
         modules = engine.get_module_list()
 
         resolved = engine.resolve_module(query)
-        if resolved is not None:
-            info = engine.get_module_info(resolved)
-            if info:
-                text = _module_detail_text(info, resolved)
-                try:
-                    form = await engine.create_inlineform(
-                        chat_id=event.chat_id, text=text, buttons=await _module_detail_buttons(resolved),
-                    )
-                except Exception:
-                    await show_module_info(event, info, resolved)
-                    return
-                _bind_helper_form(form, event, focus=resolved)
-                await engine.answer(event, visual.ok('Карточка модуля') + "  " + visual.hint('ниже'))
-                return
+        if resolved is not None and await open_module(resolved):
+            return
 
         # Если модуль не найден, ищем команду среди всех модулей
         for module_name in modules:
@@ -620,25 +626,22 @@ async def help_cmd(event):
                         await show_command_info(event, query, info, module_name, is_alias=True)
                         return
 
-        similar = engine.search_module(query)
-        if similar and similar != query:
-            await engine.answer(
-                event,
-                visual.warn('Модуль не найден') + "\n"
-                + visual.field('возможно, вы имели в виду', html.escape(str(similar))),
-            )
-            return
-
-        similar_modules = engine.search_dec_module(query)
-        if similar_modules:
-            modules_list = [visual.item(f"<code>{html.escape(str(m))}</code>") for m in similar_modules[:3]]
-            await engine.answer(
-                event,
-                visual.warn('Команда не найдена') + "\n"
-                + visual.hint('похожие команды есть в модулях:') + "\n"
-                + "\n".join(modules_list),
-            )
-            return
+        # Точного совпадения нет — сразу показываем самое близкое (модуль или команду), без «возможно, вы имели в виду»
+        best = _closest(query, modules)
+        if best is not None:
+            kind, name, module_name, is_alias = best
+            if kind == 'module':
+                note = visual.hint(f'«{html.escape(query)}» — точно такого нет, показываю ближайшее: {html.escape(name)}')
+                if await open_module(module_name, note):
+                    return
+            else:
+                info = engine.get_module_info(module_name)
+                if info:
+                    prefix = await engine.get_prefix()
+                    note = visual.hint(f'«{html.escape(query)}» — точно такого нет, показываю ближайшее: '
+                                       f'{html.escape(prefix + name)}')
+                    await show_command_info(event, name, info, module_name, is_alias=is_alias, note=note)
+                    return
 
         await engine.answer(event, visual.err('Ничего не найдено') + "\n" + visual.field('запрос', html.escape(query)))
 
@@ -652,10 +655,10 @@ async def help_cmd(event):
         engine.tlog(f"Ошибка в help: {e}")
 
 
-async def show_module_info(event, info, module_name):
+async def show_module_info(event, info, module_name, note=''):
     """Текстовый фолбэк (без инлайна) — стационарный бот не подключён."""
     try:
-        await engine.answer(event, _module_detail_text(info, module_name))
+        await engine.answer(event, (note + "\n" if note else '') + _module_detail_text(info, module_name))
     except Exception as e:
         await engine.answer(
             event,
@@ -663,7 +666,45 @@ async def show_module_info(event, info, module_name):
         )
 
 
-async def show_command_info(event, command, info, module_name, is_alias=False):
+def _closest(query, modules):
+    """
+    Самое похожее на запрос: модуль (MODULE_NAME / NAME) или команда (имя / алиас).
+    -> ('module' | 'command', найденное имя, MODULE_NAME, это алиас?) или None, если ничего даже отдалённо не похоже.
+    """
+    import difflib
+    q = query.strip().lower().lstrip('.,!/')
+    if not q:
+        return None
+    cands = []          # (имя, kind, module_name, is_alias)
+    for module_name in modules:
+        info = engine.get_module_info(module_name) or {}
+        cands.append((module_name.lower(), 'module', module_name, False))
+        if info.get('name'):
+            cands.append((str(info['name']).lower(), 'module', module_name, False))
+        for cmd in info.get('commands', []):
+            cands.append((cmd['command'].lower(), 'command', module_name, False))
+            for a in cmd.get('aliases', []):
+                cands.append((str(a).lower(), 'command', module_name, True))
+
+    def score(name):
+        r = difflib.SequenceMatcher(None, q, name).ratio()
+        if name.startswith(q) or q.startswith(name):
+            r += 0.15                          # «pin» → «ping», «helpme» → «help»
+        return r
+
+    best, best_score = None, 0.0
+    for name, kind, module_name, is_alias in cands:
+        sc = score(name)
+        # при равенстве модуль важнее команды: «.help pinh» → карточка модуля ping (там и сама .ping)
+        if sc > best_score or (sc == best_score and kind == 'module' and best and best[1] == 'command'):
+            best, best_score = (name, kind, module_name, is_alias), sc
+    if best is None or best_score < 0.5:
+        return None
+    name, kind, module_name, is_alias = best
+    return kind, name, module_name, is_alias
+
+
+async def show_command_info(event, command, info, module_name, is_alias=False, note=''):
     """Показывает информацию о команде"""
     try:
         display_name = info.get('name', module_name)
@@ -674,7 +715,7 @@ async def show_command_info(event, command, info, module_name, is_alias=False):
                 cmd_info = cmd
                 break
 
-        text = visual.title('Команда') + "\n"
+        text = (note + "\n" if note else '') + visual.title('Команда') + "\n"
 
         if is_alias:
             text += visual.field('алиас', f".{command}") + "\n"

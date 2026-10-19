@@ -242,23 +242,44 @@ async def accounts_command(event):
             visual.field("id", acc_id),
             "",
             visual.warn("Удалить этот аккаунт из FRX?"),
+            "«Удалить и выйти» — сессия FRX пропадёт и из «Устройств» в самом аккаунте.",
+            "«Забыть» — аккаунт пропадёт из списка, но при повторном добавлении номера FRX войдёт без кода.",
         ])
         buttons = [
-            [
-                (visual.btn("Да, удалить"), f"confirm_delete_{number}", "danger"),
-                (visual.btn("Отмена", "close"), "back_to_home_button"),
-            ],
+            [(visual.btn("Удалить и выйти"), f"confirm_delete_{number}", "danger")],
+            [(visual.btn("Забыть"), f"confirm_keep_{number}")],
+            [(visual.btn("Отмена", "close"), "back_to_home_button")],
         ]
         await form.edit(text=text, buttons=buttons)
 
-    @form.on_click(data_startswith="confirm_delete_")
-    async def confirm_delete_account_set_button(click: InlineClick):
-        number = click.data.split("_")[2]
-        await accounts.delete_account(number)
+    async def _do_delete(number: str, logout: bool):
+        res = await accounts.delete_account(number, logout=logout) or {}
+        lines = [visual.ok("Аккаунт удалён из FRX"), visual.field("номер", _esc(number))]
+        if logout:
+            if res.get("logged_out"):
+                lines.append(visual.ok("Сессия завершена в Telegram"))
+            elif res.get("error"):
+                lines.append(visual.warn(
+                    "Не удалось завершить сессию: " + _esc(res["error"])
+                    + "\nЗавершите её вручную: Настройки → Устройства."
+                ))
+            else:
+                lines.append("Сессия уже была недействительна.")
+        else:
+            lines[0] = visual.ok("Аккаунт забыт")
+            lines.append("Сессия сохранена: добавьте этот номер снова — FRX войдёт без кода.")
         await form.edit(
-            text=visual.ok("Аккаунт удалён") + "\n" + visual.field("номер", _esc(number)),
+            text="\n".join(lines),
             buttons=[(visual.btn("Назад", "back"), "back_to_home_button")],
         )
+
+    @form.on_click(data_startswith="confirm_delete_")
+    async def confirm_delete_account_set_button(click: InlineClick):
+        await _do_delete(click.data.split("_")[2], logout=True)
+
+    @form.on_click(data_startswith="confirm_keep_")
+    async def confirm_keep_account_set_button(click: InlineClick):
+        await _do_delete(click.data.split("_")[2], logout=False)
 
     # ==== Добавление аккаунта ====
 
@@ -298,6 +319,30 @@ async def accounts_command(event):
             error_text = f"{base_text}{visual.warn('FRX уже авторизован на этом номере:')} <code>{_esc(number)}</code>"
             await form.edit(text=error_text, buttons=input_buttons)
             return
+
+        if accounts.find_forgotten(number):
+            await form.edit(
+                text=f"{base_text}{visual.field('номер', _esc(number))}\n"
+                     + visual.wait("Этот номер уже был в FRX — пробую войти по сохранённой сессии…"),
+                buttons=[[(visual.btn("Назад", "back"), "back_to_home_button")]],
+            )
+            res = await accounts.restore_forgotten(number)
+            if res.get("status") == "success":
+                phone = res["phone"]
+                try:
+                    await accounts.refresh_info(phone)
+                except Exception:
+                    pass
+                await form.edit(
+                    text=visual.ok("Аккаунт возвращён без кода") + "\n" + visual.field("номер", _esc(phone)),
+                    buttons=[[(visual.btn("Назад", "back"), "back_to_home_button")]],
+                )
+                return
+            if res.get("status") == "expired":
+                base_text += visual.warn("Сохранённая сессия больше не действует — нужен вход по коду") + "\n\n"
+            elif res.get("status") == "error":
+                base_text += (visual.warn("Не удалось проверить сохранённую сессию:") + f" <code>{_esc(res.get('message'))}</code>\n"
+                              + visual.hint("можно войти по коду или попробовать ещё раз позже") + "\n\n")
 
         confirm_text = f"{base_text}{visual.field('номер', _esc(number))}\n{visual.hint('продолжаем?')}"
         confirm_buttons = [
