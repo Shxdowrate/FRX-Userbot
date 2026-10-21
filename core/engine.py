@@ -75,7 +75,7 @@ from .paths import ASSETS_DIR, BUILTIN_DIR, FILES_DIR, MODULES_DIR, SESSION_PATH
 # Версия ЯДРА FRX (не путать с VERSION отдельных модулей, см. ModuleInfo) —
 # правится вручную при каждом обновлении движка. Показывается в .about
 # (modules/builtin/Helper.py) и в баннере запуска (main.py).
-FRX_VERSION = "1.0.2"
+FRX_VERSION = "1.0.3"
 
 # Папки (подробно — core/paths.py):
 #   ASSETS_DIR      — стоковые статичные файлы FRX (assets/ проекта, обновляются вместе с кодом);
