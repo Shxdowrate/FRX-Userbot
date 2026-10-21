@@ -116,6 +116,7 @@ buttons, переданные в create_inlineform()/form.edit(), суммарн
 """
 
 import asyncio
+import re
 import time
 
 
@@ -454,14 +455,21 @@ class InlineClick:
         self._answered = False
 
     async def answer(self, text=None, show_alert=False):
-        """Снимает "часики" у кнопки в клиенте пользователя. Идемпотентно."""
+        """Снимает "часики" у кнопки в клиенте пользователя. Идемпотентно.
+        Ответ уходит фоном — хендлер не ждёт Telegram и сразу правит форму (раньше это были два запроса подряд)."""
         if self._answered:
             return
         self._answered = True
-        try:
-            await self._raw.answer(text=text, show_alert=show_alert)
-        except Exception:
-            pass  # callback мог протухнуть (>~30 сек) — не критично
+
+        if isinstance(text, str) and 'tg-emoji' in text:      # во всплывашке нет HTML — премиум-эмодзи → обычные
+            text = re.sub(r'<tg-emoji\b[^>]*>(.*?)</tg-emoji>', r'\1', text, flags=re.S)
+
+        async def _send():
+            try:
+                await self._raw.answer(text=text, show_alert=show_alert)
+            except Exception:
+                pass  # callback мог протухнуть (>~30 сек) — не критично
+        asyncio.ensure_future(_send())
 
 
 def resolve_form_reply(event, chat_id, reply_to=None):
@@ -516,6 +524,7 @@ class InlineForm:
         self._pages = [[]]             # [[ряды страницы 0], [ряды страницы 1], ...] — без служебного ряда навигации
         self.page = 0                  # индекс текущей отображаемой страницы
         self.message_id = None         # id сообщения формы в чате (для form.delete())
+        self._ready = None             # Future: inline_message_id подтверждён ботом (create_inlineform не ждёт его)
         self.media = None              # {'kind', 'file_id'}, если форма с картинкой/анимацией (текст — подпись)
         self.styles = {}               # {callback_data: 'primary'|'success'|'danger'} — цвет кнопок (create_inlineform(styles=...))
         self._media_task = None        # загрузка настоящего медиа вместо заглушки «загрузка…» (Core._swap_form_media)
@@ -523,6 +532,12 @@ class InlineForm:
     # ------------------------------------------------------------------ #
     # Публичный API для модуля
     # ------------------------------------------------------------------ #
+
+    async def _imid(self):
+        """inline_message_id формы; если бот ещё не подтвердил форму — дождаться (ошибка подтверждения — исключение)."""
+        if self.inline_message_id is None and self._ready is not None:
+            await self._ready
+        return self.inline_message_id
 
     def on_click(self, data=None, data_startswith=None):
         """
@@ -588,7 +603,7 @@ class InlineForm:
             self.styles = {str(k): normalize_style(v) for k, v in dict(styles).items()}
         pages, total_pages = paginate_button_rows(buttons or [])
         rendered = render_page_rows(pages, 0, total_pages)
-        await self._core._inline_edit(self.inline_message_id, text, rendered, self.media, styles=self.styles)
+        await self._core._inline_edit(await self._imid(), text, rendered, self.media, styles=self.styles)
         self.text = text
         self._raw_buttons = buttons
         self._pages = pages
@@ -620,8 +635,22 @@ class InlineForm:
             return
         self.page = new_page
         rendered = render_page_rows(self._pages, new_page, total_pages)
-        await self._core._inline_edit(self.inline_message_id, None, rendered, styles=self.styles)
+        await self._core._inline_edit(await self._imid(), None, rendered, styles=self.styles)
         self._core._register_input_targets(self, self._pages[new_page])
+
+    async def click(self, button=0, col=None, *, wait=None, timeout=None):
+        """
+        Нажать кнопку этой формы от имени юзербота — как msg.click() (core/clicks.py): form.click(0, 1),
+        form.click([2]), form.click("Да"), form.click("Далее", wait="edit") → форма после обработки клика.
+        Клик идёт через Telegram, как настоящий: срабатывают ваши @form.on_click, click.from_user — владелец.
+        """
+        from .clicks import click as _click
+        if self.message_id is None:
+            raise RuntimeError("у формы нет сообщения в чате (ещё не отправлена или отправлена ботом не в чат)")
+        msg = await self._core.client.get_messages(self.chat_id, ids=self.message_id)
+        if msg is None:
+            raise LookupError("сообщения формы больше нет")
+        return await _click(msg, button, col, wait=wait, timeout=timeout)
 
     async def delete(self):
         """
@@ -644,7 +673,7 @@ class InlineForm:
                 pass
         if not was_closed:
             try:
-                await self._core._inline_edit(self.inline_message_id, None, [])
+                await self._core._inline_edit(await self._imid(), None, [])
             except Exception:
                 pass
 
@@ -659,11 +688,12 @@ class InlineForm:
         self._closed = True
         if self._idle_task is not None:
             self._idle_task.cancel()
-        self._core._active_forms.pop(self.inline_message_id, None)
+        if self.inline_message_id is not None:
+            self._core._active_forms.pop(self.inline_message_id, None)
         self._core._clear_input_targets_for_form(self)
         if remove_buttons:
             try:
-                await self._core._inline_edit(self.inline_message_id, None, [])
+                await self._core._inline_edit(await self._imid(), None, [])
             except Exception:
                 pass
 

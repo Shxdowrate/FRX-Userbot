@@ -35,6 +35,12 @@ async def setup_configs():
         data_type='int', default=300,
     )
     await engine.create_config(
+        key='instant_forms',
+        description='Мгновенные формы: заранее готовить заглушку и показывать форму сразу, а содержимое подставлять правкой '
+                    '(раз в минуту — один фоновый инлайн-запрос к своему боту)',
+        data_type='bool', default=True,
+    )
+    await engine.create_config(
         key='clicks_per_second',
         description='Лимит обработки кликов по инлайн-формам, кликов/сек',
         data_type='int', default=5,
@@ -103,7 +109,8 @@ async def list_forms_cmd(event):
     lines = [visual.title('Инлайн-формы', f"активных: {len(forms)}")]
     for form in forms:
         lines.append(visual.item(f"<code>{form.form_id[:8]}</code>  {html.escape(str(form.owner_module))}"))
-        lines.append(visual.item(f"чат <code>{form.chat_id}</code> · for_user <code>{html.escape(repr(form.for_user))}</code>", 1))
+        lines.append(visual.item(f"чат <code>{form.chat_id}</code>", 1))
+        lines.append(visual.item(f"for_user <code>{html.escape(repr(form.for_user))}</code>", 1))
     lines += ["", visual.hint('закрыть форму — <code>.closeform &lt;id&gt;</code> (первые 8 символов)')]
     await engine.answer(event, "\n".join(lines))
 

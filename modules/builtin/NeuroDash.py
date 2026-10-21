@@ -203,7 +203,7 @@ async def neuro_command(event):
             title = c['name'] if c['name'].lower() == c['provider'].lower() else f"{c['name']} ({c['provider']})"
             rows.append([(f"{'◉' if c['conn'] == cur_conn else '○'} {title} · {n}"[:48], f'nd_c:{k}:0')])
         rows.append([(visual.btn('Назад', 'back'), 'nd_back')])
-        return visual.title('Провайдер', f"подключений · {len(conns)}") + "\n" + visual.hint('ключи и список моделей — на сайте, вкладка neuro'), rows
+        return visual.title('Провайдер', f"подключений: {len(conns)}") + "\n" + visual.hint('ключи и список моделей — на сайте, вкладка neuro'), rows
 
     def picker_models(k: int, page: int):
         conns = _conns()
@@ -408,7 +408,7 @@ async def neuro_command(event):
 # ---------------------------------------------------------------------------
 
 TOOL_HELP = (
-    visual.title('Инструменты · формат', 'инструмент — Python-файл, описание в докстринге') + "\n\n"
+    visual.title('Инструменты: формат', 'инструмент — Python-файл, описание в докстринге') + "\n"
     + visual.section('Шаблон') + "\n"
     "<pre><code class='language-python'>\"\"\"\nname: shout\ncategory: fun\ntitle: Крик\ndescription: возвращает текст ЗАГЛАВНЫМИ\n"
     "args: text: string\nexample: {\"text\": \"привет\"}\ndangerous: false\n\"\"\"\nasync def run(text: str = '') -> str:\n    return text.upper() + '!'</code></pre>\n\n"
@@ -434,15 +434,16 @@ def _tool_list_text() -> str:
     cats = ts.categories()
     if not cats:
         return visual.title('Инструменты') + "\n" + visual.hint('инструментов нет — добавьте ответом на код командой <code>.nt add</code>')
-    lines = [visual.title('Инструменты', f"категорий · {len(cats)}")]
+    lines = [visual.title('Инструменты', f"категорий: {len(cats)}")]
     for c in cats:
         mark = '◉' if c['enabled'] else '○'
         lines.append("")
-        lines.append(f"{visual.section(_esc(c['title']))}  <code>{c['id']}</code> · {mark} {c['enabled_tools']}/{c['count']}")
+        lines.append(f"{visual.section(_esc(c['title']))}  <code>{c['id']}</code>")
+        lines.append(visual.item(f"{mark} включено {c['enabled_tools']} из {c['count']}", 1))
         for t in [x for x in ts.list_tools() if x['category'] == c['id']]:
             lines.append(visual.item(f"{'◉' if t['enabled'] else '○'} <code>{t['name']}</code>{' ' + DANGER if t['dangerous'] else ''}{' ' + HEAVY if t.get('heavy') else ''} — {_esc(t['description'][:70])}", 1))
     lines.append("")
-    lines.append(visual.hint(f"◉ вкл · ○ выкл · {DANGER} опасный · {HEAVY} тяжёлый — подробнее: <code>.nt help</code>"))
+    lines.append(visual.hints(f"◉ — включено, ○ — выключено", f"{DANGER} — опасный, {HEAVY} — тяжёлый", "подробнее: <code>.nt help</code>"))
     return '\n'.join(lines)
 
 
@@ -582,10 +583,10 @@ async def _tool_menu(event):
         cats = ts.categories()
         rows = [[(f"{'◉' if c['enabled'] else '○'} {c['title']} · {c['enabled_tools']}/{c['count']}"[:48], f"nt_c:{c['id']}")] for c in cats]
         rows.append([(visual.btn('Отправить все (zip)'), 'nt_all', "primary")])
-        return (visual.title('Инструменты нейросети', f"категорий · {len(cats)}") + "\n"
+        return (visual.title('Инструменты нейросети', f"категорий: {len(cats)}") + "\n"
                 + visual.item('категории экономят токены: в запрос попадают только подходящие') + "\n"
                 + visual.item('ключи и модели — на сайте, вкладка neuro') + "\n\n"
-                + visual.hint(f"◉ вкл · ○ выкл · {DANGER} опасный · {HEAVY} тяжёлый")), rows
+                + visual.hints(f"◉ — включено, ○ — выключено", f"{DANGER} — опасный, {HEAVY} — тяжёлый")), rows
 
     def category(cid):
         c = next((x for x in ts.categories() if x['id'] == cid), None)
@@ -602,7 +603,7 @@ async def _tool_menu(event):
         t = next((x for x in ts.list_tools() if x['name'] == name), None)
         if t is None:
             return root()
-        marks = ' · '.join(([f"{DANGER} опасный"] if t['dangerous'] else []) + ([f"{HEAVY} тяжёлый"] if t.get('heavy') else []))
+        marks = ', '.join(([f"{DANGER} опасный"] if t['dangerous'] else []) + ([f"{HEAVY} тяжёлый"] if t.get('heavy') else []))
         text = "\n".join([visual.title(_esc(t['title']), _esc(t['description'])),
                           visual.field('имя', t['name']),
                           visual.field('категория', _esc(t['category'])),

@@ -371,6 +371,11 @@ if __name__ == '__main__':
         loop.run_until_complete(asyncio.wait_for(loop.shutdown_asyncgens(), 3))
     except BaseException:
         pass
+    try:                                     # отложенная запись базы (core/database.py): os._exit не вызывает atexit
+        from core import database
+        database.flush_all()
+    except BaseException:
+        traceback.print_exc()
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()

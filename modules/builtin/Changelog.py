@@ -138,9 +138,27 @@ def _inline(text):
     return re.sub(r'\x00(\d+)\x00', lambda m: f"<code>{codes[int(m.group(1))]}</code>", text)
 
 
+def _join_wrapped(lines):
+    """Строки-продолжения пункта списка (с отступом, без своего «- ») — к пункту: в файле текст переносят по ширине,
+    а в Telegram такой перенос рвал фразу посередине."""
+    out, in_code = [], False
+    for raw in lines:
+        st = raw.strip()
+        if st.startswith('```'):
+            in_code = not in_code
+            out.append(raw)
+            continue
+        if (not in_code and out and st and raw[:1] in (' ', '\t') and not re.match(r'^\s*([-*]\s|#)', raw)
+                and re.match(r'^\s*[-*]\s', out[-1])):
+            out[-1] = out[-1].rstrip() + ' ' + st
+            continue
+        out.append(raw)
+    return out
+
+
 def _md_to_html(lines):
     out, in_code, code_buf = [], False, []
-    for raw in lines:
+    for raw in _join_wrapped(lines):
         line = raw.rstrip()
         if line.strip().startswith('```'):
             if in_code:
@@ -180,7 +198,7 @@ def _render(entry, nested=False):
     version = html.escape(entry['version'])
     sub = html.escape(entry['title']) if entry['title'] else None
     if nested:
-        head = visual.section(f"Версия {version}") + (f"  {visual.hint(sub)}" if sub else "")
+        head = visual.section(f"Версия {version}") + (f"\n{visual.hint(sub)}" if sub else "") + "\n"
     else:
         head = visual.title(f"Версия {version}", sub)
     return f"{head}\n{_md_to_html(entry['lines'])}".rstrip()
@@ -293,16 +311,40 @@ async def notify_update():
 CL_PAGE_SIZE = 10   # версий на странице выбора
 
 
-def _card_text(entry) -> str:
-    """Запись версии в рамках одного сообщения инлайн-формы — не пакуется на несколько
-    сообщений (как _pack для обычной отправки), а обрезается с пометкой, куда за полной версией."""
-    body = _render(entry)
-    if len(body) > _SAFE_LIMIT:
-        body = (
-            body[:_SAFE_LIMIT].rstrip()
-            + "\n\n" + visual.hint(f"… обрезано, полностью — <code>.changelog {html.escape(entry['version'])}</code>")
-        )
-    return body
+_CARD_LIMIT = 3500       # одна часть карточки версии (с запасом под строку «часть N из M»)
+
+
+def _card_parts(entry) -> list:
+    """Запись версии частями для инлайн-формы: режем только по границам строк (каждая строка — законченный HTML),
+    поэтому теги не рвутся. Раньше длинная запись обрезалась по символам — посреди тега, и даже
+    `.changelog <версия>` не показывал её целиком."""
+    parts, cur = [], ""
+    for line in _render(entry).split("\n"):
+        add = ("\n" if cur else "") + line
+        if cur and len(cur) + len(add) > _CARD_LIMIT:
+            parts.append(cur.rstrip())
+            cur = line
+        else:
+            cur += add
+    if cur.strip() or not parts:
+        parts.append(cur.rstrip())
+    return parts
+
+
+def _card(entry, part=0, back_page=0):
+    """(текст, кнопки) карточки версии: часть part; если частей несколько — стрелки ◂ N/M ▸."""
+    parts = _card_parts(entry)
+    part = max(0, min(part, len(parts) - 1))
+    text = parts[part]
+    rows = []
+    if len(parts) > 1:
+        v = entry['version']
+        text += "\n\n" + visual.hint(f"часть {part + 1} из {len(parts)}")
+        rows.append([("◂", f"cl_part:{part - 1}:{v}") if part > 0 else ("·", "cl_noop"),
+                     (f"{part + 1} / {len(parts)}", "cl_noop"),
+                     ("▸", f"cl_part:{part + 1}:{v}") if part < len(parts) - 1 else ("·", "cl_noop")])
+    rows.append([(visual.btn('Перейти к версии…'), f"cl_pick:{back_page}")])
+    return text, rows
 
 
 def _picker(entries_sorted, page, query=None):
@@ -319,10 +361,10 @@ def _picker(entries_sorted, page, query=None):
     rows, page, total = engine.picker_page(items, page, per_page=CL_PAGE_SIZE, page_callback="cl_page:", search=search)
     rows.append([(visual.btn('К последней версии', 'back'), "cl_latest", "primary")])
     if query:
-        text = visual.title('Журнал обновлений', f"поиск «{html.escape(query)}» · найдено: {len(items)}"
-                            + (f" · стр. {page + 1}/{total}" if total > 1 else ""))
+        text = visual.title('Журнал обновлений', f"поиск «{html.escape(query)}»\nнайдено: {len(items)}"
+                            + (f"\nстраница {page + 1} из {total}" if total > 1 else ""))
     else:
-        text = visual.title('Журнал обновлений', f"выберите версию · страница {page + 1}/{total}")
+        text = visual.title('Журнал обновлений', f"выберите версию\nстраница {page + 1} из {total}")
     return text, rows, page
 
 
@@ -344,8 +386,21 @@ def _bind_form(form, entries_sorted):
         state['q'] = None
         await _show_picker(0)
 
-    async def _show_entry(entry):
-        await form.edit(_card_text(entry), buttons=[[(visual.btn('Перейти к версии…'), f"cl_pick:{state['page']}")]])
+    async def _show_entry(entry, part=0):
+        text, rows = _card(entry, part, state['page'])
+        await form.edit(text, buttons=rows)
+
+    @form.on_click(data_startswith="cl_part:")
+    async def _part(click):
+        await click.answer()
+        _, part, version = click.data.split(":", 2)
+        entry = next((e for e in entries_sorted if e['version'] == version), None)
+        if entry is not None:
+            await _show_entry(entry, int(part or 0))
+
+    @form.on_click(data="cl_noop")
+    async def _noop(click):
+        await click.answer()
 
     @form.on_click(data_startswith="cl_pick:")
     async def _pick(click):
@@ -416,11 +471,8 @@ async def changelog_cmd(event):
         entry = entries_sorted[0]   # по умолчанию — последняя версия
 
     try:
-        form = await engine.create_inlineform(
-            chat_id=event.chat_id,
-            text=_card_text(entry),
-            buttons=[[(visual.btn('Перейти к версии…'), "cl_pick:0")]],
-        )
+        text, rows = _card(entry)
+        form = await engine.create_inlineform(chat_id=event.chat_id, text=text, buttons=rows)
     except Exception:
         # Стационарный бот недоступен — инлайн-форма невозможна, прежнее поведение:
         # текстом, при необходимости несколькими сообщениями.
@@ -431,4 +483,4 @@ async def changelog_cmd(event):
         return
 
     _bind_form(form, entries_sorted)
-    await engine.answer(event, visual.ok('Журнал обновлений') + "  " + visual.hint('ниже'))
+    await engine.answer(event, visual.ok('Журнал обновлений') + "\n" + visual.hint('журнал — ниже'))

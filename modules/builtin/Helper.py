@@ -118,8 +118,10 @@ def _module_line(module_name):
         extra.append(f"🤖 <code>@{_bot_username() or 'бот'} {iq[0]['name']}</code>" + (f" +{len(iq) - 1}" if len(iq) > 1 else ''))
     if info.get('bot_commands'):
         extra.append(f"/{info['bot_commands'][0]['command']}" + (f" +{len(info['bot_commands']) - 1}" if len(info['bot_commands']) > 1 else ''))
-    tail = (" · " + " · ".join(extra)) if extra else ''
-    return visual.item(f"<b>{display_name}</b>  <code>{module_name}</code> · {cmd_str}{tail}")
+    lines = [visual.item(f"<b>{display_name}</b>  <code>{module_name}</code>"), visual.item(cmd_str, 1)]
+    if extra:
+        lines.append(visual.item(", ".join(extra), 1))
+    return "\n".join(lines)
 
 
 def _bot_username():
@@ -152,8 +154,8 @@ def _list_pages():
 
     blocks = []                      # (заголовок раздела | None, строка)
     for title, names, empty in (
-        (visual.section(f"Встроенные · {len(builtin)}"), builtin, visual.hint('нет встроенных модулей')),
-        (visual.section(f"Загруженные · {len(loaded)}"), loaded, visual.hint('нет загруженных модулей — <code>.loadmod</code>')),
+        (visual.section(f"Встроенные ({len(builtin)})"), builtin, visual.hint('нет встроенных модулей')),
+        (visual.section(f"Загруженные ({len(loaded)})"), loaded, visual.hint('нет загруженных модулей — <code>.loadmod</code>')),
     ):
         if not names:
             blocks.append((title, empty))
@@ -169,11 +171,11 @@ def _list_pages():
             inline.append(f"<code>{e['name']}</code> <i>{_access(e).split(' ', 1)[0]}</i>")
         for e in info.get('bot_commands') or []:
             bcmds.append(f"<code>/{e['command']}</code> <i>{_access(e).split(' ', 1)[0]}</i>")
-    for title, items in ((f"Инлайн @{bot_name} · {len(inline)}", inline), (f"Команды бота · {len(bcmds)}", bcmds)):
+    for title, items in ((f"Инлайн @{bot_name} ({len(inline)})", inline), (f"Команды бота ({len(bcmds)})", bcmds)):
         if items:
             blocks.append((visual.section(title), ", ".join(items)))
     if inline or bcmds:
-        blocks.append((None, visual.hint("🔒 — только вы · 🌐 — все; подробности — в карточке модуля")))
+        blocks.append((None, "\n" + visual.hints("🔒 — только вы, 🌐 — все", "подробности — в карточке модуля")))
 
     pages, cur, used, last_title = [], [], 0, object()
     budget = LIST_TEXT_LIMIT - 200                 # запас под заголовок страницы
@@ -193,7 +195,7 @@ def _list_pages():
     n = len(pages)
     out = []
     for i, body in enumerate(pages):
-        sub = f"всего: {total}" + (f" · стр. {i + 1}/{n}" if n > 1 else "")
+        sub = f"всего: {total}" + (f"\nстраница {i + 1} из {n}" if n > 1 else "")
         out.append("\n".join([visual.title('Модули', sub)] + body))
     return out, builtin + loaded
 
@@ -256,13 +258,14 @@ def _picker(page, query=None):
     rows.insert(0, search_row)
     rows.append([(visual.btn('К списку модулей', 'back'), "help_menu")])
     if query:
-        head = visual.title('Модули', f"поиск «{html.escape(query)}» · найдено: {len(names)}"
-                            + (f" · стр. {page + 1}/{total}" if total > 1 else ""))
+        head = visual.title('Модули', f"поиск «{html.escape(query)}»\nнайдено: {len(names)}"
+                            + (f"\nстраница {page + 1} из {total}" if total > 1 else ""))
         text = head + ("" if names else "\n" + visual.hint("ничего не нашлось — попробуйте иначе"))
     else:
         text = (
-            visual.title('Модули', f"выберите модуль · страница {page + 1}/{total}") + "\n"
-            + visual.hint(f"{visual.visual('module')} встроенные, затем {visual.visual('file')} загруженные · 🔍 — поиск")
+            visual.title('Модули', f"выберите модуль\nстраница {page + 1} из {total}") + "\n"
+            + visual.hints(f"{visual.visual('module')} — встроенные, {visual.visual('file')} — загруженные",
+                           "🔍 — поиск по названию, команде или описанию")
         )
     return text, rows, page
 
@@ -302,7 +305,7 @@ def _module_detail_text(info, module_name):
     lines.append("")
 
     if commands:
-        lines.append(visual.section(f"Команды · {len(commands)}"))
+        lines.append(visual.section(f"Команды ({len(commands)})"))
         for cmd_info in commands:
             cmd = cmd_info['command']
             aliases = cmd_info.get('aliases', [])
@@ -318,7 +321,7 @@ def _module_detail_text(info, module_name):
     iq = info.get('bot_inline_queries') or []
     inl = info.get('bot_inline_functions') or []
     if iq or inl:
-        lines += ["", visual.section(f"Инлайн @{bot_name} · {len(iq) + len(inl)}")]
+        lines += ["", visual.section(f"Инлайн @{bot_name} ({len(iq) + len(inl)})")]
         for e in iq + inl:
             al = e.get('aliases') or []
             s_ = f"<code>@{bot_name} {e['name']}</code>"
@@ -327,7 +330,7 @@ def _module_detail_text(info, module_name):
             lines.append(visual.item(f"{s_} — {e.get('description') or 'без описания'}  <i>{_access(e)}</i>"))
     bcmd = info.get('bot_commands') or []
     if bcmd:
-        lines += ["", visual.section(f"Команды бота · {len(bcmd)}")]
+        lines += ["", visual.section(f"Команды бота ({len(bcmd)})")]
         for e in bcmd:
             al = e.get('aliases') or []
             s_ = f"<code>/{e['command']}</code>"
@@ -566,7 +569,7 @@ async def list_modules_cmd(event):
             return
 
         _bind_helper_form(form, event)
-        await engine.answer(event, visual.ok('Модули') + "  " + visual.hint('ниже'))
+        await engine.answer(event, visual.ok('Модули') + "\n" + visual.hint('список — ниже'))
 
     except KeyError as e:
         await engine.answer(event, visual.err('Ошибка') + f"\n<code>{html.escape(str(e))}</code>")
@@ -604,7 +607,7 @@ async def help_cmd(event):
             await show_module_info(event, info, resolved, note=note)
             return True
         _bind_helper_form(form, event, focus=resolved)
-        await engine.answer(event, visual.ok('Карточка модуля') + "  " + visual.hint('ниже'))
+        await engine.answer(event, visual.ok('Карточка модуля') + "\n" + visual.hint('карточка — ниже'))
         return True
 
     try:
@@ -722,7 +725,7 @@ async def show_command_info(event, command, info, module_name, is_alias=False, n
         else:
             text += visual.field('команда', f".{command}") + "\n"
 
-        text += visual.item(f"модуль  <b>{display_name}</b> · <code>{module_name}</code>") + "\n"
+        text += visual.item(f"модуль  <b>{display_name}</b>  <code>{module_name}</code>") + "\n"
 
         if cmd_info:
             if cmd_info.get('aliases') and not is_alias:
@@ -787,14 +790,14 @@ async def check_module_cmd(event):
             if errors:
                 error_text = visual.title('Проверка модуля') + "\n"
                 error_text += visual.err('Файл не является корректным модулем') + "\n\n"
-                error_text += visual.section(f"Критические ошибки · {len(errors)}") + "\n"
+                error_text += visual.section(f"Критические ошибки ({len(errors)})") + "\n"
                 for i, error in enumerate(errors[:10], 1):
                     error_text += visual.item(f"{i}. {html.escape(str(error))}") + "\n"
                 if len(errors) > 10:
                     error_text += visual.hint(f"… и ещё {len(errors)-10} ошибок") + "\n"
                 
                 if warnings:
-                    error_text += "\n" + visual.section(f"Предупреждения · {len(warnings)}") + "\n"
+                    error_text += "\n" + visual.section(f"Предупреждения ({len(warnings)})") + "\n"
                     for warning in warnings[:5]:
                         error_text += visual.item(html.escape(str(warning))) + "\n"
                     if len(warnings) > 5:
@@ -805,7 +808,7 @@ async def check_module_cmd(event):
             elif warnings:
                 warn_text = visual.title('Проверка модуля') + "\n"
                 warn_text += visual.ok('Файл является корректным модулем') + "\n\n"
-                warn_text += visual.section(f"Предупреждения · {len(warnings)}") + "\n"
+                warn_text += visual.section(f"Предупреждения ({len(warnings)})") + "\n"
                 for warning in warnings[:10]:
                     warn_text += visual.item(html.escape(str(warning))) + "\n"
                 if len(warnings) > 10:

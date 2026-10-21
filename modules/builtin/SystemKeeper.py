@@ -48,6 +48,7 @@ import decorators
 import bot
 import visual
 import frx_systemkeeper as keeper
+from core import database
 
 NAME = "SystemKeeper"
 MODULE_NAME = "systemkeeper"
@@ -196,6 +197,7 @@ async def exit_cmd(event):
     try:
         if getattr(engine, '_aiogram_bot', None) is None:
             raise RuntimeError("стационарного бота нет — бэкап некуда отправить")
+        database.flush_all()                 # отложенная запись базы — в бэкап идёт свежая
         info = await asyncio.wait_for(asyncio.to_thread(keeper.make_user_backup, dst, version), 90)
         if info['size'] > 49 * 1024 * 1024:     # лимит Bot API на файл — 50 МБ
             raise ValueError(f"архив {_fmt_size(info['size'])} больше лимита бота (50 МБ)")
@@ -303,7 +305,8 @@ async def update_cmd(event):
         visual.title("Обновление FRX"),
         f"{visual.visual('element')} версия  <code>{_esc(info['from'])}</code> → <code>{_esc(info['to'])}</code>",
         visual.field("источник", _esc(source_label)),
-        visual.field("файлов", f"{total} · +{len(info['added'])} ~{len(info['changed'])} −{len(info['removed'])}"),
+        visual.field("файлов", total),
+        visual.item(f"новых {len(info['added'])}, изменённых {len(info['changed'])}, удалённых {len(info['removed'])}", 1),
     ]) + "\n"
     if info['requirements_changed']:
         text += visual.item("requirements.txt изменился — зависимости обновятся автоматически") + "\n"
@@ -350,8 +353,8 @@ async def sk_cmd(event):
     lines = [
         visual.title("SystemKeeper"),
         f"{visual.visual('status_on') if active else visual.visual('status_off')} keeper  "
-        + (f"<code>v{_esc(keeper.KEEPER_VERSION)}</code> · pid <code>{_esc(os.environ.get('FRX_KEEPER_PID', '?'))}</code>"
-           if active else "<i>не запущен</i>"),
+        + (f"<code>v{_esc(keeper.KEEPER_VERSION)}</code>" if active else "<i>не запущен</i>"),
+        *([visual.item(f"pid <code>{_esc(os.environ.get('FRX_KEEPER_PID', '?'))}</code>", 1)] if active else []),
         visual.field("FRX", _esc(engine.get_version())),
         "",
         visual.section("GitHub"),
@@ -369,8 +372,10 @@ async def sk_cmd(event):
     lines += [
         "",
         visual.section("Команды"),
-        "<code>.restart</code> · <code>.update</code> (GitHub; ответом на .zip — из файла) · "
-        "<code>.createbackup</code> · <code>.restorebackup</code>",
+        visual.item("<code>.restart</code> — перезапуск"),
+        visual.item("<code>.update</code> — обновить с GitHub (ответом на .zip — из файла)"),
+        visual.item("<code>.createbackup</code> — резервная копия"),
+        visual.item("<code>.restorebackup</code> — восстановить из копии"),
     ]
     await engine.answer(event, "\n".join(lines))
 
@@ -383,7 +388,7 @@ def _elapsed(res) -> str:
     created = res.get('created')
     if not created:
         return ""
-    return f" · {max(time.time() - created, 0):.1f} сек"
+    return f" за {max(time.time() - created, 0):.1f} сек"
 
 
 def _short_text(res) -> str:
@@ -392,19 +397,19 @@ def _short_text(res) -> str:
     error = _esc(res.get('error') or 'неизвестная ошибка')
     if action == 'update':
         if ok:
-            return (visual.ok("FRX обновлён") + "  "
-                    f"<code>{_esc(res.get('from'))}</code> → <code>{_esc(res.get('to'))}</code>{_elapsed(res)}")
+            return (visual.ok("FRX обновлён" + _elapsed(res)) + "\n"
+                    + f"{visual.visual('element')} версия  <code>{_esc(res.get('from'))}</code> → <code>{_esc(res.get('to'))}</code>")
         tail = "\n" + visual.hint("выполнен откат к прежней версии") if res.get('rolled_back') else ""
         return visual.err("Обновление не удалось") + f"\n<code>{error}</code>{tail}"
     if action == 'restore':
         if ok:
-            return (visual.ok("Бэкап восстановлен") + f"{_elapsed(res)}\n"
+            return (visual.ok("Бэкап восстановлен" + _elapsed(res)) + "\n"
                     + visual.field("версия бэкапа", _esc(meta.get('backup_version', '?'))) + "\n"
                     + visual.field("создан", _esc(meta.get('created', '?'))))
         tail = "\n" + visual.hint("данные возвращены к состоянию до восстановления") if res.get('rolled_back') else ""
         return visual.err("Восстановление не удалось") + f"\n<code>{error}</code>{tail}"
     if ok:
-        return visual.ok("Юзербот перезагружен") + _elapsed(res)
+        return visual.ok("Юзербот перезагружен" + _elapsed(res))
     return visual.err("Перезагрузка не удалась") + f"\n<code>{error}</code>"
 
 

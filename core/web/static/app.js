@@ -772,7 +772,7 @@ async function configModule(T, moduleId) {
   mount(T, shell(m.name, { back: '#/config', backLabel: 'конфиги' }, glass(m.items.map((it) => configRow(m, it)))));
 }
 
-function fmtVal(v) { return v === null || v === undefined ? '—' : Array.isArray(v) ? '[' + v.join(', ') + ']' : typeof v === 'boolean' ? (v ? 'да' : 'нет') : String(v); }
+function fmtVal(v) { return v === null || v === undefined ? '—' : Array.isArray(v) ? '[' + v.join(', ') + ']' : typeof v === 'boolean' ? (v ? 'да' : 'нет') : typeof v === 'object' ? '{' + Object.entries(v).map(([k, x]) => k + ' → ' + x).join('; ') + '}' : String(v); }
 
 /* Строка настройки живёт сама: после изменения обновляются только её элементы (без перерисовки страницы).
  * «сбросить» стоит ЛЕВЕЕ полей и всегда занимает своё место (появляется прозрачностью) — ничего не сдвигается. */
@@ -788,7 +788,7 @@ function configRow(m, it) {
   }
   const sub = [it.description || '', hints.length ? ' · ' + hints.join(', ') : ''].join('');
   const isDefault = () => JSON.stringify(value) === JSON.stringify(it.default);
-  const wide = ['choice', 'choices', 'list'].includes(it.type);
+  const wide = ['choice', 'choices', 'list', 'dict'].includes(it.type);
   let sync = () => {};
 
   const reset = h('button', { class: 'link reset', type: 'button', title: 'по умолчанию: ' + fmtVal(it.default), onclick: () => send('to_default') }, 'сбросить');
@@ -825,6 +825,27 @@ function configRow(m, it) {
     } }, String(o)));
     sync = () => chips.forEach((c, i) => c.classList.toggle('on', (value || []).includes(it.options[i])));
     control = h('div', { class: 'chips' }, chips); sync();
+  } else if (it.type === 'dict') {
+    /* словарь «ключ → значение»: пары чипами (× — удалить), внизу два поля и «добавить» (тот же ключ — замена) */
+    const ki = h('input', { class: 'field short', placeholder: 'ключ' });
+    const vi = h('input', { class: 'field short', placeholder: 'значение' });
+    const box = h('div', { class: 'chips' });
+    let prev = null;
+    sync = () => {
+      const cur = value || {};
+      const keys = Object.keys(cur);
+      box.replaceChildren(...(keys.length
+        ? keys.map((k) => h('span', { class: 'chip' + (prev && prev[k] !== cur[k] ? ' pop' : '') },
+            h('b', {}, k), ' → ', cur[k] === '' ? h('span', { class: 'faint' }, 'пусто') : String(cur[k]),
+            h('span', { class: 'x', onclick: () => send('del', k) }, '×')))
+        : [h('span', { class: 'faint' }, 'словарь пуст')]));
+      prev = Object.assign({}, cur);
+    };
+    const add = () => { const k = ki.value.trim(); if (!k) { ki.focus(); return; } const v = vi.value; ki.value = ''; vi.value = ''; send('add', [k, v]); ki.focus(); };
+    ki.addEventListener('keydown', (e) => { if (e.key === 'Enter') vi.focus(); });
+    vi.addEventListener('keydown', (e) => { if (e.key === 'Enter') add(); });
+    sync();
+    control = h('div', { class: 'stack', style: 'width:100%' }, box, h('div', { class: 'inline' }, ki, vi, h('button', { class: 'btn small', type: 'button', onclick: add }, 'добавить')));
   } else if (it.type === 'list') {
     const inp = h('input', { class: 'field short', placeholder: 'новый элемент' });
     const box = h('div', { class: 'chips' });

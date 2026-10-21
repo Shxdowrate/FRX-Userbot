@@ -118,7 +118,7 @@ async def host_ping(event, target):
     lines.append(visual.field('ответов', f"{len(times)} из 5"))
     if errors:
         lines.append(visual.warn("не ответил: " + ", ".join(sorted(set(errors)))))
-    lines.append(visual.hint("TCP-подключение с компьютера, где запущен FRX · из разных стран — .ch " + _esc(host)))
+    lines += ["", visual.hints("TCP-подключение с компьютера, где запущен FRX", "из разных стран — .ch " + _esc(host))]
     await engine.answer(event, "\n".join(lines))
 
 
@@ -222,7 +222,7 @@ async def speedtest_cmd(event):
     jitter = statistics.mean(abs(a - b) for a, b in zip(pings, pings[1:])) if len(pings) > 1 else 0
     lines = [visual.title("Скорость интернета", sub="компьютер с FRX"),
              visual.field("⬇ загрузка", _mbps(down)), visual.field("⬆ отдача", _mbps(up)),
-             visual.field("пинг", f"{ping_ms:.0f} мс · разброс {jitter:.0f} мс")]
+             visual.field("пинг", f"{ping_ms:.0f} мс"), visual.field("разброс", f"{jitter:.0f} мс")]
     if meta:
         lines += ["", visual.field("провайдер", _esc(meta.get('asOrganization') or '?'), code=False),
                   visual.field("где", f"{flag(meta.get('country'))} {_esc(meta.get('city') or '')}", code=False),
@@ -277,8 +277,8 @@ async def checkhost_cmd(event):
         status, good = _fmt_result(kind, val)
         ok_n += good
         rows.append(f"{'✓' if good else '✗'} {place} — {status}")
-    lines = [visual.title("Check-host", sub=f"{_esc(host)} · {KINDS[kind]}"), visual.field("доступен", f"{ok_n} из {len(rows)}")] \
-        + rows + [visual.hint(f"подробно: {CH}/check-report/{rid}")]
+    lines = [visual.title("Check-host", sub=f"{_esc(host)}\n{KINDS[kind]}"), visual.field("доступен", f"{ok_n} из {len(rows)}"), ""] \
+        + rows + ["", visual.hint(f"подробно: {CH}/check-report/{rid}")]
     await engine.answer(event, "\n".join(lines))
 
 
@@ -289,25 +289,25 @@ def _fmt_result(kind, val):
         if kind == 'http':
             v = val[0]
             if v and v[0] == 1:
-                return f"{v[3]} {_esc(v[2])} · {float(v[1]) * 1000:.0f} мс", 1
+                return f"{v[3]} {_esc(v[2])}, {float(v[1]) * 1000:.0f} мс", 1
             return _esc((v[2] if v and len(v) > 2 else 'ошибка') or 'ошибка'), 0
         if kind == 'ping':
             pings = [p for p in (val[0] or []) if p]
             good = [p[1] * 1000 for p in pings if p[0] == 'OK']
             if good:
-                return f"{len(good)}/{len(pings)} · {statistics.mean(good):.0f} мс", 1
+                return f"{len(good)}/{len(pings)}, {statistics.mean(good):.0f} мс", 1
             return "не пингуется", 0
         if kind == 'tcp':
             v = val[0]
             if 'time' in v:
-                return f"{v['time'] * 1000:.0f} мс · {_esc(v.get('address', ''))}", 1
+                return f"{v['time'] * 1000:.0f} мс, {_esc(v.get('address', ''))}", 1
             return _esc(v.get('error', 'ошибка')), 0
         if kind == 'dns':
             v = val[0]
             a = v.get('A') or []
             aaaa = v.get('AAAA') or []
             if a or aaaa:
-                return _esc(", ".join((a + aaaa)[:3])) + f" · TTL {v.get('TTL', '?')}", 1
+                return _esc(", ".join((a + aaaa)[:3])) + f", TTL {v.get('TTL', '?')}", 1
             return "не резолвится", 0
     except Exception:
         pass

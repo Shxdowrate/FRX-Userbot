@@ -345,7 +345,22 @@ def safe_html(text):
     for _name, index, raw in stack:
         out[index] = _escape_plain(raw)
 
-    return ''.join(out)
+    return _squeeze_blank_lines(''.join(out))
+
+
+_KEEP_BLOCK_RE = re.compile(r'(<pre\b[\s\S]*?</pre>|<code\b[\s\S]*?</code>)', re.I)
+_BLANKS_RE = re.compile(r'\n[ \t]*\n(?:[ \t]*\n)+')
+
+
+def _squeeze_blank_lines(text: str) -> str:
+    """Не больше одной пустой строки подряд — сообщения собираются из кусков (заголовок, разделы, подсказки),
+    и на стыках легко набегает лишняя. Внутри <pre>/<code> (вывод кода, логи) переносы не трогаем."""
+    if '\n\n\n' not in text and not _BLANKS_RE.search(text):
+        return text
+    parts = _KEEP_BLOCK_RE.split(text)
+    for i in range(0, len(parts), 2):                     # чётные куски — вне <pre>/<code>
+        parts[i] = _BLANKS_RE.sub('\n\n', parts[i])
+    return ''.join(parts)
 
 
 # ---------------------------------------------------------------------- #

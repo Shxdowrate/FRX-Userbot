@@ -108,10 +108,11 @@ async def standart_text_accounts() -> str:
         )
 
         lines.append(
-            f"{status_icon} <b>{_esc(acc_first_name)}</b>  <code>{acc_id}</code> · <code>{_esc(phone_format)}</code>"
+            f"{status_icon} <b>{_esc(acc_first_name)}</b>  <code>{_esc(phone_format)}</code>"
         )
+        lines.append(visual.item(f"id <code>{acc_id}</code>", 1))
 
-    lines += ["", visual.hint(f"{visual.visual('status_success')} — активный аккаунт · выберите действие")]
+    lines += ["", visual.hints(f"{visual.visual('status_success')} — активный аккаунт", "выберите действие")]
     return "\n".join(lines)
 
 

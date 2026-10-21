@@ -10,12 +10,31 @@ DynamicDB   — обёртка, которую видят модули как о
               позволяя менять значения в БД других модулей.
 """
 
+import atexit
 import json
 import asyncio
+import weakref
 from pathlib import Path
 
 from .context import current_module
 from .paths import DB_PATH, atomic_write_text
+
+
+# Запись на диск отложенная: set/delete меняют данные в памяти сразу, а файл переписывается через SAVE_DELAY
+# одним разом. Раньше КАЖДЫЙ db.set синхронно сериализовал и переписывал весь database.json прямо в цикле
+# событий — модуль, пишущий в базу часто (счётчики, онлайн, шпион), тормозил весь юзербот, особенно на телефоне.
+# Несохранённое пишется при выходе (flush_all() в main.py, плюс atexit) и перед бэкапом.
+SAVE_DELAY = 0.3
+_instances = weakref.WeakSet()
+
+
+def flush_all():
+    """Сразу записать на диск все базы с несохранёнными изменениями."""
+    for db in list(_instances):
+        db.flush()
+
+
+atexit.register(flush_all)
 
 
 class Database:
@@ -26,7 +45,10 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
         self._data = {}
+        self._dirty = False
+        self._save_handle = None
         self._load()
+        _instances.add(self)
 
     def _load(self):
         if self.path.exists():
@@ -50,6 +72,39 @@ class Database:
     def _save(self):
         atomic_write_text(self.path, json.dumps(self._data, ensure_ascii=False, indent=2))
 
+    def _schedule_save(self):
+        self._dirty = True
+        if self._save_handle is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:                     # вне цикла событий — пишем сразу
+            self.flush()
+            return
+        self._save_handle = loop.call_later(SAVE_DELAY, self._deferred_save)
+
+    def _deferred_save(self):
+        self._save_handle = None
+        self.flush()
+
+    def flush(self):
+        """Записать несохранённые изменения на диск сейчас (синхронно)."""
+        if self._save_handle is not None:
+            self._save_handle.cancel()
+            self._save_handle = None
+        if not self._dirty:
+            return
+        self._dirty = False
+        try:
+            self._save()
+        except Exception as e:
+            print(f"[FRX] [WARN] база данных не сохранилась ({e}) — повторю")
+            self._dirty = True
+            try:
+                self._save_handle = asyncio.get_running_loop().call_later(2, self._deferred_save)
+            except RuntimeError:
+                pass
+
     async def get(self, key, default=None):
         async with self._lock:
             return self._data.get(key, default)
@@ -57,14 +112,14 @@ class Database:
     async def set(self, key, value):
         async with self._lock:
             self._data[key] = value
-            self._save()
+            self._schedule_save()
         return value
 
     async def delete(self, key):
         async with self._lock:
             if key in self._data:
                 del self._data[key]
-                self._save()
+                self._schedule_save()
                 return True
             return False
 

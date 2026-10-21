@@ -60,6 +60,7 @@ engine.botlog() и лимитер. Модули могут слать собст
 Рубильник enabled и log_chat_id действуют и на botlog().
 """
 
+import asyncio
 import html
 import time
 
@@ -71,7 +72,7 @@ import time_utils
 
 NAME = "Logging"
 MODULE_NAME = "logging"
-VERSION = "1.2"
+VERSION = "1.3"
 AUTHOR = "FRX"
 DESCRIPTION = "Дублирует ошибки/важные события юзербота в ЛС владельцу через стационарного бота"
 TG_URL = "https://t.me/mescr_m"
@@ -250,7 +251,7 @@ async def log_bot_error(error_text: str, context: dict):
 
 @bot.on_start()
 async def notify_startup():
-    if not await engine.get_config('notify_startup'):
+    if not await engine.get_config('notify_startup') or not await engine.get_config('enabled'):
         return
     text = "\n".join([
         visual.title('Юзербот запущен'),
@@ -258,7 +259,21 @@ async def notify_startup():
         visual.field('модулей', len(engine.modules)),
         visual.field('время', _now_str()),
     ])
-    await _send(text)
+    # отдельной задачей: повторы не задерживают bot.on_start() остальных модулей
+    asyncio.ensure_future(_deliver_startup(text))
+
+
+async def _deliver_startup(text, attempts=4, pause=10):
+    """Сразу после запуска сеть и бот бывают ещё не готовы — несколько попыток, причина неудачи — в терминал."""
+    status = None
+    for i in range(attempts):
+        task = engine.botlog_raw(text)
+        status = await task if task is not None else 'no_bot'
+        if status in ('sent', 'disabled'):
+            return
+        if i < attempts - 1:
+            await asyncio.sleep(pause)
+    engine.tlog(f"[Logging] уведомление о запуске не доставлено ({status}) — подробности строкой «[botlog] …» выше")
 
 
 # --------------------------------------------------------------------- #

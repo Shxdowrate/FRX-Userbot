@@ -294,7 +294,7 @@ def _tunnel_step(st) -> tuple:
 def _tunnel_progress_text(st, elapsed) -> str:
     att, svc, step, err = _tunnel_step(st)
     lines = [visual.wait(f"Поднимаю публичный адрес сайта… {int(elapsed)} с"),
-             visual.field("попытка", f"{att} · {svc}", code=False),
+             visual.field("попытка", f"{att} ({svc})", code=False),
              visual.item(_esc(step))]
     if err:
         lines.append(visual.hint(_esc(err)))
@@ -486,7 +486,7 @@ async def web_cmd(event):
     public, tunnel_err = await _ensure_tunnel(event)
     sent_to = await _open_login_and_send(public, tunnel_err)
     try:
-        await _open_panel(event, note=f"вход открыт на 10 мин · код — {sent_to}")
+        await _open_panel(event, note=f"вход открыт на 10 мин\nкод входа — {sent_to}")
     except Exception:
         # стационарного бота нет — обычный ответ, управление — подкомандами
         port = engine.web.port
@@ -495,7 +495,7 @@ async def web_cmd(event):
                 + f"\n\n{visual.visual('status_stop')} выключить — <code>.web stop</code>")
         await engine.answer(event, text)
         return
-    await engine.answer(event, visual.ok("Сайт запущен") + "  " + visual.hint("панель управления — ниже"))
+    await engine.answer(event, visual.ok("Сайт запущен") + "\n" + visual.hint("панель управления — ниже"))
 
 
 async def _open_login_and_send(public=None, tunnel_err=None) -> str:
@@ -522,7 +522,7 @@ async def _panel_text(private: bool, note: str = '') -> str:
     status = st.get('status')
     lines = [visual.title("Сайт FRX", sub="панель управления")]
     if web.running:
-        lines.append(visual.field("сайт", f"работает · http://127.0.0.1:{web.port}"))
+        lines.append(visual.field("сайт", f"работает, http://127.0.0.1:{web.port}"))
     else:
         lines.append(visual.field("сайт", "выключен", code=False))
     if not await _cfg('tunnel'):
@@ -599,14 +599,14 @@ async def _open_panel(event, note=''):
         async def go():
             async def show(st_, el_):
                 att, svc, step, err = _tunnel_step(st_)
-                await redraw(f"поднимаю публичный адрес · попытка {att} ({svc}) · {step} · {int(el_)} с"
-                             + (f" · прошлая: {err[:90]}" if err else ''))
+                await redraw(f"поднимаю публичный адрес, {int(el_)} с\nпопытка {att} ({svc})\n{step}"
+                             + (f"\nпрошлая ошибка: {err[:90]}" if err else ''))
             st = await engine.web.wait_tunnel(150, on_progress=_progress_editor(show))
             if st.get('status') == 'up':
                 await _remember_url(st['url'])
                 await _sync_menu_button()
                 sent = await _open_login_and_send(st['url'])
-                await redraw(f"публичный адрес работает · ссылка и код — {sent}")
+                await redraw(f"публичный адрес работает\nссылка и код — {sent}")
             else:
                 await redraw("публичный адрес пока не поднялся — FRX пробует дальше сам, ссылка придёт в ЛС; или «Новый адрес»")
         state['watch'] = asyncio.ensure_future(go())
@@ -640,7 +640,7 @@ async def _open_panel(event, note=''):
                 public = st.get('url') if st.get('status') == 'up' and await _cfg('tunnel') else None
                 sent = await _open_login_and_send(public)
                 await click.answer("код отправлен " + sent)
-                await redraw(f"вход открыт на 10 мин для одного устройства · код — {sent}")
+                await redraw(f"вход открыт на 10 мин для одного устройства\nкод входа — {sent}")
             elif act in ('tunnel', 'renew'):
                 want = True if act == 'renew' else not await _cfg('tunnel')
                 await _set('tunnel', want)

@@ -198,7 +198,8 @@ def _classes_text(prefix):
     lines = [visual.title("Классы доступа")]
     for idn, c in engine.access.classes().items():
         users = sum(1 for u in engine.access.users().values() if u.get('class') == idn)
-        lines.append(visual.item(f"<b>{_esc(idn)}</b> — {_esc(c.get('title') or '')} · пользователей: {users}"))
+        lines.append(visual.item(f"<b>{_esc(idn)}</b> — {_esc(c.get('title') or '')}"))
+        lines.append(visual.item(f"пользователей: {users}", 1))
         lines += _class_lines(idn, prefix)
     lines += ["", visual.hint("создавать и настраивать классы — на сайте: .web → доступ")]
     return "\n".join(lines)
@@ -213,8 +214,8 @@ def _list_text(prefix):
             what = ', '.join(x for x in ((f"класс {u['class']}" if u.get('class') else ''),
                                          (f"разрешений: {n}" if n else '')) if x)
             lines.append(visual.item(f"<b>{_esc(u.get('name') or uid)}</b>"
-                                     + (f" @{_esc(u['username'])}" if u.get('username') else '')
-                                     + f" · <code>{uid}</code> · {_esc(what)}"))
+                                     + (f" @{_esc(u['username'])}" if u.get('username') else '')))
+            lines.append(visual.item(f"id <code>{uid}</code>" + (f", {_esc(what)}" if what else ''), 1))
     else:
         lines.append(visual.hint("пока ни у кого нет доступа"))
     lines += ["", visual.hint(f"выдать: ответьте на сообщение человека командой {prefix}access")]
@@ -223,7 +224,7 @@ def _list_text(prefix):
 
 def _user_text(uid, name, username, prefix):
     u = engine.access.get_user(uid)
-    lines = [visual.title(_esc(name or uid), sub=f"@{_esc(username)} · id {uid}" if username else f"id {uid}")]
+    lines = [visual.title(_esc(name or uid), sub=f"@{_esc(username)}\nid {uid}" if username else f"id {uid}")]
     if not u:
         lines += [visual.item("доступа нет — команды этого человека ваш юзербот не выполняет"), "",
                   visual.hint("«Выдать доступ» — класс (готовый набор прав) или разрешение на модуль / команду")]
@@ -345,7 +346,7 @@ async def _open_form(event, uid=None, name='', username=''):
         st['page'] = page
         rows.append(back('give'))
         await form.edit(visual.title("Выдать разрешение", sub=who()) + "\n"
-                        + visual.hint(f"выберите модуль · {DANGER} — критически опасный · ✓ — уже доступен целиком"),
+                        + visual.hints("выберите модуль", f"{DANGER} — критически опасный", "✓ — уже доступен целиком"),
                         buttons=rows)
 
     async def show_mod():
@@ -577,7 +578,7 @@ async def access_cmd(event):
             uid, name, username = await _resolve_user(event, ' '.join(args))
         try:
             await _open_form(event, uid, name or '', username or '')
-            await engine.answer(event, visual.ok("Доступ") + "  " + visual.hint("меню ниже"))
+            await engine.answer(event, visual.ok("Доступ") + "\n" + visual.hint("меню — ниже"))
         except RuntimeError:
             text = _user_text(str(uid), name, username, prefix) if uid else _list_text(prefix)
             await engine.answer(event, text + "\n\n" + visual.hint(

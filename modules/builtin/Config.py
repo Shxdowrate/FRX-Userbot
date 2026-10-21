@@ -1,7 +1,8 @@
 """
 modules/builtin/Config.py — просмотр и редактирование настроек модулей через инлайн-формы (.config / .cfg).
 
-Типы настроек — см. core/engine.py create_config()/edit_config(): str, int, float, bool, list, а также
+Типы настроек — см. core/engine.py create_config()/edit_config(): str, int, float, bool, list, dict
+(словарь «ключ = значение»), а также
 'choice' (выбор одного варианта из статичного списка) и 'choices' (выбор нескольких). Для 'choice' и 'choices'
 в инлайне рисуется список вариантов вместо поля ввода; выбор нельзя оставить пустым. Значения и ошибки
 экранируются; «сбросить» возвращает значение по умолчанию.
@@ -18,7 +19,7 @@ from core.inline_forms import InlineClick
 
 NAME = "Config"
 MODULE_NAME = "config"
-VERSION = "2.12"
+VERSION = "2.13"
 AUTHOR = "FRX"
 DESCRIPTION = "Интерактивный просмотр и редактирование конфигов модулей через Inline-формы"
 TG_URL = "https://t.me/mescr_m"
@@ -33,6 +34,7 @@ TYPE_LIST = "list"
 TYPE_CHOICE = "choice"      # выбор ОДНОГО значения из options
 TYPE_CHOICES = "choices"    # выбор НЕСКОЛЬКИХ значений из options
 TYPE_LINK = "link"          # ссылка http(s):// или tg:// — проверяется ядром
+TYPE_DICT = "dict"          # словарь «ключ → значение»
 
 # тонкие символы вместо пёстрых эмодзи
 TYPE_ICONS = {
@@ -44,6 +46,7 @@ TYPE_ICONS = {
     "choice": "◇",
     "choices": "◈",
     "link": "↗",
+    "dict": "⇄",
 }
 
 
@@ -54,6 +57,18 @@ def _esc(value) -> str:
 def _kv(label: str, fragment: str) -> str:
     """Как visual.field, но значение — уже готовый HTML-фрагмент (format_value)."""
     return f"{visual.visual('element')} {label}  {fragment}"
+
+
+@decorators.on_start()
+async def premium_emoji_setup():
+    await engine.create_config(
+        key="premium_emoji",
+        description="Премиум-эмодзи из пака FRX в иконках встроенных модулей (заголовки, статусы, разделы). "
+                    "Нужен Telegram Premium у аккаунта (у бота — у его владельца); без него видны обычные эмодзи",
+        data_type="bool",
+        default=True,
+    )
+    visual.set_premium(await engine.get_config("premium_emoji"))
 
 
 @decorators.on_start()
@@ -97,6 +112,12 @@ async def create_config():
         options=["red", "green", "blue", "yellow"],
     )
     await engine.create_config(
+        key="test_config_dict",
+        description="Тестовый конфиг — словарь «ключ = значение»",
+        data_type="dict",
+        default={"привет": "и тебе привет", "пока": "до встречи"},
+    )
+    await engine.create_config(
         key="test_config_link",
         description="Тестовый конфиг — ссылка (проверяется: http(s):// или tg://; example.com → https://example.com)",
         data_type="link",
@@ -110,6 +131,11 @@ def format_value(value, config_type: str) -> str:
     if value is None:
         return unset
 
+    if config_type == TYPE_DICT:
+        if not value:
+            return "<code>{}</code>"
+        pairs = [f"{k} → {v}" if v != "" else f"{k} → (пусто)" for k, v in value.items()]
+        return f"<code>{{{_esc('; '.join(pairs))}}}</code>"
     if config_type in (TYPE_LIST, TYPE_CHOICES):
         if not value:
             return "<code>[]</code>"
@@ -194,12 +220,13 @@ async def config_cmd(event):
 
     async def build_group_menu(grp: str, with_back: bool = True) -> tuple[str, list]:
         mods = [m for m in await get_modules_with_configs() if m[3] == grp]
-        lines = [visual.title("Конфиги", sub=GROUP_TITLES[grp].lower()), ""]
+        lines = [visual.title("Конфиги", sub=GROUP_TITLES[grp].lower())]
         buttons = []
         for mod, display_name, count, _g in mods:
-            lines.append(visual.item(f"<b>{_esc(mod)}</b> — {_esc(display_name)} · <i>конфигов: {count}</i>"))
+            lines.append(visual.item(f"<b>{_esc(display_name)}</b>  <code>{_esc(mod)}</code>"))
+            lines.append(visual.item(f"настроек: {count}", 1))
             buttons.append([(visual.btn(f"{display_name} · {mod}"), f"open_mod:{mod}")])
-        lines += ["", visual.hint("выберите модуль · 🔍 — поиск по всем настройкам")]
+        lines += ["", visual.hints("выберите модуль", "🔍 — поиск по всем настройкам")]
         buttons.insert(0, [engine.SearchButton("🔍 Найти настройку", "cfg_search", hint="модуль, название настройки или слово из описания")])
         if with_back:
             buttons.append([(visual.btn("Назад", "back"), "back_to_main")])
@@ -218,7 +245,7 @@ async def config_cmd(event):
         present = [g for g in GROUP_TITLES if counts[g]]
         if len(present) == 1:
             return await build_group_menu(present[0], with_back=False)
-        lines = [visual.title("Конфиги"), ""]
+        lines = [visual.title("Конфиги")]
         lines += [visual.field(GROUP_TITLES[g].lower(), counts[g]) for g in present]
         lines += ["", visual.hint("выберите, чьи настройки открыть")]
         buttons = [[engine.SearchButton("🔍 Найти настройку", "cfg_search", hint="модуль, название настройки или слово из описания")]] + [[(visual.btn(f"{GROUP_TITLES[g]} · {counts[g]}"), f"open_grp:{g}")] for g in present]
@@ -235,7 +262,7 @@ async def config_cmd(event):
                 items.append({"label": f"{visual.visual('config')} {display_name} · {key}", "data": f"open_cfg:{mod}:{key}",
                               "texts": [key, key.replace("_", " "), data.get("description", ""), f"{mod} {key}"]})
         found = engine.search_items(items, query, key=lambda it: it["texts"], limit=30)
-        lines = [visual.title("Конфиги", sub=f"поиск «{_esc(query)}» · найдено: {len(found)}")]
+        lines = [visual.title("Конфиги", sub=f"поиск «{_esc(query)}»\nнайдено: {len(found)}")]
         if not found:
             lines.append(visual.hint("ничего не нашлось — попробуйте иначе"))
         buttons = [[engine.SearchButton("🔍 Найти настройку", "cfg_search", hint="модуль, название настройки или слово из описания")]] + [[(it["label"][:60], it["data"])] for it in found]
@@ -255,7 +282,7 @@ async def config_cmd(event):
             buttons = [[(visual.btn("К модулям", "back"), f"open_grp:{grp}")]]
             return text, buttons
 
-        lines = [head, ""]
+        lines = [head]
         buttons = []
         for key, data in sorted(configs.items()):
             value = data.get("value")
@@ -301,6 +328,9 @@ async def config_cmd(event):
         if valid:
             limits = ", ".join(f"{k}={v}" for k, v in valid.items())
             lines.append(visual.field("ограничения", _esc(limits)))
+        if config_type == TYPE_DICT:
+            lines += ["", visual.hints("добавить: ключ = значение",
+                                       "с «:» или «=» внутри — в кавычках: \"а:б\" = \"в=г\"")]
         if config_type in (TYPE_CHOICE, TYPE_CHOICES):
             lines.append(visual.field("варианты", _esc(", ".join(str(o) for o in (config_data.get("options") or [])))))
         if description:
@@ -326,6 +356,17 @@ async def config_cmd(event):
             for idx, opt in enumerate(options):
                 is_sel = (opt == selected) if config_type == TYPE_CHOICE else (opt in selected)
                 buttons.append([(visual.btn(opt, "on" if is_sel else "off"), f"cfg_choice_pick:{module_name}:{key}:{idx}")])
+        elif config_type == TYPE_DICT:
+            await cache.set(
+                f"cfg_ctx:{event.chat_id}",
+                {"mod": module_name, "key": key, "action": "add"},
+            )
+            buttons.append([engine.InputButton(visual.btn("Добавить пару"), "cfg_input_action",
+                                               hint='ключ = значение (или "ключ" = "значение")')])
+            if value:
+                buttons.append(
+                    [(visual.btn("Удалить пару"), f"cfg_show_del_list:{module_name}:{key}", "danger")]
+                )
         elif config_type == TYPE_LIST:
             await cache.set(
                 f"cfg_ctx:{event.chat_id}",
@@ -457,7 +498,7 @@ async def config_cmd(event):
 
         try:
             await engine.edit_config(key, "edit", new_val, module_name=module_name)
-            msg = visual.ok("Значение обновлено") + "  " + format_value(new_val, TYPE_BOOL)
+            msg = visual.ok("Значение обновлено") + "\n" + _kv("теперь", format_value(new_val, TYPE_BOOL))
         except Exception as e:
             msg = _error("Ошибка", e)
 
@@ -566,16 +607,19 @@ async def config_cmd(event):
         config_key = f"{module_name}:__config__"
         configs = await db.gget(config_key, {})
         config_data = configs.get(key, {})
-        items = config_data.get("value", [])
+        raw = config_data.get("value") or []
+        is_dict = config_data.get("type") == TYPE_DICT
+        items = list(raw.items()) if is_dict else list(raw)
 
         text = (
-            visual.title("Удаление из списка", sub=_esc(key)) + "\n"
-            + visual.hint("нажмите на элемент, чтобы удалить его из списка")
+            visual.title("Удаление из словаря" if is_dict else "Удаление из списка", sub=_esc(key)) + "\n"
+            + visual.hint("нажмите на пару, чтобы удалить её" if is_dict else "нажмите на элемент, чтобы удалить его из списка")
         )
 
         buttons = []
         for idx, item in enumerate(items):
-            buttons.append([(visual.btn(str(item), "close"), f"cfg_del_item:{module_name}:{key}:{idx}")])
+            label = f"{item[0]} → {item[1]}" if is_dict else str(item)
+            buttons.append([(visual.btn(label[:60], "close"), f"cfg_del_item:{module_name}:{key}:{idx}")])
 
         buttons.append([(visual.btn("К конфигу", "back"), f"open_cfg:{module_name}:{key}")])
         await form.edit(text=text, buttons=buttons)
@@ -588,7 +632,8 @@ async def config_cmd(event):
         config_key = f"{module_name}:__config__"
         configs = await db.gget(config_key, {})
         config_data = configs.get(key, {})
-        items = config_data.get("value", [])
+        raw = config_data.get("value") or []
+        items = list(raw.keys()) if config_data.get("type") == TYPE_DICT else list(raw)
 
         if 0 <= idx < len(items):
             item_to_del = items[idx]
@@ -608,7 +653,6 @@ async def config_cmd(event):
 async def config_help_cmd(event):
     help_text = "\n".join([
         visual.title("Конфиги", sub="интерактивное управление"),
-        "",
         visual.section("Команды"),
         visual.item("<code>.config</code> — инлайн-меню со всеми модулями"),
         visual.item("<code>.config &lt;модуль&gt;</code> — сразу меню конкретного модуля"),

@@ -37,6 +37,7 @@ import engine
 import decorators
 import visual
 import frx_systemkeeper as keeper
+from core import database
 
 NAME = "Backup"
 MODULE_NAME = "backup"
@@ -82,6 +83,7 @@ async def createbackup_cmd(event):
     dst = keeper.TMP_DIR / f"frx_backup_v{version}_{time.strftime('%Y%m%d_%H%M%S')}.zip"
     try:
         await engine.answer(event, visual.wait("Собираю резервную копию…"))
+        database.flush_all()                 # отложенная запись базы — в бэкап идёт свежая
         info = await asyncio.to_thread(keeper.make_user_backup, dst, version)
 
         if info['size'] > MAX_SEND_SIZE:

@@ -2,7 +2,8 @@
 modules/builtin/Loader.py — загрузка, обновление, выгрузка, восстановление и перезагрузка модулей через Telegram.
 
 Команды:
-    .loadmod / .lm         ответом на .py или .txt — разбирает файл БЕЗ исполнения (engine.parse_module_meta(), ast)
+    .loadmod / .lm         ответом на .py или .txt или в подписи к самому файлу (в русской раскладке — «юдь» —
+                           тоже, если включено .layout) — разбирает файл БЕЗ исполнения (engine.parse_module_meta(), ast)
                            и показывает превью: название, ID, версию, автора, описание, команды. Модуль исполняется
                            только после «Загрузить». Файл .txt сохраняется как user/modules/{MODULE_NAME}.py.
                            Модуль с тем же MODULE_NAME и ДРУГОЙ версией — это обновление: превью «версия X → Y»
@@ -47,7 +48,7 @@ import visual
 
 NAME = "Loader"
 MODULE_NAME = "loader"
-VERSION = "2.9"
+VERSION = "2.10"
 AUTHOR = "FRX"
 DESCRIPTION = "Управление модулями: загрузка/обновление (.py/.txt, с превью и подтверждением), каталог модулей с GitHub (.dlm, .modlist, .repo), выгрузка, восстановление, перезагрузка и отправка файла модуля"
 TG_URL = "https://t.me/mescr_m"
@@ -103,7 +104,7 @@ def _build_preview_text(meta: dict, file_name: str, existing=None) -> str:
     ] + _link_lines(meta) + [
         visual.item(f"описание  {meta['description'] or '—'}"),
         "",
-        visual.section(f"Команды · {len(commands)}"),
+        visual.section(f"Команды ({len(commands)})"),
         cmd_lines,
     ] + _requirements_lines(meta) + [
         "",
@@ -167,7 +168,7 @@ def _requirements_lines(meta):
         need = {spec for spec, _names in missing(normalize(reqs))}
     except Exception:
         need = set()
-    lines = ["", visual.section(f"Пакеты · {len(reqs)}")]
+    lines = ["", visual.section(f"Пакеты ({len(reqs)})")]
     for spec in reqs:
         lines.append(visual.item(f"<code>{html.escape(spec)}</code> — " + ("поставится при загрузке" if spec in need else "есть")))
     return lines
@@ -207,7 +208,7 @@ async def _offer_source(event, source: str, file_name: str, origin: str = None):
     existing = engine.modules.get(meta['module_name'])
     if existing is not None and existing.version == meta['version']:
         await engine.answer(event, visual.warn('Модуль уже загружен') + "\n" + visual.field('MODULE_NAME', meta['module_name'])
-                            + "\n" + visual.field('версия', existing.version) + "  " + visual.hint('та же самая'))
+                            + "\n" + visual.field('версия', existing.version) + "\n\n" + visual.hint('эта версия уже установлена'))
         return
     if existing is not None and existing.is_builtin:
         await engine.answer(event, visual.err('Это встроенный модуль — он обновляется вместе с FRX (.update)'))
@@ -261,60 +262,72 @@ async def _offer_source(event, source: str, file_name: str, origin: str = None):
         pass
 
 
-@decorators.command('loadmod', 'lm')
-async def loadmod_cmd(event):
-    """показывает превью модуля и загружает его после подтверждения (ответом на .py или .txt файл)"""
+def _file_name(msg):
+    """Имя файла сообщения ('' — файла нет). У telethon Document нет filename — берём Message.file.name."""
+    if msg is None or not getattr(msg, 'document', None):
+        return ''
+    f = getattr(msg, 'file', None)
+    return ((f.name if f else '') or '').strip()
+
+
+async def _loadmod(event, file_msg, own: bool):
+    """
+    Превью и загрузка модуля из файла file_msg. own=True — команда в подписи к самому файлу: это сообщение
+    не правим и не удаляем (иначе пропал бы файл), отвечаем на него отдельным сообщением.
+    """
+    status = None
+
+    async def say(text):
+        nonlocal status
+        if not own:
+            return await engine.answer(event, text)
+        if status is None:
+            status = await engine.reply(event, text)
+        else:
+            await engine.answer(status, text)
+        return status
+
     try:
-        if not event.is_reply:
-            await engine.answer(
-                event,
-                visual.err('Ответьте на .py или .txt файл с модулем'),
-            )
+        file_name = _file_name(file_msg)
+        if not file_name:
+            await say(visual.err('Нужен файл, а не текст: .py или .txt'))
             return
-
-        replied_msg = await event.get_reply_message()
-
-        if not replied_msg.document:
-            await engine.answer(
-                event,
-                visual.err('Ответьте на файл, а не на текст'),
-            )
-            return
-
-        # filename может быть None (не только отсутствовать) —
-        # раньше .endswith() на None падал необработанным исключением.
-        # у telethon.types.Document нет атрибута filename (getattr всегда
-        # возвращал '' и .loadmod отклонял ЛЮБОЙ файл) — имя берём из Message.file.name.
-        file_name = ((replied_msg.file.name if replied_msg.file else '') or '').strip()
         if not file_name.lower().endswith(ALLOWED_EXTENSIONS):
-            await engine.answer(
-                event,
-                visual.err('Файл должен иметь расширение .py или .txt'),
-            )
+            await say(visual.err('Файл должен иметь расширение .py или .txt'))
             return
 
-        await engine.answer(event, visual.wait('Анализирую файл…'))
+        await say(visual.wait('Анализирую файл…'))
 
-        path = await replied_msg.download_media()
+        path = await file_msg.download_media()
         try:
             source = Path(path).read_text(encoding='utf-8')
         finally:
-            # временная копия на диске (data/... от download_media)
-            # раньше никогда не удалялась — чистим за собой.
+            # временная копия на диске (data/... от download_media) — чистим за собой
             try:
                 if path and os.path.exists(path):
                     os.remove(path)
             except Exception:
                 pass
 
-        await _offer_source(event, source, file_name)
+        # _offer_source в конце удаляет сообщение-команду — при own это наш ответ, а не файл
+        await _offer_source(status if own else event, source, file_name)
 
     except Exception as e:
-        await engine.answer(
-            event,
-            visual.err('Ошибка при загрузке модуля') + f"\n<code>{html.escape(str(e))}</code>",
-        )
+        await say(visual.err('Ошибка при загрузке модуля') + f"\n<code>{html.escape(str(e))}</code>")
         engine.tlog(f"Ошибка загрузки модуля: {e}")
+
+
+@decorators.command('loadmod', 'lm')
+async def loadmod_cmd(event):
+    """показывает превью модуля и загружает его после подтверждения (ответом на .py/.txt или в подписи к файлу)"""
+    msg = getattr(event, 'message', None)
+    if _file_name(msg):                                  # .lm в подписи к самому файлу
+        await _loadmod(event, msg, own=True)
+        return
+    if not event.is_reply:
+        await engine.answer(event, visual.err('Ответьте на .py или .txt файл с модулем (или напишите .lm в подписи к файлу)'))
+        return
+    await _loadmod(event, await event.get_reply_message(), own=False)
 
 
 NEWMOD_TEMPLATE = '''"""
@@ -603,7 +616,8 @@ def _unloaded_list_text(entries):
     hidden = 0
     for e in entries:
         line = (
-            visual.item(f"<b>{e['name']}</b>  <code>{e['module_name']}</code> · <code>{e['version']}</code>{_unloaded_flags(e)}")
+            visual.item(f"<b>{e['name']}</b>  <code>{e['module_name']}</code>{_unloaded_flags(e)}")
+            + "\n" + visual.item(f"версия <code>{e['version']}</code>", 1)
             + "\n" + visual.item(f"<code>{e['file']}</code>", 1)
         )
         if hidden or used + len(line) + 1 > RESTORE_TEXT_LIMIT:
@@ -631,9 +645,9 @@ def _restore_picker(entries, page, query=None):
     rows, page, total = engine.picker_page(items, page, per_page=RESTORE_PAGE_SIZE, page_callback="rs_page:", search=search)
     rows.append([(visual.btn('К списку выгруженных', 'back'), "rs_menu")])
     if query:
-        text = visual.title('Восстановление', f"поиск «{html.escape(query)}» · найдено: {len(items)}")
+        text = visual.title('Восстановление', f"поиск «{html.escape(query)}»\nнайдено: {len(items)}")
     else:
-        text = visual.title('Восстановление', f"выберите модуль · страница {page + 1}/{total}")
+        text = visual.title('Восстановление', f"выберите модуль\nстраница {page + 1} из {total}")
     return text, rows, page
 
 
@@ -650,7 +664,7 @@ def _restore_card_text(e):
         visual.field('автор', e['author'], code=False),
         visual.field('файл', f"user/modules/unloaded/{e['file']}") + _unloaded_flags(e),
         "",
-        visual.section(f"Команды · {len(cmds)}"),
+        visual.section(f"Команды ({len(cmds)})"),
         cmd_str,
     ])
 
@@ -799,7 +813,7 @@ async def restoremods_cmd(event):
             return
 
         _bind_restore_form(form, focus=focus)
-        await engine.answer(event, visual.ok('Выгруженные модули') + "  " + visual.hint('ниже'))
+        await engine.answer(event, visual.ok('Выгруженные модули') + "\n" + visual.hint('список — ниже'))
 
     except Exception as e:
         await engine.answer(
@@ -1075,8 +1089,9 @@ async def dlm_cmd(event):
     """установить модуль из репозиториев: <имя> или <ссылка на .py>; upd — проверить обновления"""
     arg = engine.get_args().strip()
     if not arg:
-        await engine.answer(event, visual.err('Какой модуль? .dlm weather · .dlm <ссылка> · .dlm upd') + "\n"
-                            + visual.hint('весь каталог — .modlist'))
+        await engine.answer(event, visual.err('Какой модуль?') + "\n\n"
+                            + visual.hints('.dlm weather — найти по имени', '.dlm &lt;ссылка&gt; — по прямой ссылке',
+                                           '.dlm upd — проверить обновления', '.modlist — весь каталог'))
         return
     if arg.lower() in ('upd', 'update', 'обновить'):
         await _updates(event)
@@ -1095,7 +1110,7 @@ async def dlm_cmd(event):
             msg = visual.err(f"Не нашёл «{html.escape(arg)}» в репозиториях")
             if errors:
                 msg += "\n" + "\n".join(visual.warn(f"{html.escape(u)}: {html.escape(e)}") for u, e in errors.items())
-            await engine.answer(event, msg + "\n" + visual.hint('все модули — .modlist · репозитории — .repo'))
+            await engine.answer(event, msg + "\n\n" + visual.hints('все модули — .modlist', 'репозитории — .repo'))
             return
         if len(found) > 1:
             await _pick_list(event, found, f"Нашлось {len(found)}: «{html.escape(arg)}»")
@@ -1159,7 +1174,7 @@ async def _catalog_form(event, repos, query='', scope=None, preset=None):
 
     def view_repos():
         total = sum(len(v) for v in by_url.values())
-        lines = [visual.title('Каталог модулей', f"{len(by_url)} репоз. · {total} модулей"),
+        lines = [visual.title('Каталог модулей', f"репозиториев: {len(by_url)}\nмодулей: {total}"),
                  visual.hint('выберите репозиторий или найдите модуль по названию во всех сразу')]
         rows = []
         for i, (url, ents, err) in enumerate(repos):
@@ -1180,8 +1195,8 @@ async def _catalog_form(event, repos, query='', scope=None, preset=None):
         if st['preset'] is not None:
             head = st['preset'][1]
         else:
-            head = where() + (f" · «{html.escape(st['query'])}»" if st['query'] else "") + f" · {len(lst)}"
-        lines = [visual.title('Каталог модулей', head + (f" · стр. {st['page'] + 1}/{total}" if total > 1 else ""))]
+            head = where() + (f"\nпоиск «{html.escape(st['query'])}»" if st['query'] else "") + f"\nмодулей: {len(lst)}"
+        lines = [visual.title('Каталог модулей', head + (f"\nстраница {st['page'] + 1} из {total}" if total > 1 else ""))]
         if not lst:
             lines.append(visual.err('Ничего не нашлось' if st['query'] else 'Модулей нет'))
         if st['scope'] and errors.get(st['scope']):
@@ -1207,7 +1222,7 @@ async def _catalog_form(event, repos, query='', scope=None, preset=None):
                  *_link_lines(meta),
                  visual.field('файл', f"{_repo_label(e['repo'])}/{e['path']}")]
         if cmds:
-            lines += ["", visual.section(f"Команды · {len(cmds)}"),
+            lines += ["", visual.section(f"Команды ({len(cmds)})"),
                       visual.item(", ".join(f"<code>.{html.escape(n[0])}</code>" for n in cmds[:25]))]
         lines += _requirements_lines(meta)
         newer = cur is not None and _vkey(meta.get('version')) > _vkey(cur.version)
@@ -1229,7 +1244,7 @@ async def _catalog_form(event, repos, query='', scope=None, preset=None):
         lst = current_list() if st['view'] == 'list' else all_entries()
         lines = [visual.title('Каталог модулей', f"{len(lst)}")] + [
             visual.item(f"<code>{html.escape(_stem(e['file']))}</code> — {html.escape(_repo_label(e['repo']))}") for e in lst[:80]]
-        await engine.answer(event, "\n".join(lines) + "\n\n" + visual.hint('установить — .dlm имя · поиск — .modlist имя'))
+        await engine.answer(event, "\n".join(lines) + "\n\n" + visual.hints('установить — .dlm имя', 'поиск — .modlist имя'))
         return
     try:
         await event.delete()
@@ -1454,5 +1469,6 @@ async def repo_cmd(event):
         lines.append(f"{i}. <a href=\"{html.escape(url)}\">{html.escape(_repo_label(url))}</a> — {html.escape(n)}")
     if not repos:
         lines.append(visual.hint('пусто — .repo add <ссылка> или .repo reset'))
-    lines += ["", visual.hint('.repo add <ссылка> · .repo del <№> · .modlist — каталог · .dlm имя — установить')]
+    lines += ["", visual.hints('.repo add &lt;ссылка&gt; — добавить', '.repo del &lt;№&gt; — убрать',
+                               '.modlist — каталог', '.dlm имя — установить')]
     await engine.answer(event, "\n".join(lines))

@@ -125,14 +125,15 @@ async def _confidential_text():
         v.field('id', me.id),
         v.field('имя', html.escape(me.first_name or '—'), code=False),
         "",
-        v.section(f"Аккаунты · {len(accounts.account_list())}"),
+        v.section(f"Аккаунты ({len(accounts.account_list())})"),
     ]
     for number in accounts.account_list():
         info = accounts.account_info(number)
         acc = info.get('info', {})
         name = html.escape(acc.get('first_name') or '—')
         username = f"@{acc['username']}" if acc.get('username') else '—'
-        lines.append(v.item(f"<code>{info['phone']}</code>  {name} · {html.escape(username)} · id <code>{acc.get('id', '—')}</code>"))
+        lines.append(v.item(f"<code>{info['phone']}</code>  {name}"))
+        lines.append(v.item(f"{html.escape(username)}, id <code>{acc.get('id', '—')}</code>", 1))
     lines += [
         "",
         v.section('Стационарный бот'),
@@ -183,7 +184,7 @@ async def info_cmd(event):
             await click.answer()
             await form.edit(await _public_text(), buttons=OPEN)
 
-        await engine.answer(event, visual.ok('FRX · Info') + "  " + visual.hint('ниже'))
+        await engine.answer(event, visual.ok('FRX · Info') + "\n" + visual.hint('сведения — ниже'))
 
     except Exception as e:
         await engine.answer(event, visual.err('Ошибка') + f"\n<code>{html.escape(str(e))}</code>")
@@ -217,7 +218,7 @@ async def doctor_cmd(event):
     import sys
     await engine.answer(event, visual.wait("Проверяю окружение…"))
     ok, warn, bad = visual.visual('status_success'), visual.visual('status_warning'), visual.visual('status_error')
-    lines = [visual.title("FRX · Doctor", sub="проверка окружения"), ""]
+    lines = [visual.title("FRX · Doctor", sub="проверка окружения")]
     problems = 0
 
     def row(state, label, text, fix=None):
@@ -237,7 +238,7 @@ async def doctor_cmd(event):
         if v is None:
             row(bad, pkg, "не установлен", f"pip install -r requirements.txt")
         elif _vtuple(v) < need:
-            row(warn, pkg, f"<code>{v}</code> · {why}", f"обновите: pip install -U \"{pkg}>={'.'.join(map(str, need))}\"")
+            row(warn, pkg, f"<code>{v}</code> — {why}", f"обновите: pip install -U \"{pkg}>={'.'.join(map(str, need))}\"")
         else:
             row(ok, pkg, f"<code>{v}</code>")
 
@@ -256,7 +257,7 @@ async def doctor_cmd(event):
         try:
             me = await bot.get_me()
             inline = getattr(me, 'supports_inline_queries', None)
-            row(ok if inline is not False else bad, "бот", f"@{html.escape(me.username or '?')}" + ("" if inline is not False else " · инлайн-режим выключен"),
+            row(ok if inline is not False else bad, "бот", f"@{html.escape(me.username or '?')}" + ("" if inline is not False else ", инлайн-режим выключен"),
                 "включите инлайн-режим: /setinline в @BotFather (или .restart — Startup включит сам)")
         except Exception as e:
             row(bad, "бот", f"не отвечает: <code>{html.escape(str(e)[:120])}</code>", "проверьте aiogram_token в user/config.json")
@@ -267,14 +268,14 @@ async def doctor_cmd(event):
 
     web = getattr(engine, 'web', None)
     if web is not None:
-        row(ok, "сайт", f"работает · порт <code>{web.port}</code>" if web.running else "выключен (.web — включить)")
+        row(ok, "сайт", f"работает, порт <code>{web.port}</code>" if web.running else "выключен (.web — включить)")
         if web.tunnel_wanted():
             st = web.tunnel_state()
             mode = web.tunnel_setup().get('mode') or 'auto'
             if st.get('status') == 'up':
-                row(ok, "публичный адрес", f"<code>{html.escape(st.get('url', ''))}</code> · способ {html.escape(mode)}")
+                row(ok, "публичный адрес", f"<code>{html.escape(st.get('url', ''))}</code> ({html.escape(mode)})")
             else:
-                row(warn, "публичный адрес", f"{html.escape(str(st.get('status') or 'нет'))} · способ {html.escape(mode)}",
+                row(warn, "публичный адрес", f"{html.escape(str(st.get('status') or 'нет'))} ({html.escape(mode)})",
                     html.escape(str(st.get('error') or 'подождите — keeper пробует сам; .web tunnel setup — постоянный адрес')[:200]))
     row(ok if shutil.which('ssh') else warn, "ssh", "есть" if shutil.which('ssh') else "нет",
         "нужен для запасного публичного адреса (localhost.run): Windows — «Дополнительные компоненты» → OpenSSH Client")

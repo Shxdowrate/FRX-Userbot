@@ -7,6 +7,8 @@ modules/builtin/Aliases.py — алиасы команд: свои коротк�
     .alias                                        список алиасов
     .unalias <имя>                                удалить
 
+    .layout [on|off]                              команды в неверной раскладке: «юзштп» → .ping (по умолчанию вкл)
+
 Последнее слово — новое имя, первое — команда, всё между ними — аргументы. Алиас не может совпадать с
 существующей командой (команда всегда главнее). На сайте алиасы — внизу вкладки «конфиги».
 Логика — core/access.py (engine.aliases). Модуль доступен только владельцу.
@@ -22,9 +24,9 @@ from core.access import AccessError
 
 NAME = "Aliases"
 MODULE_NAME = "aliases"
-VERSION = "1.0"
+VERSION = "1.1"
 AUTHOR = "FRX"
-DESCRIPTION = "Алиасы команд: .alias <команда> [аргументы] <новое_имя>"
+DESCRIPTION = "Алиасы команд (.alias <команда> [аргументы] <новое_имя>) и команды в неверной раскладке (.layout)"
 TG_URL = "https://t.me/mescr_m"
 GIT_URL = "https://github.com/Shxdowrate/FRX-Userbot/blob/main/modules/builtin/Aliases.py"
 
@@ -50,7 +52,7 @@ async def alias_cmd(event):
         items = engine.aliases.all()
         lines = [visual.title("Алиасы")]
         if not items:
-            lines.append(visual.hint(f"пока нет. Пример: {prefix}alias help h · {prefix}alias config helper c"))
+            lines.append(visual.hints("пока нет", f"пример: {prefix}alias help h", f"или: {prefix}alias config helper c"))
         for name, a in sorted(items.items()):
             alive = '' if a['command'] in engine.command_map else '  ' + visual.hint('(команды нет)')
             lines.append(visual.item(f"<code>{_esc(prefix + name)}</code> → <code>{_esc(prefix + _target(a))}</code>{alive}"))
@@ -91,3 +93,29 @@ async def unalias_cmd(event):
         await engine.answer(event, visual.err(_esc(e)))
         return
     await engine.answer(event, visual.ok(f"Алиас {_esc(prefix + name)} удалён"))
+
+
+@decorators.on_start()
+async def setup_configs():
+    await engine.create_config(
+        key='layout_commands',
+        description='Понимать команды, набранные в русской раскладке: «юзштп» → .ping (только ваши сообщения; '
+                    'аргументы не переводятся; кириллические команды главнее)',
+        data_type='bool', default=True,
+    )
+
+
+@decorators.command('layout')
+async def layout_cmd(event):
+    """команды в неверной раскладке (юзштп → .ping): on / off, без аргументов — показать"""
+    prefix = await engine.get_prefix()
+    arg = engine.get_args().strip().lower()
+    if arg in ('on', 'off', 'вкл', 'выкл', '1', '0'):
+        await engine.edit_config('layout_commands', 'edit', arg in ('on', 'вкл', '1'))
+    elif arg:
+        await engine.answer(event, visual.err(f"Формат: {_esc(prefix)}layout on | off"))
+        return
+    on = await engine.get_config('layout_commands')
+    example = ('ю' if prefix == '.' else _esc(prefix)) + 'зштп'
+    await engine.answer(event, visual.ok("Команды в неверной раскладке: " + ("вкл" if on else "выкл")) + "\n"
+                        + visual.hints(f"{example} → {_esc(prefix)}ping", f"переключить: {_esc(prefix)}layout {'off' if on else 'on'}"))

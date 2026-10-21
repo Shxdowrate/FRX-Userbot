@@ -256,7 +256,8 @@ async def _panel(freed=None):
     lines = [visual.title("Файлы FRX", sub="что можно убрать")]
     for k, (title, note, _safe) in CATEGORIES.items():
         label = title if k != "files" else f"{title} (старше {days:g} дн.)"
-        lines.append(visual.field(f"{_esc(label)} · <i>{_esc(note)}</i>", _size(sizes[k])))
+        lines.append(visual.field(_esc(label), _size(sizes[k])))
+        lines.append(visual.item(f"<i>{_esc(note)}</i>", 1))
     total_safe = sum(sizes[k] for k in SAFE)
     lines += ["", visual.field("безопасно освободить", _size(total_safe))]
     if freed is not None:
@@ -323,7 +324,7 @@ async def fclean_cmd(event):
         form = await engine.create_inlineform(event.chat_id, text, buttons=buttons)
     except Exception:
         prefix = await engine.get_prefix()
-        await engine.answer(event, text + "\n\n" + visual.hint(f"{prefix}fclean all · {prefix}fclean cache · …"))
+        await engine.answer(event, text + "\n\n" + visual.hints(f"{prefix}fclean all — убрать всё безопасное", f"{prefix}fclean cache — только кэш"))
         return
 
     @form.on_click(data_startswith="fc:")

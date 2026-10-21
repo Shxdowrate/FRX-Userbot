@@ -26,6 +26,7 @@ namespace модуля больше нет — _build_namespace() отдаёт �
 """
 
 import asyncio
+import copy as _copy
 import difflib
 import html as _html
 import os
@@ -64,6 +65,17 @@ from .html_utils import safe_html, html_with_entities, install_telethon_emoji_ta
 install_telethon_emoji_tags()    # parse_mode="html" у Telethon понимает и <emoji document_id=…>
 from .module_meta import parse_module_meta, normalize_module_link, tg_username
 from .command_event import CommandEvent
+from . import clicks as _clicks
+_clicks.install()                # msg.click("текст кнопки"), msg.click(0, 1, wait="edit") — см. core/clicks.py
+
+# раскладка ЙЦУКЕН → QWERTY (те же клавиши): «юзштп» → «.ping». См. Core._layout_command()
+_RU_TO_EN = str.maketrans('йцукенгшщзхъфывапролджэячсмитьбюё', "qwertyuiop[]asdfghjkl;'zxcvbnm,.`")
+_FIRST_WORD_RE = re.compile(r'(\S+)(.*)\Z', re.S)
+
+# «Мгновенные» инлайн-формы: заранее запрошенный инлайн-результат-заглушка (см. Core._refill_form_pool)
+FORM_POOL_PREFIX = 'frxpool:'
+FORM_POOL_TTL = 120          # сек: старше — заготовку не используем (сколько Telegram её держит, не документировано)
+FORM_POOL_REFRESH = 60       # сек: фоновое обновление заготовки
 from .botlog import BotLogLimiter
 from .inline_forms import picker_page
 from .bot_events import BotMessageEvent, BotChatMemberEvent
@@ -75,7 +87,7 @@ from .paths import ASSETS_DIR, BUILTIN_DIR, FILES_DIR, MODULES_DIR, SESSION_PATH
 # Версия ЯДРА FRX (не путать с VERSION отдельных модулей, см. ModuleInfo) —
 # правится вручную при каждом обновлении движка. Показывается в .about
 # (modules/builtin/Helper.py) и в баннере запуска (main.py).
-FRX_VERSION = "1.0.2"
+FRX_VERSION = "1.0.3"
 
 # Папки (подробно — core/paths.py):
 #   ASSETS_DIR      — стоковые статичные файлы FRX (assets/ проекта, обновляются вместе с кодом);
@@ -195,6 +207,15 @@ class Core:
     search_items = staticmethod(search_items)          # поиск по списку для SearchButton, см. core/inline_forms.py
     safe_html = staticmethod(safe_html)                # экранирование НЕ-тегов в HTML, см. core/html_utils.py
     parse_module_meta = staticmethod(parse_module_meta)  # статический разбор исходника модуля, см. core/module_meta.py
+    find_button = staticmethod(_clicks.find_button)    # (ряд, кнопка) по номеру / тексту / функции, см. core/clicks.py
+
+    async def click(self, message, button=0, col=None, *, wait=None, timeout=None, refresh=False):
+        """
+        Нажать инлайн-кнопку сообщения от имени юзербота: engine.click(msg, 0, 1) / (msg, "Атаковать") /
+        (msg, (1, 0)) / (msg, lambda b: …). wait: None (только отправить, ~0.25 с) | 'edit' | 'new' | 'delete' |
+        'answer'. Подробно — core/clicks.py и README «Клики по кнопкам».
+        """
+        return await _clicks.click(message, button, col, wait=wait, timeout=timeout, refresh=refresh)
 
     def __init__(self, config: dict):
         self.config = config
@@ -261,6 +282,10 @@ class Core:
 
         # инлайн-формы (core/inline_forms.py)
         self._pending_forms: dict[str, dict] = {}     # form_id -> {'future', 'chat_id'}
+        self._form_pool = None                        # {'result', 'token', 'at', 'client'} — заготовка-заглушка формы
+        self._form_pool_tokens: set = set()           # токены заготовок, на которые бот отвечает заглушкой
+        self._form_pool_lock = asyncio.Lock()
+        self._form_pool_task = None
         self._active_forms: dict[int, InlineForm] = {}  # inline_message_id -> InlineForm
         self._member_cache: dict[tuple, tuple] = {}    # (chat_id, user_id) -> (bool, expires_at)
         self._click_bucket = TokenBucket(rate=5)        # обновляется modules/builtin/InlineStuff.py
@@ -433,6 +458,8 @@ class Core:
 
         if dp is not None:
             self._bot_ready = True
+            if self._form_pool_task is None or self._form_pool_task.done():
+                self._form_pool_task = asyncio.create_task(self._form_pool_loop())
             # "После всех инициализаций": юзербот к этому моменту уже
             # полностью стартовал (core.start() отработал раньше него,
             # см. main.py), а стационарный бот только что подключился —
@@ -795,9 +822,20 @@ class Core:
 
             prefix = await self.get_prefix()
             text = event.raw_text or ''
+            run_event = event
+
+            # «юзштп» → «.ping»: команда владельца, набранная не в той раскладке (настройка aliases.layout_commands)
+            if event.out and text:
+                fixed = await self._layout_command(text, prefix)
+                if fixed is not None:
+                    run_event, text = CommandEvent(event, fixed), fixed
+                    try:
+                        event.frx_layout_command = fixed     # вотчерам (qwerty и т.п.): это уже команда, не трогать
+                    except Exception:
+                        pass
 
             if text.startswith(prefix) and (event.out or self.access.has_users()):
-                await self._dispatch_command(event, text, prefix)
+                await self._dispatch_command(run_event, text, prefix)
 
             # вотчеры видят вообще ВСЕ сообщения, включая команды
             for module_name, func in list(self.watchers):
@@ -840,6 +878,37 @@ class Core:
             'cooldown': float(await cfg('guest_cooldown', 1.0)),
             'log': bool(await cfg('log_guest_commands', True)),
         }
+
+    async def _layout_command(self, text, prefix):
+        """
+        Текст команды с первым словом, переведённым из русской раскладки в английскую («юзштп» → «.ping»,
+        «.зштп» → «.ping»), или None. Аргументы не трогаем — их могли набрать по-русски нарочно. Срабатывает,
+        только если такая команда (или алиас) есть, а слово как есть командой не является; выключается
+        настройкой layout_commands модуля aliases (.layout off).
+        """
+        m = _FIRST_WORD_RE.match(text)
+        if not m:
+            return None
+        word = m.group(1).lower()
+        if word.isascii():                               # обычная команда или латиница — дальше не смотрим
+            return None
+        if word.startswith(prefix) and self._is_command(word[len(prefix):]):
+            return None                                  # кириллическая команда (.л) — главнее перевода
+        cand = word.translate(_RU_TO_EN)
+        if not cand.startswith(prefix):
+            return None
+        cmd = cand[len(prefix):]
+        if not cmd or not cmd.isascii() or not self._is_command(cmd):
+            return None
+        try:
+            if not await self.get_config('layout_commands', module_name='aliases'):
+                return None
+        except KeyError:
+            pass                                         # модуль aliases ещё не объявил настройку — по умолчанию вкл
+        return prefix + cmd + m.group(2)
+
+    def _is_command(self, name):
+        return bool(name) and (name in self.command_map or (self.aliases._data is not None and self.aliases.get(name) is not None))
 
     async def _dispatch_command(self, event, text, prefix):
         """
@@ -1661,7 +1730,12 @@ class Core:
 
     async def _botlog_deliver(self, text: str):
         chat_id = await self._botlog_cfg('log_chat_id', 0) or self._owner_id
-        await self.bot.send_message(chat_id, text)
+        if chat_id == self._owner_id:
+            # в ЛС владельцу — как bot_send_to_owner: нет диалога / бот в ЧС → юзербот сам пишет боту /start и повторяет.
+            # Раньше такое сообщение (в т.ч. «Юзербот запущен») молча терялось, оставалась строка в терминале.
+            await self.bot_send_to_owner(text)
+        else:
+            await self.bot.send_message(chat_id, text)
 
     # ------------------------------------------------------------------ #
     # отправка владельцу ОТ ИМЕНИ стационарного бота (в ЛС бота)
@@ -2094,7 +2168,15 @@ class Core:
                              options: list = None):
         """
         Создаёт конфиг для текущего модуля (тип может быть 'list', а также
-        'choice'/'choices' и 'link').
+        'choice'/'choices', 'link' и 'dict').
+
+        'dict' — словарь «ключ → значение» (ключи — строки, значения — строки), например триггер → ответ:
+        default={'привет': 'и тебе привет'}. Правка: edit_config(key, 'add', ('ключ', 'значение')) — добавить
+        или заменить пару (можно строкой «ключ = значение» или словарём), 'del' — по ключу, 'edit' — весь словарь.
+
+        Если модуль сменил тип уже созданной настройки (например, 'str' → 'list'), значение переносится:
+        строка → список из неё, список → первый элемент, список → словарь с пустыми значениями и т.п.;
+        перенести нельзя — ставится default.
 
         'link' — ссылка: значение проверяется на то, что это настоящий адрес
         http(s):// или tg://, и приводится к полному виду (example.com -> https://example.com,
@@ -2126,9 +2208,27 @@ class Core:
         # объявил в текущем запуске — см. _cleanup_stale_configs().
         self._declared_config_keys.setdefault(module_name, set()).add(key)
 
+        if data_type == 'dict':
+            default = self._normalize_dict(key, {} if default is None else default)
+
         config = await self.db.get(self._config_key(module_name), {})
+        if key in config and config[key].get('type', 'str') != data_type:
+            # модуль сменил тип настройки (str → list, list → dict…): переносим значение, если это возможно,
+            # иначе — значение по умолчанию. Раньше в базе так и оставался старый тип и старое значение.
+            old_entry = config.pop(key)
+            migrated = self._migrate_config_value(old_entry.get('value'), old_entry.get('type', 'str'), data_type, default,
+                                                  valid, options)
+            config[key] = {'value': _copy.deepcopy(migrated), 'description': description, 'type': data_type, 'valid': valid,
+                           'default': default, 'options': options}
+            await self.db.set(self._config_key(module_name), config)
+            return migrated
         if key in config:
             entry = config[key]
+            # описание из кода главнее сохранённого: модуль мог его уточнить
+            if description and entry.get('description') != description:
+                entry['description'] = description
+                config[key] = entry
+                await self.db.set(self._config_key(module_name), config)
             # Конфиг без поля 'default' (созданный ранними сборками,
             # нужного для edit_config(key, 'to_default', ...)) — досоздаём его
             # тем значением default, которое модуль передаёт сейчас в
@@ -2167,7 +2267,7 @@ class Core:
             self._validate_config_value(key, data_type, valid, default)
 
         config[key] = {
-            'value': default,
+            'value': _copy.deepcopy(default),           # не общий объект с default: правка списка не портит умолчание
             'description': description,
             'type': data_type,
             'valid': valid,
@@ -2180,7 +2280,7 @@ class Core:
     async def edit_config(self, key, operation_type, value=None, module_name=None):
         """
         Редактирует значение конфига.
-        operation_type: 'edit' (int/float/bool/str/choice), 'add'/'del' (list/choices),
+        operation_type: 'edit' (int/float/bool/str/choice/dict), 'add'/'del' (list/choices/dict),
         'to_default' — работает для ЛЮБОГО типа (в т.ч. list/choices),
         просто возвращает конфигу то значение, с которым он был создан
         (поле 'default', см. create_config()); value при этом игнорируется.
@@ -2202,12 +2302,28 @@ class Core:
         entry = config[key]
 
         if operation_type == 'to_default':
-            entry['value'] = entry.get('default')
+            entry['value'] = _copy.deepcopy(entry.get('default'))
             config[key] = entry
             await self.db.set(self._config_key(module_name), config)
+            self._on_config_changed(module_name, key, entry['value'])
             return entry['value']
 
-        if entry['type'] == 'list':
+        if entry['type'] == 'dict':
+            cur = dict(entry.get('value') or {})
+            if operation_type == 'add':
+                for k, v in self._dict_items(key, value):
+                    cur[k] = v
+            elif operation_type == 'del':
+                k = str(value[0] if isinstance(value, (list, tuple)) and value else value).strip()
+                if k not in cur:
+                    raise ValueError(f"Ключа '{k}' нет в словаре '{key}'")
+                del cur[k]
+            elif operation_type == 'edit':
+                cur = self._normalize_dict(key, value)
+            else:
+                raise ValueError("Для конфига-словаря operation_type должен быть 'add', 'del' или 'edit'")
+            entry['value'] = cur
+        elif entry['type'] == 'list':
             entry.setdefault('value', [])
             if operation_type == 'add':
                 entry['value'].append(value)
@@ -2252,7 +2368,135 @@ class Core:
 
         config[key] = entry
         await self.db.set(self._config_key(module_name), config)
+        self._on_config_changed(module_name, key, entry['value'])
         return entry['value']
+
+    def _on_config_changed(self, module_name, key, value):
+        """Настройки, которые ядро применяет сразу, без перезапуска."""
+        if module_name == 'config' and key == 'premium_emoji':
+            visual_module.set_premium(bool(value))
+
+    # ---- словарь ('dict') и перенос значения при смене типа ----
+
+    _DICT_SEPARATORS = ('=>', '→', '=', ':')
+
+    def _dict_items(self, key, value):
+        """[(ключ, значение)] из ('k', 'v') / ['k', 'v'] / {'k': 'v'} / строки «k = v» (или k: v, k → v)."""
+        if isinstance(value, dict):
+            pairs = list(value.items())
+        elif isinstance(value, (list, tuple)) and len(value) == 2 and not isinstance(value[0], (list, tuple, dict)):
+            pairs = [tuple(value)]
+        elif isinstance(value, str):
+            pairs = [self._parse_dict_pair(key, value)]
+        else:
+            raise ValueError(f"Словарь '{key}': ожидалась пара «ключ = значение»")
+        out = []
+        for k, v in pairs:
+            k = str(k).strip()
+            if not k:
+                raise ValueError(f"Словарь '{key}': ключ не может быть пустым")
+            out.append((k, '' if v is None else str(v).strip()))
+        return out
+
+    _QUOTES = {'"': '"', "'": "'", '«': '»', '“': '”'}
+
+    def _read_quoted(self, text, i):
+        """text[i] — открывающая кавычка. -> (содержимое, индекс после закрывающей) или None. \\" внутри — кавычка."""
+        close = self._QUOTES[text[i]]
+        out, j = [], i + 1
+        while j < len(text):
+            ch = text[j]
+            if ch == '\\' and j + 1 < len(text) and text[j + 1] in (close, '\\'):
+                out.append(text[j + 1])
+                j += 2
+                continue
+            if ch == close:
+                return ''.join(out), j + 1
+            out.append(ch)
+            j += 1
+        return None
+
+    def _parse_dict_pair(self, key, text):
+        """
+        «ключ = значение» -> (ключ, значение). Разделитель: =, :, → или =>. Если в ключе или значении есть
+        разделитель — берите его в кавычки ("…", '…' или «…»): "время: утро" = "кофе = да".
+        Без кавычек ключ — всё до первого разделителя, значение — всё после него.
+        """
+        t = text.strip()
+        hint = f"Словарь '{key}': пишите «ключ = значение» (с двоеточием или «=» внутри — в кавычках: \"а:б\" = \"в=г\")"
+        if t and t[0] in self._QUOTES:
+            got = self._read_quoted(t, 0)
+            if got is None:
+                raise ValueError(f"Словарь '{key}': не закрыта кавычка в ключе")
+            k, pos = got
+            rest = t[pos:].lstrip()
+            sep = next((x for x in self._DICT_SEPARATORS if rest.startswith(x)), None)
+            if sep is None:
+                raise ValueError(hint)
+            v = rest[len(sep):].strip()
+        else:
+            hits = [(t.find(x), x) for x in self._DICT_SEPARATORS if x in t]
+            if not hits:
+                raise ValueError(hint)
+            idx, sep = min(hits, key=lambda h: (h[0], -len(h[1])))   # самый левый; «=>» раньше «=»
+            k, v = t[:idx], t[idx + len(sep):].strip()
+        if v and v[0] in self._QUOTES:
+            got = self._read_quoted(v, 0)
+            if got is None or v[got[1]:].strip():
+                raise ValueError(f"Словарь '{key}': значение в кавычках — после закрывающей кавычки ничего не пишите")
+            v = got[0]
+        return k, v
+
+    def _normalize_dict(self, key, value):
+        if isinstance(value, str):
+            import json as _json
+            try:
+                value = _json.loads(value) if value.strip() else {}
+            except ValueError:
+                raise ValueError(f"Словарь '{key}': ожидался JSON-объект вида {{\"ключ\": \"значение\"}}")
+        if not isinstance(value, dict):
+            raise ValueError(f"Словарь '{key}': значение должно быть словарём")
+        return dict(self._dict_items(key, value)) if value else {}
+
+    def _migrate_config_value(self, value, old_type, new_type, default, valid, options):
+        """Значение старого типа → новый тип; не получилось — default."""
+        try:
+            seq = value if isinstance(value, list) else ([] if value in (None, '') else [value])
+            if new_type == 'list':
+                if isinstance(value, dict):
+                    return [str(k) for k in value]
+                return [str(v) for v in seq]
+            if new_type == 'dict':
+                if isinstance(value, dict):
+                    return self._normalize_dict('?', value)
+                return {str(v).strip(): '' for v in seq if str(v).strip()}
+            if new_type in ('str', 'link'):
+                if isinstance(value, dict):
+                    value = next(iter(value), '')
+                elif isinstance(value, list):
+                    value = value[0] if value else ''
+                value = '' if value is None else str(value)
+                return self._normalize_link('?', value, valid) if new_type == 'link' else value
+            if new_type in ('int', 'float'):
+                if isinstance(value, list):
+                    value = value[0] if value else default
+                value = int(value) if new_type == 'int' else float(value)
+                if valid:
+                    self._validate_config_value('?', new_type, valid, value)
+                return value
+            if new_type == 'bool':
+                if isinstance(value, str):
+                    return value.strip().lower() in ('1', 'true', 'да', 'yes', 'on')
+                return bool(value)
+            if new_type == 'choice':
+                cand = value[0] if isinstance(value, list) and value else value
+                return cand if cand in (options or []) else default
+            if new_type == 'choices':
+                picked = [v for v in seq if v in (options or [])]
+                return picked or default
+        except Exception:
+            pass
+        return default
 
     async def delete_config(self, key):
         """Удаляет один из ключей конфига, не трогая остальные."""
@@ -2701,8 +2945,8 @@ class Core:
     # ------------------------------------------------------------------ #
 
     def tlog(self, text):
-        """Лог — отправляет text в терминал."""
-        print(f"[FRX] {text}")
+        """Лог — отправляет text в терминал (премиум-эмодзи — их обычными эмодзи)."""
+        print(f"[FRX] {visual_module.plain(text)}")
 
     def get_version(self):
         """Версия ЯДРА FRX (см. FRX_VERSION вверху этого файла), например '1.0.0'."""
@@ -2846,6 +3090,7 @@ class Core:
                                                  # edit() сразу после подтверждения
         }
 
+        pool_token = None
         try:
             bot_entity = await self._get_bot_entity()
             # раньше здесь был голый self.client.get_entity(chat_id),
@@ -2853,60 +3098,102 @@ class Core:
             # пользователя/чат в этой сессии (нет диалога/апдейта с ним) — см.
             # _resolve_entity() выше по файлу.
             chat_entity = await self._resolve_input_entity(chat_id)   # из кэша сессии, без запроса к Telegram
-
-            # client.inline_query() = аналог GetInlineBotResultsRequest, но
-            # без ручной сборки RPC; entity=chat_entity сразу задаёт чат,
-            # куда результат уйдёт по умолчанию при .click()
-            try:
-                results = await self.client.inline_query(bot_entity, form_id, entity=chat_entity)
-            except BotInlineDisabledError as e:
-                # понятная причина вместо голого BotInlineDisabledError
-                raise RuntimeError(
-                    "У стационарного бота выключен инлайн-режим (BotFather: /setinline). "
-                    "Перезапустите юзербот — Startup включит инлайн-режим и инлайн-фидбэк сам."
-                ) from e
-            if not results:
-                raise RuntimeError(
-                    "Бот не вернул результат на инлайн-запрос — проверьте, что "
-                    "у бота включён инлайн-режим (/setinline в BotFather)"
-                )
             reply_id = resolve_form_reply(current_event.get(), chat_id, reply_to)
-            if reply_id:
-                sent_msg = await results[0].click(reply_to=reply_id)      # форма — ответ на то же сообщение, что и команда
-            else:
-                sent_msg = await results[0].click()  # = SendInlineBotResultRequest, random_id генерится сам
 
-            try:
-                inline_message_id = await asyncio.wait_for(fut, timeout=confirm_timeout)
-            except asyncio.TimeoutError:
-                raise TimeoutError(
-                    "Бот не подтвердил форму за отведённое время — проверьте "
-                    "/setinlinefeedback 100% для бота в BotFather"
-                )
-        finally:
+            # «Мгновенная» форма: заготовка-заглушка уходит в чат одним запросом, содержимое бот подставит правкой
+            # после подтверждения. Не вышло (заготовка протухла, в чате запрещены инлайн-боты) — обычный путь ниже.
+            sent_msg = None
+            entry = self._take_form_pool() if media_ref is None else None
+            if entry is not None:
+                self._pending_forms[entry['token']] = {'future': fut, 'chat_id': chat_id, 'created_at': time.monotonic()}
+                try:
+                    sent_msg = await entry['result'].click(chat_entity, reply_to=reply_id or None)
+                    pool_token = entry['token']
+                except Exception as e:
+                    self._pending_forms.pop(entry['token'], None)
+                    self.tlog(f"[core] мгновенная форма не отправилась ({type(e).__name__}: {e}) — обычный путь")
+                asyncio.ensure_future(self._refill_form_pool(force=True))
+            elif media_ref is None:
+                asyncio.ensure_future(self._refill_form_pool())
+
+            if sent_msg is None:
+                # client.inline_query() = аналог GetInlineBotResultsRequest, но
+                # без ручной сборки RPC; entity=chat_entity сразу задаёт чат,
+                # куда результат уйдёт по умолчанию при .click()
+                try:
+                    results = await self.client.inline_query(bot_entity, form_id, entity=chat_entity)
+                except BotInlineDisabledError as e:
+                    # понятная причина вместо голого BotInlineDisabledError
+                    raise RuntimeError(
+                        "У стационарного бота выключен инлайн-режим (BotFather: /setinline). "
+                        "Перезапустите юзербот — Startup включит инлайн-режим и инлайн-фидбэк сам."
+                    ) from e
+                if not results:
+                    raise RuntimeError(
+                        "Бот не вернул результат на инлайн-запрос — проверьте, что "
+                        "у бота включён инлайн-режим (/setinline в BotFather)"
+                    )
+                if reply_id:
+                    sent_msg = await results[0].click(reply_to=reply_id)      # форма — ответ на то же сообщение, что и команда
+                else:
+                    sent_msg = await results[0].click()  # = SendInlineBotResultRequest, random_id генерится сам
+        except BaseException:
             self._pending_forms.pop(form_id, None)
+            if pool_token is not None:
+                self._pending_forms.pop(pool_token, None)
+            raise
 
+        # Форма уже в чате — возвращаем её сразу. inline_message_id (нужен для правок) бот получает отдельным
+        # апдейтом chosen_inline_result через полсекунды-секунду; раньше create_inlineform ждал его, и команда
+        # «висела». Теперь подтверждение ждётся фоном, а form.edit()/close()/… сами дождутся его, если успеют раньше.
         form = InlineForm(
-            core=self, form_id=form_id, inline_message_id=inline_message_id,
+            core=self, form_id=form_id, inline_message_id=None,
             chat_id=chat_id, owner_module=owner_module,
             for_user=for_user, black_list=black_list, timeout=timeout,
         )
         form.media = media_ref
         form.styles = styles
         form.message_id = getattr(sent_msg, 'id', None)    # для form.delete()
-        self._active_forms[inline_message_id] = form
+        form._ready = loop.create_future()
         form._init_state(text, buttons, pages)
+
+        async def _confirm():
+            try:
+                inline_message_id = await asyncio.wait_for(fut, timeout=confirm_timeout)
+            except asyncio.TimeoutError:
+                err = TimeoutError("Бот не подтвердил форму за отведённое время — проверьте "
+                                   "/setinlinefeedback 100% для бота в BotFather")
+                self.tlog(f"[core] инлайн-форма ({owner_module}): {err}")
+                form._ready.set_exception(err)
+                form._ready.exception()                  # помечено как прочитанное: нет предупреждения asyncio
+                return
+            finally:
+                self._pending_forms.pop(form_id, None)
+                if pool_token is not None:
+                    self._pending_forms.pop(pool_token, None)
+            form.inline_message_id = inline_message_id
+            if not form._closed:
+                self._active_forms[inline_message_id] = form
+            if pool_token is not None and not form._closed:
+                # в чате заглушка из заготовки — ставим настоящий текст и кнопки (страница 0) до set_result:
+                # правки модуля, ждущие подтверждения, лягут уже поверх
+                try:
+                    await self._inline_edit(inline_message_id, text, rendered0 if buttons else [], None, styles=form.styles)
+                except Exception as e:
+                    self.tlog(f"[core] инлайн-форма: не удалось подставить содержимое в заглушку: {e}")
+            elif not buttons and not form._closed:
+                # aiobot/bot.py ответил на inline_query с ПЛЕЙСХОЛДЕР-кнопкой (иначе Telegram не отдал бы
+                # inline_message_id) — раз модуль кнопок не просил, снимаем её. До set_result: правки модуля,
+                # ждущие подтверждения, лягут уже поверх.
+                try:
+                    await self._inline_edit(inline_message_id, text, [], form.media, styles=form.styles)
+                except Exception as e:
+                    self.tlog(f"[core] инлайн-форма: не удалось снять кнопку-заглушку: {e}")
+            form._ready.set_result(inline_message_id)
+
+        asyncio.ensure_future(_confirm())
         if media_later is not None:
             form._media_task = asyncio.ensure_future(self._swap_form_media(form, media_later))
-
-        if not buttons:
-            # aiobot/bot.py ответил на inline_query с ПЛЕЙСХОЛДЕР-кнопкой
-            # (иначе Telegram не отдал бы inline_message_id, см. комментарий
-            # в aiobot/bot.py) — раз модуль кнопок не просил, снимаем её
-            # единственным edit(). Если buttons были — реальный текст и
-            # кнопки уже ушли в чат сразу в ответе на inline_query, edit()
-            # здесь не нужен вообще.
-            await form.edit(text, buttons=None)
         return form
 
     _PHOTO_EXT = ('.jpg', '.jpeg', '.png', '.webp')
@@ -2977,6 +3264,7 @@ class Core:
         from aiogram.types import InputMediaAnimation, InputMediaPhoto
         try:
             real = await self._bot_media(media)
+            await form._imid()                              # форма подтверждена ботом — есть inline_message_id
         except Exception as e:
             self.tlog(f"[core] медиа формы не загрузилось: {e}")
             try:
@@ -3127,7 +3415,64 @@ class Core:
 
     def get_pending_form(self, form_id):
         """Вызывается ботом на inline_query — отдаёт (text, buttons), которые нужно показать сразу."""
+        if form_id in self._form_pool_tokens:            # заготовка «мгновенной» формы — заглушка с кнопкой-заглушкой
+            return {'text': visual_module.wait('загрузка формы…'), 'buttons': None, 'styles': None, 'media': None}
         return self._pending_forms.get(form_id)
+
+    # --- «мгновенные» формы: заготовка-заглушка --------------------------- #
+
+    async def _instant_forms_enabled(self) -> bool:
+        try:
+            return bool(await self.get_config('instant_forms', module_name='inline_stuff'))
+        except Exception:
+            return True
+
+    def _take_form_pool(self):
+        """Забрать свежую заготовку (или None). Одна заготовка — одна форма."""
+        entry, self._form_pool = self._form_pool, None
+        if entry is None or entry['client'] is not self.client or time.monotonic() - entry['at'] > FORM_POOL_TTL:
+            return None
+        return entry
+
+    async def _refill_form_pool(self, force=False):
+        """
+        Заранее запрашивает у своего бота инлайн-результат-заглушку («загрузка формы…» с кнопкой-заглушкой).
+        create_inlineform() отправляет её в чат одним запросом, а настоящее содержимое бот подставляет правкой,
+        как только Telegram подтвердит форму. Так форма появляется сразу, без круга «юзербот → Telegram → бот».
+        """
+        if not self._bot_ready or self.client is None:
+            return
+        async with self._form_pool_lock:
+            cur = self._form_pool
+            if not force and cur is not None and cur['client'] is self.client \
+                    and time.monotonic() - cur['at'] < FORM_POOL_TTL - FORM_POOL_REFRESH / 2:
+                return
+            if not await self._instant_forms_enabled():
+                self._form_pool = None
+                return
+            token = FORM_POOL_PREFIX + uuid.uuid4().hex
+            self._form_pool_tokens.add(token)
+            try:
+                client = self.client
+                results = await client.inline_query(await self._get_bot_entity(), token)
+                if results:
+                    self._form_pool = {'result': results[0], 'token': token, 'at': time.monotonic(), 'client': client}
+            except Exception as e:
+                self.tlog(f"[core] заготовка инлайн-формы не получена: {type(e).__name__}: {e}")
+            finally:
+                self._form_pool_tokens.discard(token)   # бот уже ответил — дальше токен нужен только как result_id
+
+    async def _form_pool_loop(self):
+        """Держит заготовку свежей, пока работает стационарный бот."""
+        await asyncio.sleep(3)
+        while True:
+            try:
+                await self._refill_form_pool()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self.tlog(f"[core] заготовка инлайн-формы: {e}")
+            await asyncio.sleep(FORM_POOL_REFRESH)
 
     def build_inline_markup(self, buttons, styles=None):
         """Публичная обёртка над _build_markup() — вызывается ботом при ответе на inline_query."""
@@ -3609,14 +3954,16 @@ class Core:
         # core/inline_forms.py) движок ловит здесь же и обрабатывает сам —
         # form.on_click() их не видит вообще.
         if callback_query.data in (PAGE_PREV, PAGE_NEXT, PAGE_NOOP):
+            async def _ack():
+                try:
+                    await callback_query.answer()
+                except Exception:
+                    pass
+            asyncio.ensure_future(_ack())                   # «часики» снимаются сразу, не после правки
             await self._click_bucket.acquire()
             if callback_query.data != PAGE_NOOP:
                 delta = -1 if callback_query.data == PAGE_PREV else 1
                 await form._go_to_page(form.page + delta)
-            try:
-                await callback_query.answer()
-            except Exception:
-                pass
             return
 
         click = InlineClick(
