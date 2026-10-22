@@ -6,6 +6,9 @@ modules/builtin/Config.py — просмотр и редактирование �
 'choice' (выбор одного варианта из статичного списка) и 'choices' (выбор нескольких). Для 'choice' и 'choices'
 в инлайне рисуется список вариантов вместо поля ввода; выбор нельзя оставить пустым. Значения и ошибки
 экранируются; «сбросить» возвращает значение по умолчанию.
+
+.prefix <символы> — сменить префикс команд (1–3 символа без пробелов; не буква/цифра и не / @ #),
+.prefix reset — вернуть «.». Префикс хранится в БД (core:prefix), поле prefix в user/config.json — только стартовое.
 """
 
 import html
@@ -19,7 +22,7 @@ from core.inline_forms import InlineClick
 
 NAME = "Config"
 MODULE_NAME = "config"
-VERSION = "2.13"
+VERSION = "2.14"
 AUTHOR = "FRX"
 DESCRIPTION = "Интерактивный просмотр и редактирование конфигов модулей через Inline-формы"
 TG_URL = "https://t.me/mescr_m"
@@ -647,6 +650,45 @@ async def config_cmd(event):
 
         text, buttons = await build_config_details_menu(module_name, key, status_msg=msg)
         await form.edit(text=text, buttons=buttons)
+
+
+_BAD_PREFIX_START = set('/@#')        # / — команды ботов, @ — упоминания и инлайн, # — хэштеги
+
+
+@decorators.command("prefix", "setprefix")
+async def prefix_cmd(event):
+    """сменить префикс команд: .prefix <1–3 символа>; без аргумента — текущий; .prefix reset — вернуть «.»"""
+    arg = (engine.get_args() or '').strip()
+    current = await engine.get_prefix()
+    if not arg:
+        await engine.answer(event, "\n".join([
+            visual.title('Префикс команд'),
+            visual.field('сейчас', html.escape(current)),
+            "",
+            visual.hint(f'сменить: <code>{html.escape(current)}prefix !</code> · вернуть точку: '
+                        f'<code>{html.escape(current)}prefix reset</code>'),
+        ]))
+        return
+    new = '.' if arg.lower() in ('reset', 'default', 'сброс') else arg
+    if len(new) > 3 or any(ch.isspace() for ch in new):
+        await engine.answer(event, visual.err('Префикс — от 1 до 3 символов без пробелов') + "\n"
+                            + visual.hint('например: <code>!</code>, <code>-</code>, <code>,,</code>'))
+        return
+    if new[0] in _BAD_PREFIX_START or new[0].isalnum():
+        await engine.answer(event, visual.err('Такой префикс будет мешать: ') + f"<code>{html.escape(new)}</code>\n"
+                            + visual.hint('нельзя начинать с буквы, цифры, / @ # — обычный текст и команды ботов '
+                                          'стали бы командами юзербота'))
+        return
+    if new == current:
+        await engine.answer(event, visual.ok('Этот префикс уже стоит') + f"  <code>{html.escape(new)}</code>")
+        return
+    await engine.edit_prefix(new)
+    await engine.answer(event, "\n".join([
+        visual.ok('Префикс изменён') + f"  <code>{html.escape(current)}</code> → <code>{html.escape(new)}</code>",
+        visual.item(f"теперь команды так: <code>{html.escape(new)}help</code>, <code>{html.escape(new)}ping</code>"),
+        visual.hint(f"вернуть: <code>{html.escape(new)}prefix {html.escape(current)}</code> или "
+                    f"<code>{html.escape(new)}prefix reset</code>"),
+    ]))
 
 
 @decorators.command("confighelp", "cfghelp")

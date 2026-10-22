@@ -9,6 +9,8 @@ core/logs.py
   classify() — источник: «бот» (aiogram, стационарный бот, BotChat, bot.*-хэндлеры) или «юзербот»; уровень: info / warn / error.
   stamp()    — «мм.дд чч:мм:сс» (для кода, который пишет в файлы, например журнал keeper'а).
 
+Каждая строка терминала также пишется в полный лог user/data/logs/frx_full.log (core/fulllog.py, команда .fulllog).
+
 Строки трассировки (с отступом, «Traceback…», «File …») присоединяются к предыдущей записи — ошибка видна на сайте целиком.
 Тёмная сторона любых перехватчиков вывода — ошибки внутри самого перехватчика: поэтому write() обёрнут в try/except и при любом сбое
 отдаёт текст в исходный поток без изменений.
@@ -127,6 +129,11 @@ class _Tee:
         elif self._in_trace and not line.startswith((' ', '\t')) and not _CONT_RE.match(line):
             self._in_trace = False
         BUFFER.add(line, cont=cont and bool(BUFFER._items))
+        try:                                                        # полный лог (core/fulllog.py)
+            from . import fulllog
+            fulllog.write_line(line, self._name)
+        except Exception:
+            pass
         # метку получают только «начальные» строки; продолжения трассировки остаются как есть
         return line if cont else f"{stamp()} {line}"
 
@@ -155,3 +162,8 @@ def install():
     _installed = True
     sys.stdout = _Tee(sys.stdout, 'stdout')
     sys.stderr = _Tee(sys.stderr, 'stderr')
+    try:                                                            # журналы библиотек — в полный лог
+        from . import fulllog
+        fulllog.install()
+    except Exception:
+        pass

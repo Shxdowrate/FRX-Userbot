@@ -58,6 +58,13 @@ engine.botlog() и лимитер. Модули могут слать собст
     botlog_wait           — bool. True — лишние сообщения ждут в очереди; False — сразу
                             сжигаются (только всплеск botlog_burst проходит).
 Рубильник enabled и log_chat_id действуют и на botlog().
+
+Полный лог (core/fulllog.py) — user/data/logs/frx_full.log: всё, что делает юзербот (вывод, ошибки, команды,
+модули, клики форм, бот, аккаунты), секреты замаскированы. Команда:
+    .fulllog            — лог архивом (все части + журнал keeper'а) в Избранное
+    .fulllog here       — то же, но в текущий чат
+    .fulllog tail [N]   — последние N строк (по умолчанию 40) прямо сообщением
+    .fulllog clear      — очистить
 """
 
 import asyncio
@@ -72,7 +79,7 @@ import time_utils
 
 NAME = "Logging"
 MODULE_NAME = "logging"
-VERSION = "1.3"
+VERSION = "1.4"
 AUTHOR = "FRX"
 DESCRIPTION = "Дублирует ошибки/важные события юзербота в ЛС владельцу через стационарного бота"
 TG_URL = "https://t.me/mescr_m"
@@ -290,6 +297,60 @@ async def notify_account_switch(number):
         visual.field('время', _now_str()),
     ])
     await _send(text)
+
+
+@decorators.command('fulllog', 'flog')
+async def fulllog_cmd(event):
+    """полный лог юзербота: архивом в Избранное (here — сюда), tail [N] — последние строки, clear — очистить"""
+    from core import fulllog
+    args = (engine.get_args() or '').split()
+    sub = args[0].lower() if args else ''
+    if sub == 'clear':
+        freed = fulllog.clear()
+        await engine.answer(event, visual.ok('Полный лог очищен') + f"  <code>{freed / 1024 / 1024:.1f} МБ</code>")
+        return
+    if sub == 'tail':
+        try:
+            n = max(1, min(int(args[1]), 2000)) if len(args) > 1 else 40
+        except ValueError:
+            n = 40
+        text = fulllog.tail(n)
+        await engine.answer(event, visual.title('Полный лог', f'последние {n} строк') + "\n"
+                            + (f"<pre>{html.escape(text)}</pre>" if text else visual.hint('лог пуст')))
+        return
+    parts = fulllog.files()
+    if not parts:
+        await engine.answer(event, visual.warn('Полный лог пока пуст'))
+        return
+    await engine.answer(event, visual.wait('Собираю полный лог…'))
+    from core.paths import DATA_DIR
+    dst = DATA_DIR / 'logs' / f"frx_log_{time.strftime('%Y%m%d_%H%M%S')}.zip"
+    try:
+        extra = [DATA_DIR / 'keeper' / 'keeper.log']
+        try:
+            import frx_systemkeeper as keeper
+            if keeper.LOG_FILE:
+                extra = [keeper.LOG_FILE]
+        except Exception:
+            pass
+        await asyncio.to_thread(fulllog.pack, dst, extra)
+        target = event.chat_id if sub == 'here' else 'me'
+        caption = "\n".join([
+            visual.title('Полный лог FRX', engine.get_version()),
+            visual.field('частей', len(parts)),
+            visual.field('размер', f"{fulllog.total_size() / 1024 / 1024:.1f} МБ (до сжатия)"),
+            visual.hint('секреты (токены, api_hash, сессии) замаскированы, но в логе есть id чатов и тексты '
+                        'команд — пересылайте только тому, кому доверяете'),
+        ])
+        await engine.client.send_file(target, str(dst), caption=caption, parse_mode='html', force_document=True)
+        await engine.answer(event, visual.ok('Полный лог отправлен' + ('' if sub == 'here' else ' в Избранное')))
+    except Exception as e:
+        await engine.answer(event, visual.err('Не удалось отправить лог') + f"\n<code>{html.escape(str(e))}</code>")
+    finally:
+        try:
+            dst.unlink()
+        except OSError:
+            pass
 
 
 @decorators.command('logs', 'logshelp')
