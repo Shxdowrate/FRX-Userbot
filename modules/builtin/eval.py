@@ -18,6 +18,9 @@ modules/builtin/eval.py
   ▸ Повторить         — выполняет тот же код ещё раз
   ▸ В .py файл        — сохраняет текущий код в .py и отправляет в этот чат
 
+Длинный результат форма показывает страницами: под кнопками — «◂ стр. 2/5 ▸» и «Весь текст файлом»
+(ядро, core/textpages.py). Без стационарного бота — первая страница сообщением и весь текст файлом.
+
 ВНИМАНИЕ: команда не имеет никаких ограничений — исполняется буквально
 любой Python-код с полным доступом к движку (engine, db, client Telethon
 и т.д.), файловой системе и сети, включая ЛЮБЫЕ импорты. Запустить её может
@@ -49,7 +52,7 @@ import time_utils
 
 NAME = "Eval"
 MODULE_NAME = "eval"
-VERSION = "2.2"
+VERSION = "2.3"
 AUTHOR = "FRX"
 DESCRIPTION = "Выполнение произвольного Python-кода из чата (.eval/.ev/.exec), инлайн, без ограничений"
 TG_URL = "https://t.me/mescr_m"
@@ -136,18 +139,18 @@ async def _run_text(event, code: str) -> str:
     if output:
         lines += [
             visual.section('Вывод'),
-            f"<code>{_esc(output[-1500:])}</code>",
+            f"<code>{_esc(_cap(output))}</code>",
             "",
         ]
     if error:
         lines += [
             visual.err('Ошибка'),
-            f"<code>{_esc(error[-2500:])}</code>",
+            f"<code>{_esc(_cap(error))}</code>",
         ]
     else:
         lines += [
             visual.section('Результат'),
-            f"<code>{_esc(repr(result))}</code>",
+            f"<code>{_esc(_cap(repr(result)))}</code>",
         ]
     return "\n".join(lines)
 
@@ -248,6 +251,18 @@ async def eval_cmd(event):
 
     await engine.answer(event, visual.wait('Выполняю…'))
     await _present(event, code)
+
+
+# Длинный вывод больше не обрезается до пары тысяч символов: форма сама делит текст на страницы
+# (◂ стр. 2/5 ▸ и «Весь текст файлом» — core/textpages.py). Предел — чтобы не гонять мегабайты через Telegram.
+MAX_OUTPUT = 120_000
+
+
+def _cap(text):
+    text = text or ''
+    if len(text) <= MAX_OUTPUT:
+        return text
+    return text[:MAX_OUTPUT // 2] + f"\n… пропущено {len(text) - MAX_OUTPUT} символов …\n" + text[-MAX_OUTPUT // 2:]
 
 
 def _esc(text):

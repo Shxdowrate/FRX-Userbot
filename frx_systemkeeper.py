@@ -95,7 +95,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-KEEPER_VERSION = "2.0"
+KEEPER_VERSION = "2.1"
 PROTO = 1
 
 ROOT = Path(__file__).resolve().parent
@@ -605,8 +605,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def download_github(repo: str, branch: str, token: str, dest) -> str:
-    """Скачивает zip ветки репозитория в dest. Возвращает 'owner/name@branch'."""
+def download_github(repo: str, branch: str, token: str, dest, progress=None) -> str:
+    """
+    Скачивает zip ветки репозитория в dest. Возвращает 'owner/name@branch'.
+    progress(done_bytes, total_bytes | None) — зовётся по ходу скачивания (из этого же потока); total бывает
+    неизвестен (GitHub отдаёт архив ветки потоком, без Content-Length) — тогда показывают только МБ и скорость.
+    """
     slug = parse_repo(repo)
     branch = (branch or 'main').strip() or 'main'
     url = f"https://api.github.com/repos/{slug}/zipball/{urllib.parse.quote(branch, safe='/')}"
@@ -638,15 +642,26 @@ def download_github(repo: str, branch: str, token: str, dest) -> str:
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         size = 0
+        try:
+            total = int(resp.headers.get('Content-Length') or 0) or None
+        except (TypeError, ValueError):
+            total = None
+        if progress:
+            progress(0, total)
         with dest.open('wb') as out:
             while True:
-                chunk = resp.read(1024 * 256)
+                chunk = resp.read(1024 * 128)
                 if not chunk:
                     break
                 size += len(chunk)
                 if size > MAX_DOWNLOAD:
                     raise KeeperError("Архив с GitHub слишком большой.")
                 out.write(chunk)
+                if progress:
+                    try:
+                        progress(size, total)
+                    except Exception:
+                        pass
     except urllib.error.HTTPError as e:
         if e.code == 404:
             raise KeeperError(f"Репозиторий или ветка не найдены: {slug}@{branch} "
@@ -1076,18 +1091,128 @@ def restore_code_backup(zip_path) -> None:
                 pass
 
 
-def _install_requirements() -> dict:
+# --------------------- ход обновления в инлайн-форме .update --------------------- #
+#
+# Пока main.py остановлен (резервная копия, замена файлов, pip, запуск), писать в Telegram некому — юзербот
+# выключен. Но форма .update — инлайн-сообщение стационарного бота, а его бот может править сам, по одному токену
+# (Bot API editMessageText с inline_message_id). Поэтому keeper показывает ход обновления в той же форме. Если
+# формы нет (.update yes) или бота нет — просто молчит, как раньше. Ошибка показа никогда не мешает обновлению.
+
+UPDATE_STAGES = ('Скачивание', 'Проверка архива', 'Подтверждение', 'Резервная копия', 'Замена файлов',
+                 'Зависимости', 'Запуск новой версии')
+STAGE_BACKUP, STAGE_FILES, STAGE_PIP, STAGE_START = 3, 4, 5, 6
+
+
+def update_stages_text(current: int, detail: str = '', meta: dict = None, failed: bool = False,
+                       done: bool = False, title: str = 'Обновление FRX') -> str:
+    """Список этапов обновления: ✅ сделано, ⏳ идёт (с подробностью), ▫️ впереди, ❌ ошибка. HTML для Telegram."""
+    import html as _h
+    meta = meta or {}
+    lines = [f"<b>{_h.escape(title)}</b>"]
+    if meta.get('from') or meta.get('to'):
+        lines.append(f"версия <code>{_h.escape(str(meta.get('from', '?')))}</code> → "
+                     f"<code>{_h.escape(str(meta.get('to', '?')))}</code>")
+    lines.append("")
+    for i, name in enumerate(UPDATE_STAGES):
+        if done or i < current:
+            mark = '✅'
+        elif i == current:
+            mark = '❌' if failed else '⏳'
+        else:
+            mark = '▫️'
+        line = f"{mark} {name}"
+        if i == current and detail and not done:
+            line += f" — {detail}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+_progress_slot = {'job': None}
+_progress_cv = threading.Condition()
+_progress_thread = None
+
+
+def _progress_worker():
+    while True:
+        with _progress_cv:
+            while _progress_slot['job'] is None:
+                _progress_cv.wait()
+            token, imid, text = _progress_slot['job']
+            _progress_slot['job'] = None
+        data = urllib.parse.urlencode({'inline_message_id': imid, 'text': text, 'parse_mode': 'HTML'}).encode('utf-8')
+        try:
+            urllib.request.urlopen(urllib.request.Request(
+                f"https://api.telegram.org/bot{token}/editMessageText", data=data), timeout=6).read()
+        except Exception as e:
+            msg = str(e)
+            if 'not modified' not in msg.lower():
+                log(f"Ход обновления в форме не показан: {msg.replace(token, '***')[:200]}")
+
+
+def notify_progress(req: dict, current: int, detail: str = '', failed: bool = False, done: bool = False) -> None:
+    """
+    Правит форму .update через Bot API (см. выше). Не блокирует: запрос уходит из отдельного потока, а если
+    он не успел — его место занимает самое свежее состояние (обновление не ждёт сеть, где Telegram медленный
+    или заблокирован). Любая ошибка — только в журнал keeper'а. detail — уже готовый HTML (экранированный).
+    """
+    global _progress_thread
+    notify = (req or {}).get('notify') or {}
+    imid = notify.get('inline_message_id')
+    if not imid:
+        return
+    token = str(read_config().get('aiogram_token') or '').strip()
+    if not token:
+        return
+    text = update_stages_text(current, detail, (req or {}).get('meta'), failed=failed, done=done)
+    with _progress_cv:
+        _progress_slot['job'] = (token, imid, text)
+        if _progress_thread is None or not _progress_thread.is_alive():
+            _progress_thread = threading.Thread(target=_progress_worker, name='frx-update-progress', daemon=True)
+            _progress_thread.start()
+        _progress_cv.notify()
+
+
+def _install_requirements(on_line=None) -> dict:
     deps = ROOT / 'frx_deps.py'
     cmd = ([sys.executable, str(deps), '--force', '--no-tools'] if deps.is_file()      # ядро + пакеты модулей
            else [sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt', '--disable-pip-version-check'])
     try:
-        r = subprocess.run(
-            cmd,
-            cwd=ROOT, capture_output=True, text=True, encoding='utf-8',
-            errors='replace', timeout=900,
-        )
-        tail = '\n'.join((r.stdout + '\n' + r.stderr).strip().splitlines()[-8:])
-        return {'ran': True, 'ok': r.returncode == 0, 'tail': tail}
+        if on_line is None:
+            r = subprocess.run(
+                cmd,
+                cwd=ROOT, capture_output=True, text=True, encoding='utf-8',
+                errors='replace', timeout=900,
+            )
+            tail = '\n'.join((r.stdout + '\n' + r.stderr).strip().splitlines()[-8:])
+            return {'ran': True, 'ok': r.returncode == 0, 'tail': tail}
+        # построчно — чтобы показать в форме .update, что сейчас ставится. Вывод читает отдельный поток, а предел
+        # 15 минут считается здесь: pip, который завис молча, не подвесит keeper (как и прежний run(timeout=900))
+        proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, text=True, encoding='utf-8', errors='replace')
+        lines = []
+
+        def reader():
+            for raw in proc.stdout:
+                line = raw.rstrip()
+                if line:
+                    lines.append(line)
+                    del lines[:-40]
+                    try:
+                        on_line(line)
+                    except Exception:
+                        pass
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+        try:
+            code = proc.wait(timeout=900)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=30)
+            lines.append('Превышено время установки зависимостей (15 минут)')
+            code = -1
+        t.join(timeout=5)
+        return {'ran': True, 'ok': code == 0, 'tail': '\n'.join(lines[-8:])}
     except Exception as e:
         return {'ran': True, 'ok': False, 'tail': str(e)}
 
@@ -1119,17 +1244,36 @@ def apply_update(req: dict):
     old_req = ROOT / 'requirements.txt'
     req_changed = (not old_req.is_file()) or _sha(old_req) != _sha(STAGING_DIR / 'requirements.txt')
 
+    notify_progress(req, STAGE_BACKUP, "копирую текущий код")
     backup = make_code_backup(old_version, scan_code_files(STAGING_DIR))
     log(f"Резервная копия кода: {backup.name}")
     write_json(JOURNAL_FILE, {'kind': 'code', 'backup': str(backup)})
+    stage = STAGE_FILES
     try:
         log(f"Заменяю файлы: {old_version} -> {new_version} (новых {len(diff['added'])}, изменённых "
             f"{len(diff['changed'])}, удаляемых {len(diff['removed'])})")
+        notify_progress(req, STAGE_FILES, f"+{len(diff['added'])} ~{len(diff['changed'])} −{len(diff['removed'])}")
         _apply_code_from_dir(STAGING_DIR, diff['removed'])
-        pip = _install_requirements() if req_changed else {'ran': False}
+        stage = STAGE_PIP
+        if req_changed:
+            notify_progress(req, STAGE_PIP, "requirements.txt изменился — ставлю пакеты")
+            last = {'t': 0.0}
+
+            def on_line(line):
+                if time.monotonic() - last['t'] < 4:          # не чаще раза в 4 с — лимиты Bot API
+                    return
+                last['t'] = time.monotonic()
+                import html as _h
+                notify_progress(req, STAGE_PIP, f"<code>{_h.escape(line[-90:])}</code>")
+            pip = _install_requirements(on_line)
+        else:
+            pip = {'ran': False}
         if pip.get('ran'):
             log("pip install -r requirements.txt: " + ("ок" if pip['ok'] else "ОШИБКА"))
+        notify_progress(req, STAGE_START, "запускаю юзербот (до минуты)")
     except Exception as e:
+        import html as _h
+        notify_progress(req, stage, f"ошибка: {_h.escape(str(e))[:300]} — откат", failed=True)
         log(f"Ошибка при замене файлов: {e} — откатываюсь")
         restore_code_backup(backup)
         JOURNAL_FILE.unlink(missing_ok=True)
@@ -1203,6 +1347,8 @@ def _rollback_userdata(zip_path) -> None:
 def rollback_pending(pending: dict, exit_code) -> bool:
     """Откат после неудачного запуска новой версии / восстановленных данных."""
     req = pending.get('req') or {}
+    if pending.get('kind') == 'code':
+        notify_progress(req, STAGE_START, f"новая версия не запустилась (код {exit_code}) — откатываю", failed=True)
     try:
         if pending['kind'] == 'code':
             restore_code_backup(pending['zip'])
