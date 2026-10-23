@@ -135,6 +135,37 @@ PAGE_NOOP = "__frxpage_noop__"    # кнопка-индикатор "N/M" — к
 PAGE_PREV_LABEL = "◂"
 PAGE_NEXT_LABEL = "▸"
 
+# Страницы ТЕКСТА формы (core/textpages.py): длинный текст режется на страницы, под кнопками модуля — свой ряд
+# «◂ стр. 2/5 ▸» и «Весь текст файлом». Клики по нему обрабатывает ядро (Core.dispatch_inline_click),
+# form.on_click() их не видит — кнопки модуля работают как прежде.
+TEXT_PREV = "__frxtext_prev__"
+TEXT_NEXT = "__frxtext_next__"
+TEXT_NOOP = "__frxtext_noop__"
+TEXT_FILE = "__frxtext_file__"
+TEXT_CALLBACKS = (TEXT_PREV, TEXT_NEXT, TEXT_NOOP, TEXT_FILE)
+
+
+def text_page_rows(index, total):
+    """Служебные ряды листания текста формы; [] — если страница одна."""
+    if total <= 1:
+        return []
+    nav = []
+    if index > 0:
+        nav.append((PAGE_PREV_LABEL, TEXT_PREV))
+    nav.append((f"стр. {index + 1}/{total}", TEXT_NOOP))
+    if index < total - 1:
+        nav.append((PAGE_NEXT_LABEL, TEXT_NEXT))
+    return [nav, [("📄 Весь текст файлом", TEXT_FILE)]]
+
+
+def split_form_text(text, media=False):
+    """Текст формы → страницы (safe_html + core/textpages.split_html). Короткий — одна страница."""
+    from .html_utils import safe_html
+    from .textpages import CAPTION_PAGE_LIMIT, PAGE_LIMIT, split_html
+    if not text:
+        return [text]
+    return split_html(safe_html(text), CAPTION_PAGE_LIMIT if media else PAGE_LIMIT)
+
 
 def normalize_button_rows(buttons):
     """
@@ -602,15 +633,47 @@ class InlineForm:
         if styles is not None:
             self.styles = {str(k): normalize_style(v) for k, v in dict(styles).items()}
         pages, total_pages = paginate_button_rows(buttons or [])
-        rendered = render_page_rows(pages, 0, total_pages)
-        await self._core._inline_edit(await self._imid(), text, rendered, self.media, styles=self.styles)
+        text_pages = split_form_text(text, bool(self.media))
+        rendered = render_page_rows(pages, 0, total_pages) + text_page_rows(0, len(text_pages))
+        await self._core._inline_edit(await self._imid(), text_pages[0], rendered, self.media, styles=self.styles)
         self.text = text
         self._raw_buttons = buttons
         self._pages = pages
         self.page = 0
+        self._text_pages = text_pages
+        self.text_page = 0
         self._core._register_input_targets(self, pages[0] if pages else [])
 
-    def _init_state(self, text, raw_buttons, pages):
+    # --- страницы текста (core/textpages.py) ---
+
+    def _shown_text(self):
+        """Текст, который сейчас виден в форме (текущая страница длинного текста)."""
+        pages = getattr(self, '_text_pages', None) or [self.text]
+        return pages[min(getattr(self, 'text_page', 0), len(pages) - 1)]
+
+    def _rows(self, page=None):
+        """Клавиатура формы целиком: текущая страница кнопок модуля + служебные ряды листания."""
+        page = self.page if page is None else page
+        text_pages = getattr(self, '_text_pages', None) or [self.text]
+        return (render_page_rows(self._pages, page, len(self._pages))
+                + text_page_rows(getattr(self, 'text_page', 0), len(text_pages)))
+
+    async def _go_to_text_page(self, index):
+        pages = getattr(self, '_text_pages', None) or []
+        if not (0 <= index < len(pages)) or index == getattr(self, 'text_page', 0):
+            return
+        self.text_page = index
+        await self._core._inline_edit(await self._imid(), pages[index], self._rows(), self.media, styles=self.styles)
+
+    async def send_text_file(self, name=None):
+        """Весь текст формы (без разметки) — файлом .txt в чат формы (от лица аккаунта)."""
+        import io
+        from .textpages import html_to_plain
+        data = io.BytesIO(html_to_plain(self.text or '').encode('utf-8'))
+        data.name = name or f"{self.owner_module or 'form'}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+        return await self._core.client.send_file(self.chat_id, data, caption=f"📄 {data.name}", force_document=True)
+
+    def _init_state(self, text, raw_buttons, pages, text_pages=None):
         """
         Заполняет состояние страниц сразу после создания формы —
         content/markup уже опубликованы (ответом на inline_query, см.
@@ -622,6 +685,8 @@ class InlineForm:
         self._raw_buttons = raw_buttons
         self._pages = pages
         self.page = 0
+        self._text_pages = text_pages or [text]
+        self.text_page = 0
         self._core._register_input_targets(self, pages[0] if pages else [])
 
     async def _go_to_page(self, new_page):
@@ -634,8 +699,7 @@ class InlineForm:
         if not (0 <= new_page < total_pages):
             return
         self.page = new_page
-        rendered = render_page_rows(self._pages, new_page, total_pages)
-        await self._core._inline_edit(await self._imid(), None, rendered, styles=self.styles)
+        await self._core._inline_edit(await self._imid(), None, self._rows(new_page), styles=self.styles)
         self._core._register_input_targets(self, self._pages[new_page])
 
     async def click(self, button=0, col=None, *, wait=None, timeout=None):

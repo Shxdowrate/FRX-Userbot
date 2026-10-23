@@ -25,9 +25,12 @@ namespace модуля больше нет — _build_namespace() отдаёт �
 импортировано в его коде.
 """
 
+import ast
 import asyncio
+import io
 import copy as _copy
 import difflib
+import functools
 import html as _html
 import os
 import re
@@ -57,9 +60,12 @@ from .accounts import AccountManager
 from .inline_forms import (
     InlineForm, InlineClick, InputButton, SearchButton, InlineInput, TokenBucket, resolve_form_reply, search_items,
     PAGE_PREV, PAGE_NEXT, PAGE_NOOP, paginate_button_rows, render_page_rows,
+    TEXT_CALLBACKS, TEXT_FILE, TEXT_NOOP, TEXT_PREV, split_form_text, text_page_rows,
     parse_button, normalize_style,
 )
 from .stationary_bot import BotFacade
+from . import textpages as textpages_module
+from . import fulllog as fulllog_module
 from .inline_results import InlineResult, InlineQueryEvent, InlineQueryClick, link_preview_options
 from .html_utils import safe_html, html_with_entities, install_telethon_emoji_tags, split_button_emoji
 install_telethon_emoji_tags()    # parse_mode="html" у Telethon понимает и <emoji document_id=…>
@@ -87,7 +93,7 @@ from .paths import ASSETS_DIR, BUILTIN_DIR, FILES_DIR, MODULES_DIR, SESSION_PATH
 # Версия ЯДРА FRX (не путать с VERSION отдельных модулей, см. ModuleInfo) —
 # правится вручную при каждом обновлении движка. Показывается в .about
 # (modules/builtin/Helper.py) и в баннере запуска (main.py).
-FRX_VERSION = "1.0.3"
+FRX_VERSION = "1.0.5"
 
 # Папки (подробно — core/paths.py):
 #   ASSETS_DIR      — стоковые статичные файлы FRX (assets/ проекта, обновляются вместе с кодом);
@@ -160,6 +166,20 @@ class ModuleInfo:
     bot_inline_clicks: list = field(default_factory=list)
     bot_start_links: list = field(default_factory=list)
     bot_callbacks: list = field(default_factory=list)
+    # «Сломанные» модули (см. Core._exec_lenient): ошибки загрузки и функции, которые «спят» (не подключены)
+    load_errors: list = field(default_factory=list)   # [{'stage', 'line'?, 'function'?, 'error', 'trace'}]
+    sleeping: list = field(default_factory=list)      # [{'name', 'kind', 'reason'}]
+
+    @property
+    def is_broken(self) -> bool:
+        """
+        Модуль загружен с ошибками: часть кода не исполнилась или часть функций спит. Ошибка on_load/on_start тоже
+        считается — но у встроенных модулей нет: там это обычно сбой сети при запуске, а не сломанный код
+        (ошибка всё равно видна в карточке .help).
+        """
+        if self.sleeping or any(e.get('stage') in ('syntax', 'exec') for e in self.load_errors):
+            return True
+        return bool(self.load_errors) and not self.is_builtin
 
     @property
     def is_builtin(self) -> bool:
@@ -174,6 +194,120 @@ class ModuleInfo:
     @property
     def kind(self) -> str:
         return 'builtin' if self.is_builtin else 'loaded'
+
+
+# --- «Сломанные» модули: разбор того, что не загрузилось (Core._exec_lenient) ---------------------------
+
+def _short_trace(exc, limit=4) -> str:
+    """Последние кадры трассировки — только строки самого модуля (<frx_module>) и сообщение ошибки."""
+    import traceback as _tb
+    frames = [f for f in _tb.extract_tb(exc.__traceback__) if f.filename == '<frx_module>'] or \
+        _tb.extract_tb(exc.__traceback__)[-1:]
+    lines = [f"строка {f.lineno}: {(f.line or '').strip()}" for f in frames[-limit:]]
+    return "\n".join(lines + [f"{type(exc).__name__}: {exc}"])
+
+
+def _bound_names(stmt) -> set:
+    """Имена, которые инструкция верхнего уровня создаёт в модуле (присваивания, import, def, class, for, with…)."""
+    import ast as _ast
+    out = set()
+
+    def visit(node):
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+            out.add(node.name)
+            return                                   # внутрь тела не идём — там свои имена
+        if isinstance(node, (_ast.Import, _ast.ImportFrom)):
+            for a in node.names:
+                if a.name != '*':
+                    out.add(a.asname or a.name.split('.')[0])
+            return
+        if isinstance(node, _ast.Lambda):
+            return
+        if isinstance(node, _ast.Name) and isinstance(node.ctx, _ast.Store):
+            out.add(node.id)
+        for child in _ast.iter_child_nodes(node):
+            visit(child)
+
+    visit(stmt)
+    return out
+
+
+def _deliberate_raise(stmt, exc) -> bool:
+    """
+    Модуль намеренно прервал свою загрузку: `raise …` на верхнем уровне или `if …: raise …` (например «нужен
+    пакет X»). Такое исключение не «ломает» модуль — оно отменяет загрузку, как и раньше.
+    """
+    import ast as _ast
+    if isinstance(stmt, _ast.Raise):
+        return True
+    if isinstance(stmt, _ast.If):
+        tb = exc.__traceback__
+        lines = set()
+        while tb is not None:
+            if tb.tb_frame.f_code.co_filename == '<frx_module>' and tb.tb_frame.f_code.co_name == '<module>':
+                lines.add(tb.tb_lineno)
+            tb = tb.tb_next
+        for node in _ast.walk(stmt):
+            if isinstance(node, _ast.Raise) and node.lineno in lines:
+                return True
+    return False
+
+
+def _func_global_names(func) -> set:
+    """Глобальные имена, к которым обращается функция (вместе с вложенными функциями и lambda)."""
+    import dis as _dis
+    code = getattr(func, '__code__', None)
+    if code is None:
+        code = getattr(getattr(func, '__func__', None), '__code__', None)
+    names, stack = set(), [code] if code is not None else []
+    while stack:
+        c = stack.pop()
+        for ins in _dis.get_instructions(c):         # только чтение глобальных имён, не атрибуты (db.get ≠ get)
+            if ins.opname in ('LOAD_GLOBAL', 'LOAD_NAME'):
+                names.add(ins.argval)
+        stack.extend(k for k in c.co_consts if hasattr(k, 'co_names'))
+    return names
+
+
+def _frx_kind(func) -> str:
+    """Чем функция была бы в модуле: 'command .ping', 'watcher', 'bot.command /start'…"""
+    t = getattr(func, '_frx_type', None)
+    if t == 'command':
+        return 'команда ' + ', '.join('.' + a for a in getattr(func, '_frx_commands', [])[:3])
+    if t:
+        return t
+    bt = getattr(func, '_frx_bot_type', None)
+    if bt == 'command':
+        return 'команда бота ' + ', '.join('/' + a for a in getattr(func, '_frx_bot_commands', [])[:3])
+    if bt:
+        return 'bot.' + bt
+    return 'страница сайта' if getattr(func, '_frx_web_pages', None) else 'функция'
+
+
+_HEADER_RE = {key: re.compile(rf"^{key}\s*=\s*(['\"])(.*?)\1", re.M)
+              for key in ('MODULE_NAME', 'NAME', 'VERSION', 'AUTHOR', 'DESCRIPTION', 'TG_URL', 'GIT_URL')}
+
+
+def _guess_header(source: str) -> dict:
+    """Шапка модуля без исполнения (когда исполнить нельзя — SyntaxError): KEY = '...' в начале строки."""
+    out = {}
+    for key, rx in _HEADER_RE.items():
+        m = rx.search(source or '')
+        if m:
+            out[key] = m.group(2)
+    return out
+
+
+def _guess_module_name(source: str, source_path=None):
+    """MODULE_NAME из текста модуля, иначе — из имени файла (для модуля, который не исполнился)."""
+    name = _guess_header(source).get('MODULE_NAME')
+    if name:
+        return name
+    if source_path:
+        stem = Path(source_path).stem
+        if re.fullmatch(r'[A-Za-z_][\w]*', stem):
+            return stem
+    return None
 
 
 def _caption(text):
@@ -222,6 +356,8 @@ class Core:
         self.version = FRX_VERSION
         self.api_id = config.get('api_id')
         self.api_hash = config.get('api_hash')
+        fulllog_module.add_secret(self.api_hash)              # секреты конфига в полный лог не попадают
+        fulllog_module.add_secret(config.get('aiogram_token'))
 
         self.db = Database(paths_module.resolve_db_path(config.get('db_path')))
         self.db_view = DynamicDB(self.db)
@@ -271,6 +407,10 @@ class Core:
         self.bot_inline_query_map: dict[str, tuple] = {}    # name -> (module_name, func, access, for_user, for_chat, black_list, black_chats)
         self.bot_inline_clicks: list = []                # [(module_name, prefix, func, access), ...]
         self.bot_callbacks: list = []                    # @bot.callback модулей: [(module_name, prefix, func, access), ...]
+        # чьё сообщение бота: (chat_id, message_id) -> module_name — клик по кнопке достаётся только модулю-владельцу
+        self._bot_msg_owners: dict = {}
+        self._bot_msg_owners_loaded = False
+        self._bot_msg_owners_save_task = None
         self.bot_start_links: list = []                  # [(module_name, prefix, func), ...]
         self.edit_handlers: list = []                    # [(module_name, func), ...] — @decorators.on_edit
         self.delete_handlers: list = []                  # [(module_name, func), ...] — @decorators.on_delete
@@ -472,7 +612,7 @@ class Core:
             mtoken = current_module.set(info.module_name)
             try:
                 for func in info.bot_on_start_handlers:
-                    await self._safe_call_bot(info.module_name, func)
+                    await self._lifecycle_call(info.module_name, func, 'bot.on_start', bot=True)
                 for func, interval in info.bot_cycle_handlers:
                     task = asyncio.create_task(self._run_bot_cycle(info.module_name, func, interval))
                     info.bot_cycle_tasks.append(task)
@@ -618,9 +758,12 @@ class Core:
             entry = self.bot_command_map.get(cmd)
             if entry is not None:
                 module_name, func, access, for_user, for_chat, black_list, black_chats = entry
-                if self._bot_extended_access_ok(
+                allowed = self._bot_extended_access_ok(
                     access, for_user, for_chat, black_list, black_chats, user_id, event.chat_id
-                ):
+                )
+                fulllog_module.event('bot', f"/{cmd} · модуль {module_name} · от {user_id} · чат {event.chat_id}"
+                                            + ("" if allowed else " · нет доступа"))
+                if allowed:
                     await self._run_bot_handler(module_name, func, event)
 
         for module_name, func, access, watch in list(self.bot_watchers_bot):
@@ -647,7 +790,24 @@ class Core:
     async def start(self):
         await self.access.load()
         await self.aliases.load()
+        await self._adopt_legacy_file_session()
         self.client = await self.accounts.get_active_client()
+        if self.client is not None:
+            try:
+                if not self.client.is_connected():
+                    await self.client.connect()
+                alive = await self.client.is_user_authorized()
+            except Exception as e:
+                print(f"[FRX] [WARN] Сессия активного аккаунта не проверилась: {e}")
+                alive = True                          # сеть и т. п. — не повод выбрасывать аккаунт
+            if not alive:
+                print(f"[FRX] Сессия активного аккаунта {self.accounts.active} недействительна — "
+                      f"вход по основной сессии (user/data/frx_session)")
+                try:
+                    await self.client.disconnect()
+                except Exception:
+                    pass
+                self.client = None
         if self.client is None:
             self.client = TelegramClient(str(SESSION_PATH), self.api_id, self.api_hash)
             await self.client.connect()
@@ -661,6 +821,14 @@ class Core:
                 # стоит на внешнем сервере; сайт (.web) — локальный и работает уже после входа.
                 print("[FRX] Вход в Telegram: введите номер телефона, затем код (и пароль 2FA, если включён)")
                 await self.client.start()
+            # первый вход (файловая сессия) — вносим аккаунт в менеджер, чтобы он был в .acc и accounts.json
+            try:
+                adopted = self.accounts.adopt_client(self.client, await self.client.get_me())
+                await self.db.set('core:file_session_adopted', True)   # миграция старых установок больше не нужна
+                if adopted:
+                    print(f"[FRX] Аккаунт {adopted} внесён в список аккаунтов (.acc)")
+            except Exception as e:
+                print(f"[FRX] [WARN] Не удалось внести первый аккаунт в список аккаунтов: {e}")
 
         self._owner_id = (await self.client.get_me()).id
         self._attach_handlers(self.client)
@@ -707,7 +875,7 @@ class Core:
             mtoken = current_module.set(info.module_name)
             try:
                 for func in info.on_start_handlers:
-                    await self._safe_call(info.module_name, func)
+                    await self._lifecycle_call(info.module_name, func, 'on_start')
             finally:
                 current_module.reset(mtoken)
 
@@ -719,6 +887,43 @@ class Core:
         await self._cleanup_stale_configs()
 
         print(f"[FRX] Юзербот запущен. Загружено модулей: {len(self.modules)}")
+        broken = [n for n, i in self.modules.items() if i.is_broken]
+        fulllog_module.event('start', f"FRX {self.version} запущен: модулей {len(self.modules)}"
+                                      + (f", сломанных {len(broken)} ({', '.join(broken)})" if broken else "")
+                                      + f", аккаунт {self.accounts.active}")
+
+    async def _adopt_legacy_file_session(self):
+        """
+        Установки до 1.0.4: первый аккаунт жил только в файловой сессии user/data/frx_session.session и не попадал
+        в accounts.json (а значит, и в .acc). Если позже через .acc добавили второй аккаунт, юзербот запускался уже
+        на нём, а первый «пропадал». Один раз на установку: если файловая сессия жива и такого аккаунта в списке
+        нет — вносим его (активным не делаем, если активный уже есть).
+        """
+        if not self.accounts.data.get('accounts'):
+            return                                   # список пуст — start() сам поднимет файловую сессию и внесёт её
+        if await self.db.get('core:file_session_adopted', False):
+            return
+        session_file = Path(str(SESSION_PATH) + '.session')
+        if not session_file.is_file():
+            await self.db.set('core:file_session_adopted', True)
+            return
+        client = TelegramClient(str(SESSION_PATH), self.api_id, self.api_hash)
+        try:
+            await asyncio.wait_for(client.connect(), 20)
+            if await client.is_user_authorized():
+                me = await client.get_me()
+                if me is not None and not self.accounts.has_account_id(me.id):
+                    number = self.accounts.adopt_client(client, me, make_active=False)
+                    if number:
+                        print(f"[FRX] Первый аккаунт {number} (файловая сессия) возвращён в список аккаунтов (.acc)")
+            await self.db.set('core:file_session_adopted', True)
+        except Exception as e:
+            print(f"[FRX] [WARN] Не удалось проверить файловую сессию первого аккаунта: {e}")
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
 
     def _attach_handlers(self, client):
         """
@@ -961,11 +1166,30 @@ class Core:
 
         etoken = current_event.set(run_event)
         gtoken = current_guest.set(guest)
+        t0 = time.monotonic()
+        outcome = {'error': None}
+
+        @functools.wraps(func)                  # имя функции в ошибках (on_error, Logging) — прежнее
+        async def tracked(ev):
+            try:
+                return await func(ev)
+            except Exception as e:
+                outcome['error'] = f"{type(e).__name__}: {e}"
+                raise
         try:
-            await self._safe_call(module_name, func, run_event)
+            await self._safe_call(module_name, tracked, run_event)
         finally:
             current_guest.reset(gtoken)
             current_event.reset(etoken)
+            who = 'владелец' if guest is None else f"гость {guest}"
+            real = (getattr(func, '_frx_commands', None) or [cmd])[0]   # алиас на .eval — тоже без аргументов
+            shown = fulllog_module.command_text(prefix, real, parts[1] if len(parts) > 1 else '')
+            if real != cmd:
+                shown = f"{prefix}{cmd} → {shown}"
+            fulllog_module.event('cmd', (
+                f"{shown} · модуль {module_name}"
+                f" · {who} · чат {getattr(event, 'chat_id', '?')} · {time.monotonic() - t0:.2f} с · "
+                + (f"ОШИБКА {outcome['error']}" if outcome['error'] else "ок")))
 
     def guest_id(self):
         """id гостя, по чьей команде (или клику в форме) сейчас выполняется код; None — владелец."""
@@ -1075,6 +1299,76 @@ class Core:
     # Загрузка / выгрузка модулей
     # ------------------------------------------------------------------ #
 
+    async def _lifecycle_call(self, module_name, func, stage, *args, bot=False):
+        """
+        on_load / on_start (и bot.*) — как _safe_call(), но ошибка ещё и запоминается в модуле
+        (ModuleInfo.load_errors): такой модуль показывается в «Сломанных», а остальное в нём продолжает работать.
+        """
+        mtoken = current_module.set(module_name)
+        try:
+            return await func(*args)
+        except Exception as e:
+            info = self.modules.get(module_name)
+            # on_load чужого модуля (хук срабатывает на загрузку ЛЮБОГО модуля) — не «поломка» владельца хука
+            own = not (stage.endswith('on_load') and args and getattr(args[0], 'module_name', module_name) != module_name)
+            if info is not None and own:
+                entry = {'stage': stage, 'function': getattr(func, '__name__', '?'),
+                         'error': f"{type(e).__name__}: {e}", 'trace': _short_trace(e)}
+                same = [x for x in info.load_errors if x.get('stage') == stage and x.get('function') == entry['function']]
+                for x in same:                        # одна запись на хук: последняя ошибка
+                    info.load_errors.remove(x)
+                info.load_errors.append(entry)
+                del info.load_errors[:-20]
+            await (self._dispatch_bot_error if bot else self._dispatch_error)(module_name, func, e)
+            return None
+        finally:
+            current_module.reset(mtoken)
+
+    async def _keep_broken(self) -> bool:
+        """Грузить ли модули с ошибками в «Сломанные» (конфиг `keep_broken` модуля Loader, по умолчанию да)."""
+        try:
+            value = await self.get_config('keep_broken', module_name='loader')
+        except Exception:
+            return True
+        return True if value is None else bool(value)
+
+    def _exec_lenient(self, source, namespace):
+        """
+        Исполняет модуль ПО ОДНОЙ инструкции верхнего уровня: упавшая инструкция (import пакета, которого нет,
+        опечатка в константе, ошибка в декораторе) не обрывает загрузку — остальное исполняется дальше.
+        Возвращает (errors, failed_names): ошибки по строкам и имена, которые из-за них не появились.
+        При SyntaxError не исполняется ничего: failed_names = None.
+        """
+        import __future__ as _future
+        try:
+            tree = ast.parse(source, '<frx_module>')
+        except SyntaxError as e:
+            return [{'stage': 'syntax', 'line': e.lineno,
+                     'error': f"SyntaxError: {e.msg}" + (f" (строка {e.lineno})" if e.lineno else ''),
+                     'trace': (e.text or '').rstrip()}], None
+        flags = 0
+        for stmt in tree.body:
+            if isinstance(stmt, ast.ImportFrom) and stmt.module == '__future__':
+                for alias in stmt.names:
+                    feature = getattr(_future, alias.name, None)
+                    if feature is not None:
+                        flags |= feature.compiler_flag
+        errors, failed = [], set()
+        for stmt in tree.body:
+            try:
+                code = compile(ast.Module(body=[stmt], type_ignores=[]), '<frx_module>', 'exec',
+                               flags=flags, dont_inherit=True)
+                exec(code, namespace)
+            except Exception as e:
+                if _deliberate_raise(stmt, e):
+                    raise                             # модуль сам остановил загрузку (raise / if …: raise) — уважаем
+                names = _bound_names(stmt)
+                failed |= names
+                errors.append({'stage': 'exec', 'line': stmt.lineno, 'names': sorted(names),
+                               'error': f"{type(e).__name__}: {e}", 'trace': _short_trace(e)})
+        failed = {n for n in failed if n not in namespace}       # имя всё же появилось позже — не считается
+        return errors, failed
+
     def _build_namespace(self):
         """
         Пространство имён, в котором исполняется код модуля при загрузке.
@@ -1103,25 +1397,44 @@ class Core:
         source = Path(path).read_text(encoding='utf-8')
         return await self._load_from_source(source, target=target)
 
-    async def _load_from_source(self, source: str, target: str = 'loaded', source_path: str | None = None) -> ModuleInfo:
+    async def _load_from_source(self, source: str, target: str = 'loaded', source_path: str | None = None,
+                                lenient: bool | None = None) -> ModuleInfo:
+        """
+        Загружает модуль из исходника. lenient (по умолчанию — конфиг `keep_broken` модуля Loader, вкл.): модуль с
+        ошибками не отбрасывается целиком, а загружается в «Сломанные» — всё, что исполнилось, работает; функции,
+        которым не хватает упавших имён (или чья команда занята), «спят»; ошибки — в info.load_errors / info.sleeping.
+        lenient=False — прежнее поведение: любая ошибка = исключение, модуль не загружен.
+        """
         self._guest_guard('загрузка модуля', 'loader')
+        if lenient is None:
+            lenient = await self._keep_broken()
         if 'REQUIREMENTS' in source:            # пакеты, которые модуль объявил сам (core/requirements.py)
             await self._ensure_module_requirements(source)
         namespace = self._build_namespace()
 
+        load_errors, failed_names = [], set()
         token = current_module.set('__loading__')
         try:
-            exec(compile(source, '<frx_module>', 'exec'), namespace)
+            if lenient:
+                load_errors, failed_names = self._exec_lenient(source, namespace)
+            else:
+                exec(compile(source, '<frx_module>', 'exec'), namespace)
         finally:
             current_module.reset(token)
 
         module_name = namespace.get('MODULE_NAME')
+        if not module_name and load_errors:
+            module_name = _guess_module_name(source, source_path)
         if not module_name:
+            if load_errors:
+                raise ValueError(load_errors[0]['error'])
             raise ValueError("В модуле не указан MODULE_NAME")
+        if failed_names is None:                 # SyntaxError — исполнить не удалось ничего, берём шапку текстом
+            namespace.update(_guess_header(source))
         if module_name in self.modules:
             existing = self.modules[module_name]
             new_version = str(namespace.get('VERSION', '1.0'))
-            if new_version == existing.version:
+            if new_version == existing.version and not existing.is_broken:
                 raise ValueError(
                     f"Модуль с MODULE_NAME='{module_name}' уже загружен (версия {existing.version})"
                 )
@@ -1145,6 +1458,8 @@ class Core:
             tg_url=normalize_module_link(namespace.get('TG_URL'), 'tg'),
             git_url=normalize_module_link(namespace.get('GIT_URL'), 'git'),
         )
+        info.load_errors = list(load_errors)
+        failed_names = failed_names or set()
 
         # Сохраняем файл модуля на диск — НО НЕ для встроенных (target='builtin'):
         # они и так уже лежат на диске под своим реальным именем файла
@@ -1162,134 +1477,28 @@ class Core:
 
         # сканируем namespace на декорированные функции
         _seen_funcs = set()                     # одна функция под двумя именами (f2 = f) регистрируется один раз
-        for value in namespace.values():
+        for value in list(namespace.values()):
             if not callable(value):
                 continue
             if hasattr(value, '_frx_type'):
                 if id(value) in _seen_funcs:
                     continue
                 _seen_funcs.add(id(value))
-
-            if hasattr(value, '_frx_type'):
-                ftype = value._frx_type
-
-                if ftype == 'command':
-                    for alias in value._frx_commands:
-                        if alias in self.command_map:
-                            owner = self.command_map[alias][0]
-                            raise ValueError(f"Команда '{alias}' уже занята модулем '{owner}'")
-                        self.command_map[alias] = (module_name, value)
-                        info.commands[alias] = value
-                elif ftype == 'watcher':
-                    self.watchers.append((module_name, value))
-                    info.watchers.append(value)
-                elif ftype == 'telegram_event':
-                    self.telegram_events.append((module_name, value))
-                    info.telegram_events.append(value)
-                elif ftype == 'callback':
-                    self.callbacks.append((module_name, value))
-                    info.callbacks.append(value)
-                elif ftype == 'on_error':
-                    self.on_error_handlers.append((module_name, value))
-                    info.on_error_handlers.append(value)
-                elif ftype == 'on_account_switch':
-                    self.on_account_switch_handlers.append((module_name, value))
-                    info.on_account_switch_handlers.append(value)
-                elif ftype == 'on_edit':
-                    self.edit_handlers.append((module_name, value))
-                    info.edit_handlers.append(value)
-                elif ftype == 'on_delete':
-                    self.delete_handlers.append((module_name, value))
-                    info.delete_handlers.append(value)
-                elif ftype == 'on_unload':
-                    info.on_unload_handlers.append(value)
-                elif ftype == 'on_start':
-                    info.on_start_handlers.append(value)
-                elif ftype == 'on_load':
-                    info.on_load_handlers.append(value)
-                elif ftype == 'cycle':
-                    info.cycle_handlers.append((value, value._frx_cycle))
-
-            # страницы сайта (`import web`, @web.page — core/web/ui.py)
-            for page_meta in getattr(value, '_frx_web_pages', []):
-                info.web_pages.append({**page_meta, 'title': page_meta['title'], 'icon': page_meta.get('icon'), 'func': value})
-
-            # --- параллельный набор: хэндлеры СТАЦИОНАРНОГО бота (`import bot`,
-            # core/bot_decorators.py) — независимо от _frx_type выше ---
-            if hasattr(value, '_frx_bot_type'):
-                bftype = value._frx_bot_type
-
-                if bftype == 'command':
-                    for alias in value._frx_bot_commands:
-                        if alias in self.bot_command_map or alias in self._bot_reserved_aliases:
-                            owner = (
-                                'aiobot/bot.py (встроенная команда)'
-                                if alias in self._bot_reserved_aliases and alias not in self.bot_command_map
-                                else self.bot_command_map[alias][0]
-                            )
-                            raise ValueError(f"Команда бота '/{alias}' уже занята модулем '{owner}'")
-                        self.bot_command_map[alias] = (
-                            module_name, value, value._frx_bot_access,
-                            getattr(value, '_frx_bot_for_user', None),
-                            getattr(value, '_frx_bot_for_chat', None),
-                            getattr(value, '_frx_bot_black_list', None),
-                            getattr(value, '_frx_bot_black_chats', None),
-                        )
-                        info.bot_commands[alias] = value
-                elif bftype == 'inline_function':
-                    for alias in value._frx_bot_inline_names:
-                        if alias in self.bot_inline_function_map:
-                            owner = self.bot_inline_function_map[alias][0]
-                            raise ValueError(f"Инлайн-функция '{alias}' уже занята модулем '{owner}'")
-                        self.bot_inline_function_map[alias] = (
-                            module_name, value, value._frx_bot_access,
-                            getattr(value, '_frx_bot_for_user', None),
-                            getattr(value, '_frx_bot_for_chat', None),
-                            getattr(value, '_frx_bot_black_list', None),
-                            getattr(value, '_frx_bot_black_chats', None),
-                        )
-                        info.bot_inline_functions[alias] = value
-                elif bftype == 'inline_query':
-                    for alias in value._frx_bot_iq_names:
-                        if alias in self.bot_inline_query_map or alias in self.bot_inline_function_map:
-                            owner = (self.bot_inline_query_map.get(alias) or self.bot_inline_function_map.get(alias))[0]
-                            raise ValueError(f"Инлайн-запрос '{alias}' уже занят модулем '{owner}'")
-                        self.bot_inline_query_map[alias] = (
-                            module_name, value, value._frx_bot_access,
-                            getattr(value, '_frx_bot_for_user', None), getattr(value, '_frx_bot_for_chat', None),
-                            getattr(value, '_frx_bot_black_list', None), getattr(value, '_frx_bot_black_chats', None),
-                        )
-                        info.bot_inline_queries[alias] = value
-                elif bftype == 'inline_click':
-                    self.bot_inline_clicks.append((module_name, value._frx_bot_click_prefix, value, value._frx_bot_access))
-                    info.bot_inline_clicks.append(value)
-                elif bftype == 'start_link':
-                    self.bot_start_links.append((module_name, value._frx_bot_start_prefix, value))
-                    info.bot_start_links.append(value)
-                elif bftype == 'watcher':
-                    watch = getattr(value, '_frx_bot_watch', 'bot')
-                    entry = (module_name, value, value._frx_bot_access, watch)
-                    if watch in ('bot', 'all'):
-                        self.bot_watchers_bot.append(entry)
-                    if watch in ('userbot', 'all'):
-                        self.bot_watchers_userbot.append(entry)
-                    info.bot_watchers.append(value)
-                elif bftype == 'telegram_event':
-                    self.bot_telegram_events.append((module_name, value))
-                    info.bot_telegram_events.append(value)
-                elif bftype == 'on_error':
-                    self.bot_on_error_handlers.append((module_name, value))
-                    info.bot_on_error_handlers.append(value)
-                elif bftype == 'on_start':
-                    info.bot_on_start_handlers.append(value)
-                elif bftype == 'on_load':
-                    info.bot_on_load_handlers.append(value)
-                elif bftype == 'cycle':
-                    info.bot_cycle_handlers.append((value, value._frx_bot_cycle))
-                elif bftype == 'callback':
-                    self.bot_callbacks.append((module_name, getattr(value, '_frx_bot_click_prefix', '') or '',
-                                               value, value._frx_bot_access))
-                    info.bot_callbacks.append(value)
+            if not (hasattr(value, '_frx_type') or hasattr(value, '_frx_bot_type') or hasattr(value, '_frx_web_pages')):
+                continue
+            if lenient and failed_names:
+                missing = sorted(_func_global_names(value) & failed_names)
+                if missing:                      # функции не хватает имён, которые не создались из-за ошибки — спит
+                    info.sleeping.append({'name': getattr(value, '__name__', '?'), 'kind': _frx_kind(value),
+                                          'reason': "нет " + ", ".join(missing)})
+                    continue
+            try:
+                self._register_module_func(info, module_name, value)
+            except ValueError as e:
+                if not lenient:
+                    raise
+                info.sleeping.append({'name': getattr(value, '__name__', '?'), 'kind': _frx_kind(value),
+                                      'reason': str(e)})
 
         self.modules[module_name] = info
 
@@ -1304,27 +1513,36 @@ class Core:
             # on_load "запускается при загрузке любого модуля, передаёт объект модуля"
             for owner_name, owner_info in self.modules.items():
                 for func in owner_info.on_load_handlers:
-                    await self._safe_call(owner_name, func, info)
+                    await self._lifecycle_call(owner_name, func, 'on_load', info)
                 # bot.on_load() — тот же принцип, но независимый поток
                 # (ошибки уходят в _dispatch_bot_error, а не в on_error юзербота)
                 for func in owner_info.bot_on_load_handlers:
-                    await self._safe_call_bot(owner_name, func, info)
+                    await self._lifecycle_call(owner_name, func, 'bot.on_load', info, bot=True)
 
             # если юзербот уже работает — сразу запускаем on_start этого модуля
             if self._started:
                 for func in info.on_start_handlers:
-                    await self._safe_call(module_name, func)
+                    await self._lifecycle_call(module_name, func, 'on_start')
                 # bot.on_start()/bot.cycle() — только если стационарный бот
                 # тоже уже подключён (set_bot() уже отработал, self._bot_ready);
                 # иначе они запустятся позже, все разом, из _fire_bot_on_start()
                 if self._bot_ready:
                     for func in info.bot_on_start_handlers:
-                        await self._safe_call_bot(module_name, func)
+                        await self._lifecycle_call(module_name, func, 'bot.on_start', bot=True)
                     for func, interval in info.bot_cycle_handlers:
                         task = asyncio.create_task(self._run_bot_cycle(module_name, func, interval))
                         info.bot_cycle_tasks.append(task)
         finally:
             current_module.reset(mtoken)
+
+        fulllog_module.event('module', f"загружен {module_name} v{info.version} ({target})"
+                             + (f" — СЛОМАН: ошибок {len(info.load_errors)}, спит {len(info.sleeping)}" if info.is_broken else "")
+                             + f" · команд {len(info.commands)}")
+        if info.is_broken:
+            what = [f"строка {e['line']}: {e['error']}" if e.get('line') else f"{e['stage']}: {e['error']}"
+                    for e in info.load_errors[:3]]
+            what += [f"спит {z['name']} ({z['reason']})" for z in info.sleeping[:3]]
+            self.tlog(f"[WARN] Модуль {module_name} загружен с ошибками (раздел «Сломанные»): " + "; ".join(what))
 
         if target == 'loaded':
             loaded_list = await self.db.get('core:loaded_modules', [])
@@ -1335,6 +1553,141 @@ class Core:
             self._drop_archived_copies(module_name)
 
         return info
+
+    def _register_module_func(self, info, module_name, value):
+        """Подключает одну декорированную функцию модуля (команда, вотчер, хэндлер бота, страница сайта…).
+        Занятое имя команды — ValueError ДО регистрации (ничего не подключается частично)."""
+        if getattr(value, '_frx_type', None) == 'command':
+            for alias in value._frx_commands:
+                if alias in self.command_map:
+                    raise ValueError(f"Команда '{alias}' уже занята модулем '{self.command_map[alias][0]}'")
+        if getattr(value, '_frx_bot_type', None) == 'command':
+            for alias in value._frx_bot_commands:
+                if alias in self.bot_command_map or alias in self._bot_reserved_aliases:
+                    owner = ('aiobot/bot.py (встроенная команда)'
+                             if alias in self._bot_reserved_aliases and alias not in self.bot_command_map
+                             else self.bot_command_map[alias][0])
+                    raise ValueError(f"Команда бота '/{alias}' уже занята модулем '{owner}'")
+        if hasattr(value, '_frx_type'):
+            ftype = value._frx_type
+
+            if ftype == 'command':
+                for alias in value._frx_commands:
+                    if alias in self.command_map:
+                        owner = self.command_map[alias][0]
+                        raise ValueError(f"Команда '{alias}' уже занята модулем '{owner}'")
+                    self.command_map[alias] = (module_name, value)
+                    info.commands[alias] = value
+            elif ftype == 'watcher':
+                self.watchers.append((module_name, value))
+                info.watchers.append(value)
+            elif ftype == 'telegram_event':
+                self.telegram_events.append((module_name, value))
+                info.telegram_events.append(value)
+            elif ftype == 'callback':
+                self.callbacks.append((module_name, value))
+                info.callbacks.append(value)
+            elif ftype == 'on_error':
+                self.on_error_handlers.append((module_name, value))
+                info.on_error_handlers.append(value)
+            elif ftype == 'on_account_switch':
+                self.on_account_switch_handlers.append((module_name, value))
+                info.on_account_switch_handlers.append(value)
+            elif ftype == 'on_edit':
+                self.edit_handlers.append((module_name, value))
+                info.edit_handlers.append(value)
+            elif ftype == 'on_delete':
+                self.delete_handlers.append((module_name, value))
+                info.delete_handlers.append(value)
+            elif ftype == 'on_unload':
+                info.on_unload_handlers.append(value)
+            elif ftype == 'on_start':
+                info.on_start_handlers.append(value)
+            elif ftype == 'on_load':
+                info.on_load_handlers.append(value)
+            elif ftype == 'cycle':
+                info.cycle_handlers.append((value, value._frx_cycle))
+
+        # страницы сайта (`import web`, @web.page — core/web/ui.py)
+        for page_meta in getattr(value, '_frx_web_pages', []):
+            info.web_pages.append({**page_meta, 'title': page_meta['title'], 'icon': page_meta.get('icon'), 'func': value})
+
+        # --- параллельный набор: хэндлеры СТАЦИОНАРНОГО бота (`import bot`,
+        # core/bot_decorators.py) — независимо от _frx_type выше ---
+        if hasattr(value, '_frx_bot_type'):
+            bftype = value._frx_bot_type
+
+            if bftype == 'command':
+                for alias in value._frx_bot_commands:
+                    if alias in self.bot_command_map or alias in self._bot_reserved_aliases:
+                        owner = (
+                            'aiobot/bot.py (встроенная команда)'
+                            if alias in self._bot_reserved_aliases and alias not in self.bot_command_map
+                            else self.bot_command_map[alias][0]
+                        )
+                        raise ValueError(f"Команда бота '/{alias}' уже занята модулем '{owner}'")
+                    self.bot_command_map[alias] = (
+                        module_name, value, value._frx_bot_access,
+                        getattr(value, '_frx_bot_for_user', None),
+                        getattr(value, '_frx_bot_for_chat', None),
+                        getattr(value, '_frx_bot_black_list', None),
+                        getattr(value, '_frx_bot_black_chats', None),
+                    )
+                    info.bot_commands[alias] = value
+            elif bftype == 'inline_function':
+                for alias in value._frx_bot_inline_names:
+                    if alias in self.bot_inline_function_map:
+                        owner = self.bot_inline_function_map[alias][0]
+                        raise ValueError(f"Инлайн-функция '{alias}' уже занята модулем '{owner}'")
+                    self.bot_inline_function_map[alias] = (
+                        module_name, value, value._frx_bot_access,
+                        getattr(value, '_frx_bot_for_user', None),
+                        getattr(value, '_frx_bot_for_chat', None),
+                        getattr(value, '_frx_bot_black_list', None),
+                        getattr(value, '_frx_bot_black_chats', None),
+                    )
+                    info.bot_inline_functions[alias] = value
+            elif bftype == 'inline_query':
+                for alias in value._frx_bot_iq_names:
+                    if alias in self.bot_inline_query_map or alias in self.bot_inline_function_map:
+                        owner = (self.bot_inline_query_map.get(alias) or self.bot_inline_function_map.get(alias))[0]
+                        raise ValueError(f"Инлайн-запрос '{alias}' уже занят модулем '{owner}'")
+                    self.bot_inline_query_map[alias] = (
+                        module_name, value, value._frx_bot_access,
+                        getattr(value, '_frx_bot_for_user', None), getattr(value, '_frx_bot_for_chat', None),
+                        getattr(value, '_frx_bot_black_list', None), getattr(value, '_frx_bot_black_chats', None),
+                    )
+                    info.bot_inline_queries[alias] = value
+            elif bftype == 'inline_click':
+                self.bot_inline_clicks.append((module_name, value._frx_bot_click_prefix, value, value._frx_bot_access))
+                info.bot_inline_clicks.append(value)
+            elif bftype == 'start_link':
+                self.bot_start_links.append((module_name, value._frx_bot_start_prefix, value))
+                info.bot_start_links.append(value)
+            elif bftype == 'watcher':
+                watch = getattr(value, '_frx_bot_watch', 'bot')
+                entry = (module_name, value, value._frx_bot_access, watch)
+                if watch in ('bot', 'all'):
+                    self.bot_watchers_bot.append(entry)
+                if watch in ('userbot', 'all'):
+                    self.bot_watchers_userbot.append(entry)
+                info.bot_watchers.append(value)
+            elif bftype == 'telegram_event':
+                self.bot_telegram_events.append((module_name, value))
+                info.bot_telegram_events.append(value)
+            elif bftype == 'on_error':
+                self.bot_on_error_handlers.append((module_name, value))
+                info.bot_on_error_handlers.append(value)
+            elif bftype == 'on_start':
+                info.bot_on_start_handlers.append(value)
+            elif bftype == 'on_load':
+                info.bot_on_load_handlers.append(value)
+            elif bftype == 'cycle':
+                info.bot_cycle_handlers.append((value, value._frx_bot_cycle))
+            elif bftype == 'callback':
+                self.bot_callbacks.append((module_name, getattr(value, '_frx_bot_click_prefix', '') or '',
+                                           value, value._frx_bot_access))
+                info.bot_callbacks.append(value)
 
     async def _ensure_module_requirements(self, source: str):
         """REQUIREMENTS модуля: недостающие пакеты ставятся до exec(), чтобы import в модуле сразу работал.
@@ -1363,6 +1716,7 @@ class Core:
         """
         self._guest_guard('выгрузка модуля', 'loader')
         info = self.modules.get(module_name)
+        fulllog_module.event('module', f"выгрузка {module_name}" + (" (в unloaded/)" if archive else ""))
         if not info:
             raise KeyError(f"Модуль '{module_name}' не загружен")
 
@@ -1961,6 +2315,9 @@ class Core:
             'tg_url': info.tg_url,
             'git_url': info.git_url,
             'is_builtin': info.is_builtin,
+            'is_broken': info.is_broken,                  # «Сломанные»: загружен с ошибками (см. _exec_lenient)
+            'load_errors': [dict(e) for e in info.load_errors],
+            'sleeping': [dict(e) for e in info.sleeping],
             'commands': commands,
             'watchers': _handlers(info.watchers),
             'telegram_events': _handlers(info.telegram_events),
@@ -2560,6 +2917,9 @@ class Core:
         """
         path = await self._resolve_file(file)
         text = safe_html(text)   # <не_теги> показываются как есть, а не пропадают
+        if self._too_long(text, path):
+            return await self._paged(text, path, lambda t: self.answer(message, t, file=path), message)
+        self._drop_pager(message)
         if getattr(message, 'out', True) is False:
             key = (getattr(message, 'chat_id', None), getattr(message, 'id', None))
             prev = self._guest_replies.get(key)
@@ -2590,6 +2950,8 @@ class Core:
         """Отвечает на message. file — путь на диске / ID из реестра (core/files.py)."""
         path = await self._resolve_file(file)
         text = safe_html(text)
+        if self._too_long(text, path):
+            return await self._paged(text, path, lambda t: self.reply(message, t, file=path))
         return await self._deliver_media(path, text, lambda f: message.reply(text, file=f, parse_mode='html'))
 
     async def noreply(self, message, text, file=None):
@@ -2602,6 +2964,8 @@ class Core:
         """
         path = await self._resolve_file(file)
         text = safe_html(text)
+        if self._too_long(text, path):
+            return await self._paged(text, path, lambda t: self.noreply(message, t, file=path))
         emu = current_emulation.get()                      # Emulate — ответ уходит на сайт
         if emu is not None and emu.owns_chat(getattr(message, 'chat_id', None)):
             return await emu.send_text(text, path)
@@ -2616,11 +2980,143 @@ class Core:
         """
         path = await self._resolve_file(file)
         text = safe_html(text)
+        if self._too_long(text, path):
+            return await self._paged(text, path, lambda t: self.send_message(chat_id, t, file=path))
         emu = current_emulation.get()                      # Emulate — «свой» чат = сайт
         if emu is not None and emu.owns_chat(chat_id):
             return await emu.send_text(text, path)
         entity = await self._resolve_entity(chat_id)
         return await self._deliver_media(path, text, lambda f: self.client.send_message(entity, text, file=f, parse_mode='html'))
+
+    # ------------------------------------------------------------------ #
+    # Длинный текст — страницами (core/textpages.py)
+    # Telegram не принимает текст длиннее 4096 символов (подпись к файлу — 1024). Вместо ошибки «message is too
+    # long» в сообщение идёт первая страница, а под ним — маленький пульт (инлайн-форма ◂ 1/5 ▸ · файлом · ✖),
+    # который листает САМО сообщение: оно остаётся сообщением аккаунта (премиум-эмодзи, правки модулем — как
+    # прежде). Без стационарного бота — первая страница и полный текст файлом .txt ответом на неё.
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _too_long(text, path=None) -> bool:
+        if current_emulation.get() is not None or not text:
+            return False                                  # сайт (Emulate) длину не ограничивает
+        limit = textpages_module.CAPTION_LIMIT if path else textpages_module.TEXT_LIMIT
+        if len(text) <= limit // 2:                       # заведомо короткий — не считаем
+            return False
+        return textpages_module.visible_len(text) > limit
+
+    def _drop_pager(self, message):
+        """Сообщение перерисовали обычным коротким текстом — пульт прежнего длинного вывода больше не нужен."""
+        pagers = self.__dict__.get('_pagers')
+        if not pagers:
+            return
+        key = (getattr(message, 'chat_id', None), getattr(message, 'id', None))
+        if getattr(message, 'out', True) is False:
+            prev = self._guest_replies.get(key)
+            key = (getattr(prev, 'chat_id', None), getattr(prev, 'id', None)) if prev is not None else key
+        old = pagers.pop(key, None)
+        if old is not None:
+            asyncio.ensure_future(old['close']())
+
+    async def _paged(self, text, path, deliver, message=None):
+        pages = textpages_module.split_html(
+            text, textpages_module.CAPTION_PAGE_LIMIT if path else textpages_module.PAGE_LIMIT)
+        total = len(pages)
+
+        def page_text(i):
+            return pages[i] + (textpages_module.page_footer(i, total) if total > 1 else '')
+
+        if message is not None:
+            self._drop_pager(message)
+        sent = await deliver(page_text(0))
+        if total <= 1 or sent is None:
+            return sent
+        chat_id = getattr(sent, 'chat_id', None)
+        state = {'i': 0, 'form': None}
+
+        async def send_file():
+            buf = io.BytesIO(textpages_module.html_to_plain(text).encode('utf-8'))
+            buf.name = f"frx_output_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+            return await self.client.send_file(chat_id, buf, reply_to=sent.id, force_document=True,
+                                               caption=f"📄 Полный текст ({total} стр.)")
+
+        def buttons():
+            i = state['i']
+            nav = []
+            if i > 0:
+                nav.append(("◂", "pg_prev"))
+            nav.append((f"{i + 1}/{total}", "pg_noop"))
+            if i < total - 1:
+                nav.append(("▸", "pg_next"))
+            return [nav, [("📄 Файлом", "pg_file"), ("✖", "pg_close")]]
+
+        try:
+            if self._aiogram_bot is None:
+                raise RuntimeError('нет стационарного бота')
+            mtoken = current_module.set(current_module.get() or 'core')
+            try:
+                form = await self.create_inlineform(chat_id, f"📄 Длинный ответ — {total} стр.", buttons=buttons(),
+                                                    reply_to=sent.id)
+            finally:
+                current_module.reset(mtoken)
+        except Exception as e:
+            self.tlog(f"[core] длинный ответ: пульт страниц недоступен ({e}) — полный текст файлом")
+            try:
+                await send_file()
+            except Exception as e2:
+                self.tlog(f"[core] длинный ответ: не удалось отправить файлом: {e2}")
+            return sent
+        state['form'] = form
+
+        async def close():
+            try:
+                await form.delete()
+            except Exception:
+                pass
+
+        pagers = self.__dict__.setdefault('_pagers', {})
+        pagers[(chat_id, sent.id)] = {'form': form, 'close': close}
+        while len(pagers) > 100:
+            old = pagers.pop(next(iter(pagers)))
+            asyncio.ensure_future(old['close']())
+
+        async def go(delta):
+            i = min(max(state['i'] + delta, 0), total - 1)
+            if i == state['i']:
+                return
+            state['i'] = i
+            try:
+                await sent.edit(page_text(i), parse_mode='html')
+            except MessageNotModifiedError:
+                pass
+            await form.edit(f"📄 Длинный ответ — {total} стр.", buttons=buttons())
+
+        @form.on_click(data='pg_prev')
+        async def _prev(click):
+            await click.answer()
+            await go(-1)
+
+        @form.on_click(data='pg_next')
+        async def _next(click):
+            await click.answer()
+            await go(1)
+
+        @form.on_click(data='pg_noop')
+        async def _noop(click):
+            await click.answer(f"страница {state['i'] + 1} из {total}")
+
+        @form.on_click(data='pg_file')
+        async def _file(click):
+            await click.answer("Отправляю файлом…")
+            await send_file()
+
+        @form.on_click(data='pg_close')
+        async def _close(click):
+            await click.answer()
+            pagers.pop((chat_id, sent.id), None)
+            await close()
+
+        return sent
 
     # ------------------------------------------------------------------ #
     # Медиа с заглушкой «загрузка…»
@@ -2871,8 +3367,11 @@ class Core:
         return prefix
 
     async def edit_prefix(self, new_prefix):
+        self._guest_guard('смена префикса', 'config')     # сначала проверка гостя — потом уже меняем кэш
+        new_prefix = str(new_prefix)
+        if not new_prefix or len(new_prefix) > 3 or any(ch.isspace() for ch in new_prefix):
+            raise ValueError("Префикс — от 1 до 3 символов без пробелов")
         self._prefix_cache = new_prefix
-        self._guest_guard('смена префикса', 'config')
         await self.db.set('core:prefix', new_prefix)
         return new_prefix
 
@@ -2890,6 +3389,7 @@ class Core:
         со всеми обработчиками — и юзербот после «переноса» продолжал работать на обоих аккаунтах сразу.
         """
         self._guest_guard('переключение аккаунта', 'account_manager')
+        fulllog_module.event('account', f"переключение на аккаунт {number}")
         old = self.client
         client = await self.accounts.set_account(number)
         if not client.is_connected():
@@ -2947,6 +3447,10 @@ class Core:
     def tlog(self, text):
         """Лог — отправляет text в терминал (премиум-эмодзи — их обычными эмодзи)."""
         print(f"[FRX] {visual_module.plain(text)}")
+
+    def fulllog(self, text, kind: str = 'module'):
+        """Своя строка в полный лог (user/data/logs/frx_full.log, .fulllog) — с меткой модуля. Секреты маскируются."""
+        fulllog_module.event(kind, f"{current_module.get() or '?'}: {text}")
 
     def get_version(self):
         """Версия ЯДРА FRX (см. FRX_VERSION вверху этого файла), например '1.0.0'."""
@@ -3076,14 +3580,17 @@ class Core:
         # отправит первым ответом на inline_query — без этого Telegram мог бы
         # отклонить markup, если buttons исходно больше MAX_BUTTONS_PER_PAGE.
         pages, total_pages = paginate_button_rows(buttons or [])
-        rendered0 = render_page_rows(pages, 0, total_pages)
+        # длинный текст — страницами (core/textpages.py): в чат уходит первая, под кнопками модуля — ряд листания
+        text_pages = split_form_text(text, bool(media_ref))
+        shown_text = text_pages[0]
+        rendered0 = render_page_rows(pages, 0, total_pages) + text_page_rows(0, len(text_pages))
 
         form_id = uuid.uuid4().hex
         loop = asyncio.get_event_loop()
         fut = loop.create_future()
         self._pending_forms[form_id] = {
             'future': fut, 'chat_id': chat_id, 'created_at': time.monotonic(),
-            'text': text, 'media': media_ref, 'buttons': rendered0, 'styles': styles,  # чтобы aiobot/bot.py мог сразу
+            'text': shown_text, 'media': media_ref, 'buttons': rendered0, 'styles': styles,  # чтобы aiobot/bot.py мог сразу
                                                  # ответить на inline_query РЕАЛЬНЫМ
                                                  # (уже постранично нарезанным)
                                                  # содержимым формы, без лишнего
@@ -3155,7 +3662,7 @@ class Core:
         form.styles = styles
         form.message_id = getattr(sent_msg, 'id', None)    # для form.delete()
         form._ready = loop.create_future()
-        form._init_state(text, buttons, pages)
+        form._init_state(text, buttons, pages, text_pages)
 
         async def _confirm():
             try:
@@ -3178,15 +3685,15 @@ class Core:
                 # в чате заглушка из заготовки — ставим настоящий текст и кнопки (страница 0) до set_result:
                 # правки модуля, ждущие подтверждения, лягут уже поверх
                 try:
-                    await self._inline_edit(inline_message_id, text, rendered0 if buttons else [], None, styles=form.styles)
+                    await self._inline_edit(inline_message_id, shown_text, rendered0, None, styles=form.styles)
                 except Exception as e:
                     self.tlog(f"[core] инлайн-форма: не удалось подставить содержимое в заглушку: {e}")
-            elif not buttons and not form._closed:
+            elif not rendered0 and not form._closed:
                 # aiobot/bot.py ответил на inline_query с ПЛЕЙСХОЛДЕР-кнопкой (иначе Telegram не отдал бы
                 # inline_message_id) — раз модуль кнопок не просил, снимаем её. До set_result: правки модуля,
                 # ждущие подтверждения, лягут уже поверх.
                 try:
-                    await self._inline_edit(inline_message_id, text, [], form.media, styles=form.styles)
+                    await self._inline_edit(inline_message_id, shown_text, [], form.media, styles=form.styles)
                 except Exception as e:
                     self.tlog(f"[core] инлайн-форма: не удалось снять кнопку-заглушку: {e}")
             form._ready.set_result(inline_message_id)
@@ -3268,21 +3775,21 @@ class Core:
         except Exception as e:
             self.tlog(f"[core] медиа формы не загрузилось: {e}")
             try:
-                await self._inline_edit(form.inline_message_id, (form.text or '') + "\n\n<i>медиа не загрузилось</i>",
-                                        render_page_rows(form._pages, form.page, len(form._pages)), form.media, styles=form.styles)
+                await self._inline_edit(form.inline_message_id, (form._shown_text() or '') + "\n\n<i>медиа не загрузилось</i>",
+                                        form._rows(), form.media, styles=form.styles)
             except Exception:
                 pass
             return
         if form._closed:
             return
         cls = InputMediaPhoto if real['kind'] == 'photo' else InputMediaAnimation
-        rows = render_page_rows(form._pages, form.page, len(form._pages))
+        rows = form._rows()
         markup = self._build_markup(rows, form.styles) if rows else None
         for attempt in range(3):
             try:
                 await self._aiogram_bot.edit_message_media(
                     inline_message_id=form.inline_message_id, reply_markup=markup,
-                    media=cls(media=real['file_id'], caption=_caption(form.text) or None, parse_mode='HTML'))
+                    media=cls(media=real['file_id'], caption=_caption(form._shown_text()) or None, parse_mode='HTML'))
                 form.media = real
                 return
             except Exception as e:
@@ -3374,14 +3881,87 @@ class Core:
             return True
         return False
 
+    # --- владельцы обычных сообщений бота (для @bot.callback) -------------- #
+
+    _BOT_MSG_OWNERS_KEY = 'core:bot_msg_owners'
+    _BOT_MSG_OWNERS_MAX = 3000
+
+    async def _bot_msg_owners_load(self):
+        if self._bot_msg_owners_loaded:
+            return
+        self._bot_msg_owners_loaded = True
+        try:
+            rows = await self.db.get(self._BOT_MSG_OWNERS_KEY, []) or []
+            for chat_id, message_id, module_name in rows:
+                self._bot_msg_owners.setdefault((int(chat_id), int(message_id)), str(module_name))
+        except Exception as e:
+            self.tlog(f"[bot] владельцы сообщений бота не прочитались ({e}) — начинаю с пустого списка")
+
+    def note_bot_message(self, message, module_name=None):
+        """
+        Запоминает, какой модуль отправил/переписал сообщение бота: клики по его кнопкам получит только этот модуль
+        (@bot.callback). Вызывается из engine.bot.send_message/reply/edit сам; module_name=None — текущий модуль.
+        """
+        module_name = module_name or current_module.get()
+        if not module_name or module_name == '__loading__' or message is None or message is True:
+            return
+        chat = getattr(message, 'chat', None)
+        message_id = getattr(message, 'message_id', None)
+        if chat is None or message_id is None:
+            return
+        key = (int(chat.id), int(message_id))
+        self._bot_msg_owners.pop(key, None)
+        self._bot_msg_owners[key] = module_name
+        while len(self._bot_msg_owners) > self._BOT_MSG_OWNERS_MAX:
+            self._bot_msg_owners.pop(next(iter(self._bot_msg_owners)))
+        self._bot_msg_owners_schedule_save()
+
+    def _bot_msg_owners_schedule_save(self):
+        t = self._bot_msg_owners_save_task
+        if t is not None and not t.done():
+            return
+        try:
+            self._bot_msg_owners_save_task = asyncio.get_running_loop().create_task(self._bot_msg_owners_save())
+        except RuntimeError:
+            pass
+
+    async def _bot_msg_owners_save(self):
+        await asyncio.sleep(0)                           # отправки подряд — одна запись; на диск база пишет пачкой сама
+        await self._bot_msg_owners_load()                # не затереть сохранённое до первого чтения
+        rows = [[c, m, mod] for (c, m), mod in self._bot_msg_owners.items()]
+        try:
+            await self.db.set(self._BOT_MSG_OWNERS_KEY, rows)
+        except Exception as e:
+            self.tlog(f"[bot] владельцы сообщений бота не сохранились: {e}")
+
+    async def bot_message_owner(self, chat_id, message_id):
+        """Модуль, отправивший это сообщение бота, или None (неизвестно: отправлено мимо engine.bot или очень давно)."""
+        if chat_id is None or message_id is None:
+            return None
+        await self._bot_msg_owners_load()
+        return self._bot_msg_owners.get((int(chat_id), int(message_id)))
+
     async def dispatch_bot_callback(self, callback_query):
         """
         Кнопка под ОБЫЧНЫМ сообщением бота (engine.bot.send_message(..., buttons=...)) — @bot.callback модулей.
         Вызывается ботом на callback_query без inline_message_id. True — обработано модулем.
+
+        Клик получает только модуль, отправивший сообщение (см. note_bot_message): чужие @bot.callback его не видят,
+        даже без data_startswith. Среди хэндлеров модуля первым идёт самый длинный подходящий префикс, '' — последним.
+        Владелец неизвестен (сообщение ушло через engine.bot.raw или до обновления) — ловят только хэндлеры
+        с data_startswith, совпавшим с callback_data; «ловить всё» такие клики не получают.
         """
         from .bot_events import BotClick
         data = callback_query.data or ''
-        for module_name, prefix, func, access in list(self.bot_callbacks):
+        msg = getattr(callback_query, 'message', None)
+        chat = getattr(msg, 'chat', None)
+        owner = await self.bot_message_owner(getattr(chat, 'id', None), getattr(msg, 'message_id', None))
+        if owner is not None:
+            candidates = [e for e in self.bot_callbacks if e[0] == owner]
+        else:
+            candidates = [e for e in self.bot_callbacks if e[1]]
+        candidates.sort(key=lambda e: len(e[1]), reverse=True)      # sort стабилен: при равных — порядок объявления
+        for module_name, prefix, func, access in candidates:
             if prefix and not data.startswith(prefix):
                 continue
             click = BotClick(self, callback_query)
@@ -3953,6 +4533,23 @@ class Core:
         # Клики по служебному ряду навигации (◀/N/M/▶, см.
         # core/inline_forms.py) движок ловит здесь же и обрабатывает сам —
         # form.on_click() их не видит вообще.
+        if callback_query.data in TEXT_CALLBACKS:              # листание длинного текста формы (core/textpages.py)
+            async def _ack_text():
+                try:
+                    await callback_query.answer("Отправляю файлом…" if callback_query.data == TEXT_FILE else None)
+                except Exception:
+                    pass
+            asyncio.ensure_future(_ack_text())
+            await self._click_bucket.acquire()
+            try:
+                if callback_query.data == TEXT_FILE:
+                    await form.send_text_file()
+                elif callback_query.data != TEXT_NOOP:
+                    await form._go_to_text_page(form.text_page + (-1 if callback_query.data == TEXT_PREV else 1))
+            except Exception as e:
+                self.tlog(f"[core] листание текста формы: {type(e).__name__}: {e}")
+            return
+
         if callback_query.data in (PAGE_PREV, PAGE_NEXT, PAGE_NOOP):
             async def _ack():
                 try:
@@ -3966,6 +4563,7 @@ class Core:
                 await form._go_to_page(form.page + delta)
             return
 
+        fulllog_module.event('click', f"форма {form.owner_module} · кнопка {callback_query.data!r} · от {user_id}")
         click = InlineClick(
             data=callback_query.data, from_user=None, chat_id=form.chat_id,
             inline_message_id=inline_message_id, raw_callback=callback_query,

@@ -68,8 +68,23 @@ class BotFacade:
             return buttons
         return self._core.build_inline_markup(buttons)
 
+    def own(self, message, module_name=None):
+        """
+        Пометить сообщение бота как «своё» — нужно только для сообщений, отправленных мимо обёртки
+        (engine.bot.raw.send_message(...)): клики по их кнопкам тогда дойдут до @bot.callback этого модуля.
+        send_message/reply/edit делают это сами.
+        """
+        self._core.note_bot_message(message, module_name)
+        return message
+
     async def send_message(self, chat_id, text, file=None, buttons=None, reply_to=None):
-        """Отправляет сообщение в chat_id. file/buttons опциональны, reply_to — message_id, на который отвечаем."""
+        """Отправляет сообщение в chat_id. file/buttons опциональны, reply_to — message_id, на который отвечаем.
+        Сообщение запоминается за текущим модулем: клики по его кнопкам получит только его @bot.callback."""
+        msg = await self._send_message(chat_id, text, file=file, buttons=buttons, reply_to=reply_to)
+        self._core.note_bot_message(msg)
+        return msg
+
+    async def _send_message(self, chat_id, text, file=None, buttons=None, reply_to=None):
         markup = self._markup(buttons)
         if file is None:
             return await self.raw.send_message(
@@ -134,6 +149,8 @@ class BotFacade:
             except Exception:
                 pass  # не критично — например, сообщению больше 48 часов
             return await self.send_message(message.chat.id, text, file=file, buttons=buttons)
-        return await self.raw.edit_message_text(
+        msg = await self.raw.edit_message_text(
             text, chat_id=message.chat.id, message_id=message.message_id, reply_markup=markup,
         )
+        self._core.note_bot_message(msg if msg is not True else message)
+        return msg

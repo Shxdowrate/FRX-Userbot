@@ -49,6 +49,14 @@ modules/builtin/Startup.py
        своя аватарка владельца не перезаписывается, а удалённую FRX заново не вернёт.
        Сначала через Bot API (setMyProfilePhoto), если не вышло — диалогом /setuserpic
        с @BotFather.
+    5б. Самопроверка инлайна при каждом запуске (@bot.on_start — когда бот уже принимает апдейты): аккаунт
+       отправляет боту в ЛС настоящую инлайн-форму и ждёт подтверждения ботом. getMe() показывает только
+       «инлайн включён», а выключенный инлайн-фидбэк (формы тогда падают по таймауту) виден лишь так.
+       Не вышло — /setinline + /setinlinefeedback через @BotFather и повторная проверка; тестовое сообщение
+       удаляется. Итог (если что-то пришлось чинить) — в Избранное.
+    5в. .bottoken <токен> — сменить стационарного бота: команда сразу удаляется из чата (токен — секрет),
+       токен проверяется (getMe), бот настраивается (инлайн, фидбэк, аватарка, /start), токен пишется в
+       user/config.json, и юзербот перезапускается уже с новым ботом. .bottoken без аргументов — текущий бот.
     6. При переключении на другой аккаунт (@decorators.on_account_switch())
        — бота НЕ создаёт (он один на весь юзербот, user/config.json общий для
        всех аккаунтов), только проверяет ЧС и пишет /start от лица НОВОГО
@@ -67,9 +75,11 @@ Username бота: сперва "frx_{first_name}_userbot", при занято�
 BotFather, по которому легко поправить регулярку/условие ниже.
 """
 
+import asyncio
 import json
 import random
 import re
+import time
 from pathlib import Path
 
 from aiogram import Bot as AiogramBot
@@ -77,13 +87,14 @@ from telethon.tl.functions.contacts import GetBlockedRequest, UnblockRequest
 
 import engine
 import decorators
+import bot
 import db
 import visual
 import accounts
 
 NAME = "Startup"
 MODULE_NAME = "startup"
-VERSION = "2.3"
+VERSION = "2.4"
 AUTHOR = "FRX"
 DESCRIPTION = "Автосоздание/восстановление стационарного бота через BotFather, включение его инлайн-режима и инлайн-фидбэка (100%), аватарка-логотип FRX, снятие с ЧС и старт диалога при запуске/смене аккаунта"
 TG_URL = "https://t.me/mescr_m"
@@ -275,6 +286,11 @@ async def _bot_status(token: str):
 
 
 async def _save_token(token: str, username: str):
+    try:                                           # новый токен — тоже секрет для полного лога
+        from core import fulllog
+        fulllog.add_secret(token)
+    except Exception:
+        pass
     engine.config['aiogram_token'] = token
     try:
         on_disk = json.loads(CONFIG_PATH.read_text(encoding='utf-8'))
@@ -554,6 +570,167 @@ async def startup_sequence():
     await _ensure_bot_avatar()
     await _ensure_bot_not_blocked()
     await _ensure_dialog_started()
+
+
+# --: самопроверка инлайн-формы при запуске (п. 5б) -----------------------
+
+async def _try_inline_form(username: str):
+    """Аккаунт шлёт боту в ЛС инлайн-форму и ждёт подтверждения. (True, None) или (False, причина)."""
+    form = None
+    try:
+        form = await engine.create_inlineform(f"@{username}", visual.wait("FRX: проверка инлайн-режима…"))
+        await asyncio.wait_for(form._imid(), 25)
+        return True, None
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+    finally:
+        if form is not None:
+            try:
+                await form.delete()
+            except Exception:
+                pass
+
+
+async def inline_selftest(fix: bool = True):
+    """
+    Проверка «форма реально доходит» и починка через BotFather. Возвращает
+    {'ok': bool, 'fixed': bool, 'error': str | None, 'username': str | None}.
+    """
+    token = engine.config.get('aiogram_token')
+    if not token:
+        return {'ok': False, 'fixed': False, 'error': 'стационарного бота нет', 'username': None}
+    status = await _bot_status(token)
+    if not status:
+        return {'ok': False, 'fixed': False, 'error': 'бот не отвечает на getMe', 'username': None}
+    username = status[0]
+    ok, err = await _try_inline_form(username)
+    if ok:
+        engine.tlog(f"{visual.visual('status_success')} [Startup] Инлайн-формы @{username} работают (самопроверка)")
+        return {'ok': True, 'fixed': False, 'error': None, 'username': username}
+    engine.tlog(f"{visual.visual('status_warning')} [Startup] Самопроверка инлайна @{username} не прошла: {err} — "
+                f"настраиваю /setinline и /setinlinefeedback через BotFather")
+    if not fix:
+        return {'ok': False, 'fixed': False, 'error': err, 'username': username}
+    try:
+        await _configure_bot_inline(username)
+        await db.set('inline_configured', username)
+    except Exception as e:
+        engine.tlog(f"{visual.visual('status_error')} [Startup] BotFather не настроил инлайн @{username}: {e}")
+        return {'ok': False, 'fixed': False, 'error': f"{err}; BotFather: {e}", 'username': username}
+    await asyncio.sleep(3)                         # Telegram применяет настройки бота не мгновенно
+    ok, err2 = await _try_inline_form(username)
+    if ok:
+        engine.tlog(f"{visual.visual('status_success')} [Startup] Инлайн @{username} починен: формы снова работают")
+        await _notify_owner(
+            visual.title('Инлайн-формы починены') + "\n" + visual.field('бот', f"@{username}") + "\n\n"
+            + visual.hint(f'самопроверка при запуске не прошла ({err[:120]}) — юзербот включил инлайн-режим '
+                          'и инлайн-фидбэк 100% через @BotFather, формы снова работают'))
+        return {'ok': True, 'fixed': True, 'error': None, 'username': username}
+    engine.tlog(f"{visual.visual('status_error')} [Startup] Инлайн @{username} не работает и после настройки: {err2}")
+    await _notify_owner(
+        visual.err('Инлайн-формы не работают') + "\n" + visual.field('бот', f"@{username}") + "\n"
+        + f"<code>{err2[:300]}</code>\n\n"
+        + visual.hint('вручную: @BotFather → /setinline и /setinlinefeedback → 100%, затем .restart'))
+    return {'ok': False, 'fixed': False, 'error': err2, 'username': username}
+
+
+@bot.on_start()
+async def _inline_selftest_on_start():
+    """Фоном: проверка занимает секунды (а при поломке — до минуты) и не должна задерживать bot.on_start других модулей."""
+    async def run():
+        await asyncio.sleep(2)                     # бот только что начал принимать апдейты
+        try:
+            await inline_selftest()
+        except Exception as e:
+            engine.tlog(f"{visual.visual('status_warning')} [Startup] самопроверка инлайна упала: {e}")
+    asyncio.create_task(run())
+
+
+# --: смена токена стационарного бота (п. 5в) -----------------------------
+
+def _mask_token(token: str) -> str:
+    return (token[:6] + '…' + token[-4:]) if token and len(token) > 12 else '—'
+
+
+@decorators.command('bottoken', 'settoken')
+async def bottoken_cmd(event):
+    """сменить стационарного бота: .bottoken <токен от @BotFather> (без аргумента — текущий бот)"""
+    raw = (engine.get_args() or '').strip()
+    if not raw:
+        token = engine.config.get('aiogram_token') or ''
+        status = await _bot_status(token) if token else None
+        await engine.answer(event, "\n".join([
+            visual.title('Стационарный бот'),
+            visual.field('бот', f"@{status[0]}" if status else 'не отвечает / не задан', code=False),
+            visual.field('инлайн', ('включён' if status and status[1] else 'выключен') if status else '—', code=False),
+            visual.field('токен', _mask_token(token)),
+            "",
+            visual.hint('сменить: <code>.bottoken 123456:ABC…</code> — сообщение с токеном сразу удаляется'),
+        ]))
+        return
+    m = _TOKEN_RE.search(raw)
+    chat = event.chat_id or 'me'
+    try:
+        await event.delete()                      # токен — секрет: убираем из чата сразу
+    except Exception:
+        pass
+    if not m:
+        await engine.send_message(chat, visual.err('Это не похоже на токен бота') + "\n" + visual.hint('формат: 123456789:AA…'))
+        return
+    token = m.group(0)
+    status_msg = await engine.send_message(chat, visual.wait(f"Проверяю токен {_mask_token(token)}…"))
+
+    async def say(text):
+        try:
+            await engine.answer(status_msg, text)
+        except Exception:
+            pass
+
+    status = await _bot_status(token)
+    if not status:
+        await say(visual.err('Токен не подошёл') + "\n" + visual.hint('getMe не ответил — проверьте токен в @BotFather'))
+        return
+    username, supports_inline = status
+    if token == engine.config.get('aiogram_token'):
+        await say(visual.ok(f"Этот бот уже подключён: @{username}"))
+        return
+    steps = [visual.ok(f"Бот @{username} отвечает")]
+    await say("\n".join(steps + [visual.wait('настраиваю…')]))
+    if not supports_inline:
+        try:
+            await _configure_bot_inline(username)
+            await db.set('inline_configured', username)
+            steps.append(visual.ok('инлайн-режим и инлайн-фидбэк 100% включены через @BotFather'))
+        except Exception as e:
+            steps.append(visual.warn(f"инлайн не настроен: <code>{str(e)[:200]}</code> — повторю при запуске"))
+    else:
+        steps.append(visual.ok('инлайн-режим уже включён (фидбэк проверю при запуске)'))
+    me = await engine.client.get_me()
+    try:
+        await engine.send_message(f"@{username}", '/start')
+        await db.set(f"dialog_started:{me.id}", True)
+        steps.append(visual.ok('диалог с ботом начат (/start)'))
+    except Exception as e:
+        steps.append(visual.warn(f"/start не отправлен: {e}"))
+    old = engine.config.get('aiogram_token') or ''
+    await _save_token(token, username)
+    await _reset_all_dialog_flags()
+    await db.set(f"dialog_started:{me.id}", True)
+    await db.delete('avatar_set')
+    steps.append(visual.ok('токен сохранён в user/config.json') + "  " + visual.hint(f"прежний: {_mask_token(old)}"))
+    try:
+        import frx_systemkeeper as keeper
+        can_restart = keeper.keeper_active()
+    except Exception:
+        keeper, can_restart = None, False
+    if can_restart:
+        steps.append(visual.wait('перезапускаю юзербот с новым ботом…'))
+        await say("\n".join(steps))
+        keeper.write_request('restart', notify={'chat_id': status_msg.chat_id, 'message_id': status_msg.id})
+        engine.request_shutdown(keeper.EXIT_RESTART)
+    else:
+        steps.append(visual.warn('перезапустите юзербот, чтобы подключить нового бота'))
+        await say("\n".join(steps))
 
 
 @decorators.on_account_switch()

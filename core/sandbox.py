@@ -2780,7 +2780,8 @@ class Session:
         info = self.module
         bot_msg = msg is not None and msg.sender is not None and msg.sender.id == self.bot_user.id
         if info is not None and (bot_msg or chat.side == 'bot'):
-            func = next((f for f in info.bot_callbacks if str(data).startswith(getattr(f, '_frx_bot_click_prefix', '') or '')), None)
+            cbs = sorted(info.bot_callbacks, key=lambda f: len(getattr(f, '_frx_bot_click_prefix', '') or ''), reverse=True)
+            func = next((f for f in cbs if str(data).startswith(getattr(f, '_frx_bot_click_prefix', '') or '')), None)
             if func is not None:                                # кнопка под сообщением бота — @bot.callback модуля
                 self.note('event', f"кнопка бота data={data!r} от {sender.name}", chat=chat.key)
                 click = SbBotClick(self, chat, sender, str(data), msg)

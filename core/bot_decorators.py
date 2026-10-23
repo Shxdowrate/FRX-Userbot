@@ -57,10 +57,7 @@ core/decorators.py.
     при watch='all').
 
 Доступны: command, inline_function, watcher, on_start, on_load, cycle,
-telegram_event, on_error. (callback пока не поддержан на уровне модулей —
-см. watcher() для реакции на входящие сообщения; для кликов по кнопкам ПОД
-сообщениями самого бота по-прежнему используйте @bot.callback() внутри
-aiobot/bot.py напрямую, см. README «Стационарный бот в модулях»).
+telegram_event, on_error, callback, inline_query, inline_click, start_link.
 
 command() и inline_function() (см. их докстринги ниже) принимают, помимо
 access=, ещё четыре опциональных параметра — for_user=, for_chat=,
@@ -363,8 +360,15 @@ def callback(data_startswith='', access='public'):
             await click.edit(text, buttons=None)      # переписать это сообщение
             await click.delete()
 
-    data_startswith — какие кнопки ловить (по началу callback_data); '' — любые, которые не поймал
-    модуль с более точным префиксом. access='self' — нажимать может только владелец (остальным — «не для вас»).
+    Клик получает ТОЛЬКО модуль, который отправил это сообщение (engine.bot.send_message/reply/edit,
+    event.reply()/respond() у BotMessageEvent — движок запоминает отправителя). Чужие модули его не видят,
+    даже если у них @bot.callback без data_startswith.
+
+    data_startswith — какие кнопки СВОИХ сообщений ловить (по началу callback_data); '' — все свои, которые
+    не поймал хэндлер этого же модуля с более точным (длинным) префиксом. Сообщение, отправленное мимо обёртки
+    (engine.bot.raw...), не имеет владельца: его клики достаются только хэндлерам с совпавшим data_startswith —
+    или пометьте его своим: engine.bot.own(msg).
+    access='self' — нажимать может только владелец (остальным — «не для вас»).
     В aiobot/bot.py тот же декоратор подключается напрямую к aiogram (там click — aiogram CallbackQuery).
     """
     if callable(data_startswith):                      # @bot.callback без скобок

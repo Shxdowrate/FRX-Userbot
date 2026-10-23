@@ -8,7 +8,11 @@ modules/builtin/Loader.py — загрузка, обновление, выгру
                            только после «Загрузить». Файл .txt сохраняется как user/modules/{MODULE_NAME}.py.
                            Модуль с тем же MODULE_NAME и ДРУГОЙ версией — это обновление: превью «версия X → Y»
                            и кнопка «Обновить» (старая версия тихо выгружается, см. Core._load_from_source());
-                           та же версия — ошибка «уже загружен».
+                           та же версия — ошибка «уже загружен» (кроме модуля из «Сломанных» — его можно
+                           загрузить заново той же версией).
+                           Модуль с ошибкой (не тот import, опечатка, занятая команда, даже SyntaxError) не
+                           отбрасывается: он грузится в раздел «Сломанные» — всё, что исполнилось, работает, остальные
+                           функции «спят»; список ошибок — в .help <модуль>. Выключить — .config loader keep_broken.
     .unloadmod / .ulm      выгружает модуль и переносит его файл в user/modules/unloaded/.
     .restoremods / .rsm    выгруженные модули: список → карточка с «Восстановить» / «Удалить навсегда»;
                            `.restoremods <имя>` открывает карточку сразу (без стационарного бота — восстанавливает).
@@ -48,7 +52,7 @@ import visual
 
 NAME = "Loader"
 MODULE_NAME = "loader"
-VERSION = "2.10"
+VERSION = "2.11"
 AUTHOR = "FRX"
 DESCRIPTION = "Управление модулями: загрузка/обновление (.py/.txt, с превью и подтверждением), каталог модулей с GitHub (.dlm, .modlist, .repo), выгрузка, восстановление, перезагрузка и отправка файла модуля"
 TG_URL = "https://t.me/mescr_m"
@@ -65,6 +69,43 @@ def _parse_module_meta(source: str):
     им же читаются файлы из user/modules/unloaded/.
     """
     return engine.parse_module_meta(source)
+
+
+def _syntax_meta(source: str):
+    """
+    Шапка модуля с синтаксической ошибкой (ast его не разбирает): (meta, текст ошибки) или (None, None).
+    Такой модуль можно загрузить в «Сломанные» (конфиг keep_broken), чтобы исправить и перезагрузить.
+    """
+    from core.engine import _guess_header
+    try:
+        compile(source, '<frx_module>', 'exec')
+        return None, None
+    except SyntaxError as e:
+        err = f"строка {e.lineno}: {e.msg}" if e.lineno else str(e.msg)
+    head = _guess_header(source)
+    if not head.get('MODULE_NAME'):
+        return None, err
+    meta = {'module_name': head['MODULE_NAME'], 'name': head.get('NAME', head['MODULE_NAME']),
+            'version': head.get('VERSION', '1.0'), 'author': head.get('AUTHOR', 'unknown'),
+            'description': head.get('DESCRIPTION', ''), 'commands': [], 'tg_url': '', 'git_url': '',
+            'requirements': []}
+    return meta, err
+
+
+def _broken_note(info) -> str:
+    """Пара строк под «Модуль загружен», если он попал в «Сломанные»."""
+    if not getattr(info, 'is_broken', False):
+        return ""
+    lines = ["", visual.warn(f"Загружен с ошибками — раздел «Сломанные»")]
+    for e in info.load_errors[:4]:
+        where = f"строка {e['line']}" if e.get('line') else (e.get('stage') or '?')
+        lines.append(visual.item(f"{where}: <code>{html.escape(str(e.get('error'))[:200])}</code>"))
+    if info.sleeping:
+        names = ", ".join(f"<code>{html.escape(z['name'])}</code>" for z in info.sleeping[:6])
+        lines.append(visual.item(f"спят: {names}" + (f" и ещё {len(info.sleeping) - 6}" if len(info.sleeping) > 6 else "")))
+    lines.append(visual.hint(f"подробности — <code>.help {html.escape(info.module_name)}</code>, "
+                             f"после правки — <code>.reloadmod {html.escape(info.module_name)}</code>"))
+    return "\n".join(lines)
 
 
 def _build_preview_text(meta: dict, file_name: str, existing=None) -> str:
@@ -189,7 +230,7 @@ async def _do_load_now(event, source: str, is_update: bool = False):
                 visual.field('автор', info.author, code=False),
                 *_link_lines({'tg_url': info.tg_url, 'git_url': info.git_url}),
                 visual.item(f"описание  {info.description or '—'}"),
-            ]),
+            ]) + _broken_note(info),
         )
     except Exception as e:
         await engine.answer(
@@ -202,11 +243,15 @@ async def _do_load_now(event, source: str, is_update: bool = False):
 async def _offer_source(event, source: str, file_name: str, origin: str = None):
     """Превью модуля из исходника и загрузка после «Загрузить» (общая часть .loadmod и .dlm)."""
     meta = _parse_module_meta(source)
+    syntax_error = None
     if meta is None:
-        await engine.answer(event, visual.err('Файл содержит синтаксическую ошибку или не задан MODULE_NAME'))
-        return
+        meta, syntax_error = _syntax_meta(source)
+        if meta is None or not await _cfg('keep_broken', True):
+            await engine.answer(event, visual.err('Файл содержит синтаксическую ошибку или не задан MODULE_NAME')
+                                + (f"\n<code>{html.escape(syntax_error)}</code>" if syntax_error else ""))
+            return
     existing = engine.modules.get(meta['module_name'])
-    if existing is not None and existing.version == meta['version']:
+    if existing is not None and existing.version == meta['version'] and not existing.is_broken:
         await engine.answer(event, visual.warn('Модуль уже загружен') + "\n" + visual.field('MODULE_NAME', meta['module_name'])
                             + "\n" + visual.field('версия', existing.version) + "\n\n" + visual.hint('эта версия уже установлена'))
         return
@@ -215,6 +260,10 @@ async def _offer_source(event, source: str, file_name: str, origin: str = None):
         return
     is_update = existing is not None
     preview_text = _build_preview_text(meta, file_name, existing=existing)
+    if syntax_error:
+        preview_text += ("\n" + visual.warn("Синтаксическая ошибка: ") + f"<code>{html.escape(syntax_error)}</code>\n"
+                         + visual.hint("модуль попадёт в «Сломанные» без работающих функций — исправьте файл "
+                                       "и загрузите снова или выполните .reloadmod"))
     if origin:
         preview_text += "\n" + visual.hint(f"источник: {html.escape(origin)}")
     try:
@@ -236,7 +285,7 @@ async def _offer_source(event, source: str, file_name: str, origin: str = None):
             text = "\n".join([visual.ok(f"Модуль {'обновлён' if is_update else 'загружен'}"),
                               visual.field('название', info.name, code=False), visual.field('id', info.module_name),
                               visual.field('версия', info.version), visual.field('автор', info.author, code=False)]
-                             + _link_lines({'tg_url': info.tg_url, 'git_url': info.git_url}))
+                             + _link_lines({'tg_url': info.tg_url, 'git_url': info.git_url})) + _broken_note(info)
             state['text'] = text
             extra, rows = await _after_install(info, "loader_join:")
             text += "\n".join(extra)
@@ -507,11 +556,11 @@ async def reload_module_cmd(event):
                 )
             return
 
-        await engine.reload_module(module_name)
+        info = await engine.reload_module(module_name)
 
         await engine.answer(
             event,
-            visual.ok('Модуль перезагружен') + "\n" + visual.field('модуль', module_name),
+            visual.ok('Модуль перезагружен') + "\n" + visual.field('модуль', module_name) + _broken_note(info),
         )
 
     except Exception as e:
@@ -839,6 +888,9 @@ async def _loader_setup():
                                default=list(DEFAULT_REPOS))
     await engine.create_config(key='github_token', description='Токен GitHub — только для приватных репозиториев (и выше лимит запросов)',
                                data_type='str', default='', valid={'max_len': 200})
+    await engine.create_config(key='keep_broken', description='Модуль с ошибкой не выбрасывать, а грузить в «Сломанные»: '
+                               'что исполнилось — работает, остальное спит (удобно при разработке модулей)',
+                               data_type='bool', default=True)
 
 
 async def _cfg(key, default=None):

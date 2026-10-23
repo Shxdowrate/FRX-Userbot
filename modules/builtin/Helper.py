@@ -2,12 +2,13 @@
 modules/builtin/Helper.py — помощь по модулям, проверка файлов модулей и карточки модулей.
 
 Команды:
-    .modules / .mods       список модулей текстом — «Встроенные» и «Загруженные» — и кнопка «Выбрать модуль»:
+    .modules / .mods       список модулей текстом — «Встроенные», «Загруженные» и «Сломанные» (загружены с ошибками:
+                           что исполнилось — работает, остальное «спит») — и кнопка «Выбрать модуль»:
                            7 модулей на странице (встроенные ▣, загруженные ▤, навигация — engine.picker_page()).
     .help / .h [модуль]    то же; с именем модуля — сразу его карточка.
     .checkmodule / .checkmod, .checkall — проверка файла модуля и всех модулей на типовые ошибки.
 
-Карточка модуля: описание, команды; кнопки «▸ Отправить модуль» (как `.sendmodule`, modules/builtin/Loader.py),
+Карточка модуля: описание, команды (у сломанного — ещё «Ошибки загрузки» и «Спят»); кнопки «▸ Отправить модуль» (как `.sendmodule`, modules/builtin/Loader.py),
 «Открыть конфиг» — только если у модуля есть настройки, открывает `.config <модуль>` через engine.exec_modcmd(),
 «Удалить модуль» — с подтверждением, удаляет файл совсем (мягкая выгрузка — .unloadmod, возврат — .restoremods);
 для встроенных модулей удаление недоступно. «Назад» возвращает на ту страницу списка, где стоит модуль.
@@ -28,7 +29,7 @@ import db
 
 NAME = "Helper"
 MODULE_NAME = "helper"
-VERSION = "2.4"
+VERSION = "2.5"
 AUTHOR = "FRX"
 DESCRIPTION = "Информация о модулях (инлайн-меню), проверка файлов и помощь"
 TG_URL = "https://t.me/mescr_m"
@@ -86,21 +87,31 @@ PAGE_SIZE = 7            # модулей на одной странице вы�
 LIST_TEXT_LIMIT = 3800   # запас до лимита Telegram (4096) на сообщение
 
 
-def _module_groups():
-    """([встроенные], [загруженные]) — MODULE_NAME, каждая группа по алфавиту."""
-    builtin, loaded = [], []
+def _module_groups3():
+    """([встроенные], [загруженные], [сломанные]) — MODULE_NAME, каждая группа по алфавиту.
+    «Сломанные» — загруженные с ошибками (часть кода не исполнилась или часть функций спит), см. .help <модуль>."""
+    builtin, loaded, broken = [], [], []
     for module_name in sorted(engine.get_module_list(), key=lambda x: x.lower()):
         info = engine.get_module_info(module_name)
         if not info:
             continue
-        (builtin if info.get('is_builtin') else loaded).append(module_name)
-    return builtin, loaded
+        if info.get('is_broken'):
+            broken.append(module_name)
+        else:
+            (builtin if info.get('is_builtin') else loaded).append(module_name)
+    return builtin, loaded, broken
+
+
+def _module_groups():
+    """([встроенные], [загруженные + сломанные]) — для мест, где нужно только «встроенный или нет»."""
+    builtin, loaded, broken = _module_groups3()
+    return builtin, loaded + broken
 
 
 def _ordered_modules():
-    """Сперва встроенные, потом загруженные."""
-    builtin, loaded = _module_groups()
-    return builtin + loaded
+    """Сперва встроенные, потом загруженные, в конце — сломанные (тот же порядок, что в списке)."""
+    builtin, loaded, broken = _module_groups3()
+    return builtin + loaded + broken
 
 
 def _module_line(module_name):
@@ -147,8 +158,8 @@ def _access(entry):
 def _list_pages():
     """Главный экран постранично: [текст страницы, …] + упорядоченный список MODULE_NAME.
     Всё, что не влезает в одно сообщение, уходит на следующие страницы (стрелки ◂ ▸ под списком)."""
-    builtin, loaded = _module_groups()
-    total = len(builtin) + len(loaded)
+    builtin, loaded, broken = _module_groups3()
+    total = len(builtin) + len(loaded) + len(broken)
     if not total:
         return [visual.warn('Нет загруженных модулей')], []
 
@@ -156,6 +167,7 @@ def _list_pages():
     for title, names, empty in (
         (visual.section(f"Встроенные ({len(builtin)})"), builtin, visual.hint('нет встроенных модулей')),
         (visual.section(f"Загруженные ({len(loaded)})"), loaded, visual.hint('нет загруженных модулей — <code>.loadmod</code>')),
+        *([(visual.section(f"Сломанные ({len(broken)})"), broken, '')] if broken else []),
     ):
         if not names:
             blocks.append((title, empty))
@@ -165,7 +177,7 @@ def _list_pages():
     # инлайн-запросы и команды бота всех модулей — одной строкой каждый, с доступом
     bot_name = _bot_username() or 'бот'
     inline, bcmds = [], []
-    for module_name in builtin + loaded:
+    for module_name in builtin + loaded + broken:
         info = engine.get_module_info(module_name) or {}
         for e in (info.get('bot_inline_queries') or []) + (info.get('bot_inline_functions') or []):
             inline.append(f"<code>{e['name']}</code> <i>{_access(e).split(' ', 1)[0]}</i>")
@@ -247,6 +259,8 @@ def _picker(page, query=None):
     for module_name in names:
         info = engine.get_module_info(module_name) or {}
         icon = visual.visual('module') if info.get('is_builtin') else visual.visual('file')
+        if info.get('is_broken'):
+            icon = visual.visual('status_warning')
         items.append((f"{icon} {info.get('name', module_name)}", f"help_open:{module_name}"))
     if items:
         rows, page, total = engine.picker_page(items, page, per_page=PAGE_SIZE, page_callback="help_page:")
@@ -282,6 +296,34 @@ def _link(url):
     return f'<a href="{html.escape(url, quote=True)}">{html.escape(short_link(url))}</a>'
 
 
+def _broken_lines(info, module_name):
+    """Блок «Ошибки загрузки» и «Спят» в карточке сломанного модуля."""
+    errors, sleeping = info.get('load_errors') or [], info.get('sleeping') or []
+    if not errors and not sleeping:
+        return []
+    out = []
+    if errors:
+        out.append(visual.section(f"Ошибки загрузки ({len(errors)})"))
+        for e in errors[:8]:
+            where = f"строка {e['line']}" if e.get('line') else (e.get('stage') or '?')
+            if e.get('function'):
+                where += f", {html.escape(e['function'])}()"
+            out.append(visual.item(f"{where}: <code>{html.escape(str(e.get('error') or '?')[:300])}</code>"))
+        if len(errors) > 8:
+            out.append(visual.hint(f"… и ещё {len(errors) - 8}"))
+    if sleeping:
+        out.append(visual.section(f"Спят ({len(sleeping)})"))
+        for z in sleeping[:12]:
+            out.append(visual.item(f"<code>{html.escape(z.get('name') or '?')}</code> — {html.escape(z.get('kind') or '')}: "
+                                   f"{html.escape(str(z.get('reason') or '')[:200])}"))
+        if len(sleeping) > 12:
+            out.append(visual.hint(f"… и ещё {len(sleeping) - 12}"))
+    out.append(visual.hint(f"исправьте файл и выполните <code>.reloadmod {html.escape(module_name)}</code> — "
+                           "остальные функции модуля работают"))
+    out.append("")
+    return out
+
+
 def _module_detail_text(info, module_name):
     """Подробная карточка модуля — используется и .help <module>, и инлайн-меню."""
     display_name = info.get('name', module_name)
@@ -290,6 +332,8 @@ def _module_detail_text(info, module_name):
     description = info.get('description', 'Нет описания')
     commands = info.get('commands', [])
     kind = "встроенный" if info.get('is_builtin') else "загруженный"
+    if info.get('is_broken'):
+        kind += ", с ошибками"
 
     lines = [
         visual.title(display_name, description),
@@ -303,6 +347,7 @@ def _module_detail_text(info, module_name):
     if info.get('git_url'):
         lines.append(visual.field('исходник', _link(info['git_url']), code=False))
     lines.append("")
+    lines += _broken_lines(info, module_name)
 
     if commands:
         lines.append(visual.section(f"Команды ({len(commands)})"))

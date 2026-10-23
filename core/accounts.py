@@ -51,6 +51,19 @@ from .paths import DATA_DIR
 ACCOUNTS_FILE = DATA_DIR / 'accounts.json'
 
 
+def _session_of(entry: dict):
+    """
+    Сессия для TelegramClient: у первого аккаунта (вход при установке) — его ФАЙЛОВАЯ сессия
+    (entry['session_file'], user/data/frx_session.session): в ней кэш собеседников и состояние обновлений,
+    которых нет у StringSession (без них после перезапуска не находились пользователи вне недавних диалогов
+    и терялись пропущенные апдейты). Файла нет — запасная копия entry['session'] (StringSession).
+    """
+    sf = entry.get('session_file')
+    if sf and Path(str(sf) + '.session').is_file():
+        return str(sf)
+    return StringSession(entry.get('session') or '')
+
+
 class AccountManager:
     def __init__(self, api_id, api_hash):
         self.api_id = api_id
@@ -122,7 +135,7 @@ class AccountManager:
         if entry is None:
             raise ValueError(f"Аккаунт '{number}' не найден. Сначала используйте add_account().")
         if number not in self.clients:
-            client = TelegramClient(StringSession(entry['session']), self.api_id, self.api_hash)
+            client = TelegramClient(_session_of(entry), self.api_id, self.api_hash)
             await client.connect()
             self.clients[number] = client
         self.active = number
@@ -164,7 +177,7 @@ class AccountManager:
             try:
                 if client is None:
                     client = TelegramClient(
-                        StringSession(entry.get('session') or ''), self.api_id, self.api_hash
+                        _session_of(entry), self.api_id, self.api_hash
                     )
                     own_client = True
                 if not client.is_connected():
@@ -240,7 +253,7 @@ class AccountManager:
         if key is None:
             return {'status': 'not_found'}
         entry = self.data['forgotten'][key]
-        client = TelegramClient(StringSession(entry.get('session') or ''), self.api_id, self.api_hash)
+        client = TelegramClient(_session_of(entry), self.api_id, self.api_hash)
         try:
             await client.connect()
             authorized = await client.is_user_authorized()
@@ -381,7 +394,7 @@ class AccountManager:
             client = self.clients.get(num)
             temp_client = None
             if client is None:
-                temp_client = TelegramClient(StringSession(entry['session']), self.api_id, self.api_hash)
+                temp_client = TelegramClient(_session_of(entry), self.api_id, self.api_hash)
                 await temp_client.connect()
                 client = temp_client
 
@@ -423,6 +436,50 @@ class AccountManager:
             first = next(iter(self.data['accounts']))
             return await self.set_account(first)
         return self.clients.get(self.active)
+
+    def adopt_client(self, client, me, make_active: bool = True) -> str | None:
+        """
+        Вносит в user/data/accounts.json аккаунт, вход в который был выполнен НЕ через менеджер — первый вход
+        при установке (консоль / приложение FRX) идёт файловой сессией user/data/frx_session.session, и раньше
+        этот аккаунт не попадал ни в .acc, ни в accounts.json. Сессия копируется в StringSession (тот же ключ
+        авторизации — повторный вход не нужен), клиент становится активным. Возвращает номер или None, если
+        номер не удалось узнать. Уже внесённый аккаунт (тот же id) не дублируется.
+        """
+        if me is None:
+            return None
+        phone = getattr(me, 'phone', None)
+        number = ('+' + str(phone).lstrip('+')) if phone else f"id{me.id}"
+        for key, entry in self.data['accounts'].items():
+            if (entry.get('info') or {}).get('id') == me.id:
+                number = key
+                break
+        try:
+            session_str = StringSession.save(client.session)
+        except Exception as e:
+            print(f"[FRX] [WARN] Не удалось сохранить сессию первого аккаунта в accounts.json: {e}")
+            return None
+        entry = self.data['accounts'].get(number) or {'tags': {}, 'info': {}}
+        entry['session'] = session_str                     # запасная копия ключа
+        filename = getattr(client.session, 'filename', None)
+        if filename and str(filename).endswith('.session'):
+            entry['session_file'] = str(filename)[:-len('.session')]   # работать — на самой файловой сессии
+        entry.setdefault('tags', {})
+        entry['info'] = {
+            **(entry.get('info') or {}),
+            'id': me.id, 'first_name': me.first_name, 'last_name': me.last_name, 'username': me.username,
+            'updated_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+        }
+        self.data['accounts'][number] = entry
+        self.data.get('forgotten', {}).pop(number, None)
+        if make_active or not self.data.get('active'):
+            self.data['active'] = number
+            self.active = number
+            self.clients[number] = client
+        self._save()
+        return number
+
+    def has_account_id(self, user_id) -> bool:
+        return any((e.get('info') or {}).get('id') == user_id for e in self.data['accounts'].values())
 
     def new_login(self) -> 'AddAccount':
         """

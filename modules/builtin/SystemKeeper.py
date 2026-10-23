@@ -16,6 +16,9 @@ modules/builtin/SystemKeeper.py
                             ответом на .zip-файл (внутри должна быть папка FRX/) — из файла.
                           Перед установкой показывается инлайн-превью (версии, что изменится);
                           без стационарного бота подтверждение — словом `yes` в команде.
+                          Ход виден по этапам: скачивание (полоска, МБ, скорость), проверка, подтверждение — в
+                          сообщении с командой; резервная копия, замена файлов, pip, запуск — в форме: пока
+                          юзербот остановлен, форму правит сам keeper через Bot API.
     .sk / .systemkeeper — статус keeper'а, настройки обновления, резервные копии.
 
 Что обновляется: все файлы кода из архива, включая новые (кроме user/, .git, окружений и кэшей); файлы
@@ -52,7 +55,7 @@ from core import database
 
 NAME = "SystemKeeper"
 MODULE_NAME = "systemkeeper"
-VERSION = "1.3"
+VERSION = "1.4"
 AUTHOR = "FRX"
 DESCRIPTION = "Перезагрузка и обновление юзербота (из файла и из GitHub) через frx_systemkeeper.py"
 TG_URL = "https://t.me/mescr_m"
@@ -64,6 +67,7 @@ DETAIL_LINES = 40
 
 # Подробности, дождавшиеся готовности стационарного бота (см. _send_pending_details)
 _pending_details = None
+_pending_form = None          # (inline_message_id, текст) — итог в форме .update, когда поднимется бот
 
 
 # --------------------------------------------------------------------- #
@@ -164,7 +168,8 @@ async def _confirm_flow(event, text, on_confirm, on_cancel, yes, tag):
         await on_cancel()
         await form.edit(visual.warn("<b>Отменено</b>"), buttons=None)
 
-    await engine.answer(event, visual.wait("Проверьте данные в форме ниже и подтвердите"))
+    if tag != 'update':                         # у .update в сообщении уже ход обновления (этап «Подтверждение»)
+        await engine.answer(event, visual.wait("Проверьте данные в форме ниже и подтвердите"))
 
 
 # --------------------------------------------------------------------- #
@@ -243,6 +248,58 @@ async def exit_cmd(event):
 DEFAULT_REPO = 'Shxdowrate/FRX-Userbot'     # .update без настроек — отсюда
 
 
+class _Progress:
+    """
+    Ход .update в исходном сообщении: этапы (✅ / ⏳ / ▫️ / ❌), полоска, МБ и скорость скачивания. Правки — не чаще
+    раза в 1,5 с (лимиты Telegram); тяжёлая работа идёт в потоке и только пишет в self.state.
+    """
+
+    def __init__(self, event, source_label):
+        self.event = event
+        self.source = source_label
+        self.stage = 0
+        self.detail = ''
+        self.state = {'done': 0, 'total': None, 'started': time.monotonic()}
+        self._last = 0.0
+        self._shown = None
+
+    def text(self, failed=False):
+        return keeper.update_stages_text(self.stage, self.detail, failed=failed) + "\n" + visual.field("источник", _esc(self.source))
+
+    async def show(self, stage=None, detail=None, force=False, failed=False):
+        if stage is not None:
+            self.stage = stage
+        if detail is not None:
+            self.detail = detail
+        now = time.monotonic()
+        if not force and now - self._last < 1.5:
+            return
+        text = self.text(failed)
+        if text == self._shown:
+            return
+        self._last, self._shown = now, text
+        try:
+            await engine.answer(self.event, text)
+        except Exception as e:
+            engine.tlog(f"[SystemKeeper] ход обновления не показан: {e}")
+
+    def download_detail(self) -> str:
+        done, total = self.state['done'], self.state['total']
+        elapsed = max(time.monotonic() - self.state['started'], 0.001)
+        speed = f"{_fmt_size(done / elapsed)}/с"
+        if total:
+            pct = min(done * 100 / total, 100)
+            return f"{engine.progress_bar(pct, 12, show_percent=True)}  {_fmt_size(done)} из {_fmt_size(total)} · {speed}"
+        return f"{_fmt_size(done)} · {speed}"
+
+    async def watch_download(self, task):
+        """Пока идёт скачивание (task) — раз в 1,5 с обновляет строку с процентами/МБ/скоростью."""
+        while not task.done():
+            await self.show(0, self.download_detail())
+            await asyncio.wait([task], timeout=1.5)
+        return task.result()
+
+
 @decorators.command('update', 'upd')
 async def update_cmd(event):
     """обновление FRX из GitHub; ответом на .zip (папка FRX/) — из файла; `yes` — без инлайн-подтверждения"""
@@ -261,6 +318,7 @@ async def update_cmd(event):
     from_git = replied_file is None
 
     zip_path = keeper.INCOMING_DIR / 'update.zip'
+    progress = None
     try:
         keeper.INCOMING_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -268,9 +326,17 @@ async def update_cmd(event):
             repo = (await _cfg('github_repo') or '').strip() or DEFAULT_REPO
             branch = await _cfg('github_branch')
             token = await _cfg('github_token')
-            await engine.answer(event, visual.wait("Скачиваю обновление с GitHub…"))
-            slug = await asyncio.to_thread(keeper.download_github, repo, branch, token, str(zip_path))
+            progress = _Progress(event, f"GitHub {repo}@{branch or 'main'}")
+            await progress.show(0, "соединяюсь с GitHub…", force=True)
+
+            def on_chunk(done, total):
+                progress.state['done'], progress.state['total'] = done, total
+
+            task = asyncio.ensure_future(asyncio.to_thread(
+                keeper.download_github, repo, branch, token, str(zip_path), on_chunk))
+            slug = await progress.watch_download(task)
             source_kind, source_label = 'github', f"GitHub {slug}"
+            progress.source = source_label
         else:
             replied = replied_file
             file_name = replied.file.name or ''
@@ -280,18 +346,26 @@ async def update_cmd(event):
             if (replied.file.size or 0) > MAX_UPDATE_ZIP:
                 await engine.answer(event, visual.err("Архив слишком большой") + "\n" + visual.field("лимит", _fmt_size(MAX_UPDATE_ZIP)))
                 return
-            await engine.answer(event, visual.wait("Скачиваю файл…"))
-            await replied.download_media(file=str(zip_path))
             source_kind, source_label = 'file', f"файл {file_name}"
+            progress = _Progress(event, source_label)
+            await progress.show(0, "скачиваю файл из Telegram…", force=True)
 
-        await engine.answer(event, visual.wait("Проверяю архив…"))
+            def on_file(done, total):
+                progress.state['done'], progress.state['total'] = done, total or None
+
+            task = asyncio.ensure_future(replied.download_media(file=str(zip_path), progress_callback=on_file))
+            await progress.watch_download(task)
+
+        await progress.show(1, f"скачано {_fmt_size(progress.state['done'])} — проверяю файлы и синтаксис…", force=True)
         info = await asyncio.to_thread(keeper.prepare_update, str(zip_path), source_kind, engine.get_version())
 
     except keeper.KeeperError as e:
-        await engine.answer(event, visual.err("Обновление отклонено") + f"\n{_esc(e)}")
+        await engine.answer(event, (progress.text(failed=True) + "\n\n" if progress else "")
+                            + visual.err("Обновление отклонено") + f"\n{_esc(e)}")
         return
     except Exception as e:
-        await engine.answer(event, visual.err("Ошибка") + f"\n<code>{_esc(e)}</code>")
+        await engine.answer(event, (progress.text(failed=True) + "\n\n" if progress else "")
+                            + visual.err("Ошибка") + f"\n<code>{_esc(e)}</code>")
         engine.tlog(f"[SystemKeeper] ошибка подготовки обновления: {e}")
         return
     finally:
@@ -300,11 +374,13 @@ async def update_cmd(event):
         except OSError:
             pass
 
+    meta = {'from': info['from'], 'to': info['to'], 'source': source_label}
     total = len(info['added']) + len(info['changed']) + len(info['removed'])
     text = "\n".join([
         visual.title("Обновление FRX"),
         f"{visual.visual('element')} версия  <code>{_esc(info['from'])}</code> → <code>{_esc(info['to'])}</code>",
         visual.field("источник", _esc(source_label)),
+        visual.field("скачано", _fmt_size(progress.state['done'])),
         visual.field("файлов", total),
         visual.item(f"новых {len(info['added'])}, изменённых {len(info['changed'])}, удалённых {len(info['removed'])}", 1),
     ]) + "\n"
@@ -315,22 +391,30 @@ async def update_cmd(event):
     text += (
         "\n" + visual.warn("Юзербот остановится, файлы обновятся, затем он запустится снова.") + "\n"
         + visual.hint("папка user/ (сессии, БД, конфиги, модули) не затрагивается; "
-                      "перед заменой создаётся резервная копия, при неудачном запуске — откат")
+                      "перед заменой создаётся резервная копия, при неудачном запуске — откат; "
+                      "ход обновления будет виден в этой форме")
     )
 
+    await progress.show(2, "ждёт подтверждения в форме ниже" if not yes else "подтверждено словом yes", force=True)
+
     async def _go(form):
-        progress = visual.wait("Останавливаю юзербот и обновляю файлы…")
+        notify = _notify(event)
+        stage_text = keeper.update_stages_text(keeper.STAGE_BACKUP, "останавливаю юзербот…", meta)
         if form is not None:
-            await form.edit(progress, buttons=None)
+            try:
+                notify['inline_message_id'] = await form._imid()     # keeper будет править эту форму сам
+            except Exception:
+                pass
+            await form.edit(stage_text, buttons=None)
+            await progress.show(keeper.STAGE_BACKUP, "ход обновления — в форме ниже", force=True)
         else:
-            await engine.answer(event, progress)
-        keeper.write_request('update', notify=_notify(event), meta={
-            'from': info['from'], 'to': info['to'], 'source': source_label,
-        })
+            await engine.answer(event, stage_text)
+        keeper.write_request('update', notify=notify, meta=meta)
         engine.request_shutdown(keeper.EXIT_APPLY)
 
     async def _cancel():
         keeper.cleanup_work_dirs()
+        await progress.show(2, "отменено", force=True, failed=True)
 
     await _confirm_flow(event, text, _go, _cancel, yes, 'update')
 
@@ -513,6 +597,16 @@ async def setup():
     keeper.clear_result()
 
     await _edit_origin(res)
+    global _pending_form
+    imid = (res.get('notify') or {}).get('inline_message_id')
+    if imid and res.get('action') == 'update':
+        meta = {'from': res.get('from'), 'to': res.get('to')}
+        if res.get('ok'):
+            _pending_form = (imid, keeper.update_stages_text(len(keeper.UPDATE_STAGES), '', meta, done=True)
+                             + "\n\n" + visual.ok("FRX обновлён" + _elapsed(res)))
+        else:
+            _pending_form = (imid, keeper.update_stages_text(keeper.STAGE_START, '', meta, failed=True)
+                             + "\n\n" + _short_text(res))
 
     details = _details_text(res)
     if details:
@@ -525,7 +619,13 @@ async def setup():
 @bot.on_start()
 async def _send_pending_details():
     """Стационарный бот поднят — отправляем накопленные подробности (см. Logging.py, тот же путь)."""
-    global _pending_details
+    global _pending_details, _pending_form
+    form, _pending_form = _pending_form, None
+    if form:
+        try:
+            await engine._aiogram_bot.edit_message_text(text=form[1], inline_message_id=form[0], parse_mode='HTML')
+        except Exception as e:
+            engine.tlog(f"[SystemKeeper] итог в форме .update не показан: {e}")
     text, _pending_details = _pending_details, None
     if not text:
         return
