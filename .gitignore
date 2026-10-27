@@ -17,6 +17,7 @@ __pycache__/
 *.py[co]
 *.log
 /dist/
+/_rollback/
 .idea/
 .vscode/
 .DS_Store

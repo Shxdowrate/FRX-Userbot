@@ -148,6 +148,7 @@ def _apply_layout() -> None:
     g['WEB_TAKEOVER_FILE'] = k / 'web_takeover'       # новый main.py -> keeper: «отдай порт»
     g['WEB_WAKE_FILE'] = k / 'web_wake'               # сторож keeper'а -> юзербот: «кто-то зашёл на сайт, поднимай»
     g['SENTINEL_FILE'] = k / 'web_sentinel.json'      # keeper -> юзербот: «порт сторожа такой-то»
+    g['WEB_OFF_FILE'] = k / 'web_off'                 # юзербот -> keeper: сайт выключили руками — заходом НЕ поднимать
     g['TUNNEL_REQUEST_FILE'] = k / 'tunnel_request.json'  # юзербот -> keeper: включить/выключить публичный туннель
     g['TUNNEL_STATE_FILE'] = k / 'tunnel.json'            # keeper -> юзербот: адрес туннеля и его состояние
     g['BIN_DIR'] = d / 'bin'                              # скачанные программы (cloudflared)
@@ -156,12 +157,12 @@ def _apply_layout() -> None:
 USER_DIR = LEGACY = CONFIG_PATH = DATA_DIR = MODULES_DIR = USER_ASSETS_DIR = None
 KEEPER_DIR = BACKUP_DIR = STAGING_DIR = RESTORE_DIR = INCOMING_DIR = TMP_DIR = None
 REQUEST_FILE = RESULT_FILE = READY_FILE = JOURNAL_FILE = LOG_FILE = None
-WEB_STATE_FILE = WEB_TAKEOVER_FILE = WEB_WAKE_FILE = SENTINEL_FILE = None
+WEB_STATE_FILE = WEB_TAKEOVER_FILE = WEB_WAKE_FILE = SENTINEL_FILE = WEB_OFF_FILE = None
 TUNNEL_REQUEST_FILE = TUNNEL_STATE_FILE = BIN_DIR = None
 _apply_layout()
 
 WEB_STATIC_DIR = ROOT / 'core' / 'web' / 'static'
-WEB_STATIC_FILES = {'login.css', 'login.js', 'style.css', 'app.js', 'bg.webp', 'font.woff2', 'botchat.js', 'botchat.css', 'webide.js', 'webide.css', 'sandbox.js',
+WEB_STATIC_FILES = {'login.css', 'login.js', 'style.css', 'app.js', 'boot.js', 'bg.webp', 'font.woff2', 'botchat.js', 'botchat.css', 'webide.js', 'webide.css', 'sandbox.js',
                     'lab_core.js', 'lab.js', 'lab.css', 'panel.js', 'panel.css', 'neuro.js', 'neuro.css',
                     'accent.css', 'fx.js', 'access.js', 'access.css', 'depth.js', 'depth.css', 'mobile.css', 'mobile.js'}
 WEB_DEFAULT_PORT = 8878
@@ -194,6 +195,7 @@ EXCLUDE_TOP = frozenset({
     'user', 'config.json', 'data', MANIFEST_NAME,                  # личное (и старая раскладка), сам манифест
     '.git', '.hg', '.svn', '.venv', 'venv', 'env', '.env', '.idea', '.vscode', 'node_modules', '__pycache__',
     '.pytest_cache', '.mypy_cache', '.ruff_cache', 'dist', 'build',
+    '_rollback',                                                   # черновые копии кода при разработке — не релиз
 })
 EXCLUDE_PREFIXES = ('modules/loaded/', 'modules/unloaded/')
 _JUNK_NAMES = frozenset({'.DS_Store', 'Thumbs.db', 'desktop.ini'})
@@ -1601,15 +1603,31 @@ class WebSentinel(WebPlaceholder):
         except OSError:
             pass
 
+    @staticmethod
+    def switched_off() -> bool:
+        """Сайт выключили руками (кнопка «выключить», .web stop) — заход на страницу его не поднимает, только .web в Telegram."""
+        try:
+            return WEB_OFF_FILE is not None and WEB_OFF_FILE.exists()
+        except OSError:
+            return False
+
     def respond(self, h, path):
+        off = self.mode == 'wake' and self.switched_off()
         if path.startswith('/api/'):
             if h.headers.get('X-FRX') != '1':
                 return h._send(403, b'{"error": "forbidden"}', 'application/json')
+            if off:
+                body = json.dumps({'off': True, 'error': 'сайт выключен — напишите .web в Telegram'}, ensure_ascii=False).encode('utf-8')
+                return h._send(503, body, 'application/json; charset=utf-8')
             body = json.dumps({'sleeping': True, 'waking': self.mode == 'wake', 'hibernating': self.mode == 'hibernate',
                                'error': 'юзербот запускает сайт' if self.mode == 'wake' else 'нет связи с Telegram — юзербот в гибернации'},
                               ensure_ascii=False).encode('utf-8')
             return h._send(503, body, 'application/json; charset=utf-8')
         if path == '/':
+            if off:                                     # без автообновления: страница не должна будить сайт снова и снова
+                page = _wake_page('Сайт FRX выключен', 'включить — команда .web в Telegram', 0).replace(
+                    '<script>setTimeout(function(){location.reload()},0)</script>', '')
+                return h._send(200, page.encode('utf-8'), 'text/html; charset=utf-8')
             if self.mode == 'wake':
                 self.request_wake()
                 page = _wake_page('Запускаю сайт FRX…', 'страница обновится сама', 1200)
@@ -1807,7 +1825,7 @@ def _handle_exit_request(code: int):
 # через обычный ssh-клиент (адрес https://….lhr.life), и потом снова Cloudflare.
 
 TUNNEL_URL_RE = re.compile(r'https://(?!api\.)[a-z0-9-]+\.trycloudflare\.com')
-LHR_URL_RE = re.compile(r'https://[a-z0-9-]+\.(?:lhr\.life|lhr\.pro|localhost\.run)')
+LHR_URL_RE = re.compile(r'https://(?!admin\.|www\.|docs\.)[a-z0-9-]+\.(?:lhr\.life|lhr\.pro|localhost\.run)')   # admin.localhost.run — из приветствия, не адрес сайта
 LHR_KEY_NAME = 'lhr_key'                       # ключ SSH для localhost.run (user/data/bin/lhr_key[.pub]), см. .web tunnel setup
 #
 # Способы публичного адреса (tunnel_request.json → mode), выбираются в Telegram: .web tunnel setup

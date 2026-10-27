@@ -403,7 +403,7 @@ async def web_cmd(event):
         if not engine.web.running:
             await engine.answer(event, visual.hint("Сайт и так не запущен"))
             return
-        await engine.web.stop('по команде')
+        await engine.web.stop('по команде', off=True)
         await engine.answer(event, f"{visual.visual('status_stop')} <b>Сайт выключен</b>")
         return
 
@@ -631,7 +631,7 @@ async def _open_panel(event, note=''):
                 await redraw("сайт запущен")
             elif act == 'stop':
                 await click.answer("выключаю…")
-                await engine.web.stop('кнопкой')
+                await engine.web.stop('кнопкой', off=True)
                 await redraw("сайт выключен")
             elif act == 'login':
                 if not engine.web.running:

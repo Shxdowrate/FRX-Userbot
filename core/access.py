@@ -19,8 +19,9 @@ core/access.py — доступ к юзерботу для других люде
                    ключ класса — его idn: одно слово (буквы, цифры, _), например FULL, helpers, my_friends
     пользователь = {name, username, class (idn или None), scopes, modules, commands, added}
 
-Команда разрешена гостю, если её покрывает хоть одна выдача — его личная или его класса. Исключение одно:
-модули из PROTECTED_MODULES (управление доступом и алиасами) — всегда только владелец.
+Команда разрешена гостю, если её покрывает хоть одна выдача — его личная или его класса. Исключения:
+модули из PROTECTED_MODULES и команды из PROTECTED_COMMANDS (управление доступом, алиасами, автозапуском и полный
+лог — всё это в модуле Userbot) — всегда только владелец, даже если гостю выдан модуль целиком или scope.
 
 Ничего не запрещено выдавать, но часть модулей помечается КРИТИЧЕСКИ ОПАСНЫМИ (danger_reasons): доступ к ним
 фактически равен доступу ко всему аккаунту — они выполняют код, загружают модули, работают с файлами,
@@ -50,6 +51,49 @@ SCOPE_TITLES = {'all': 'все модули', 'builtin': 'все встроен�
 KINDS = ('scope', 'module', 'command')
 _BUCKET = {'scope': 'scopes', 'module': 'modules', 'command': 'commands'}
 PROTECTED_MODULES = frozenset({'access', 'aliases'})
+# Команды модуля Userbot (modules/builtin/Userbot.py), которые остаются за владельцем: Userbot объединил прежние
+# Access, Aliases, Autostart, Logging и др., поэтому защищать модуль целиком больше нельзя — .ping и .info гостю можно.
+PROTECTED_COMMANDS = frozenset({'userbot:access', 'userbot:alias', 'userbot:unalias', 'userbot:layout',
+                                'userbot:autostart', 'userbot:fulllog'})
+
+# Модули, слитые в Userbot (FRX 1.0.6): старые выдачи «модуль X» / «команда X:y» переносятся на команды Userbot.
+# None — команда убрана (служебная), выдача просто снимается.
+MERGED_INTO_USERBOT = {
+    'ping': {'ping': 'ping', 'dping': 'ping', 'speedtest': 'speedtest', 'checkhost': 'checkhost', 'ip': 'ip'},
+    'info': {'info': 'info', 'doctor': 'doctor'},
+    'changelog': {'changelog': 'changelog'},
+    'logging': {'fulllog': 'fulllog', 'logs': None},
+    'inline_stuff': {'forms': None, 'closeform': None},
+    'autostart': {'autostart': 'autostart'},
+    'access': {'access': 'access'},
+    'aliases': {'alias': 'alias', 'unalias': 'unalias', 'layout': 'layout'},
+    'waiters': {},
+}
+
+
+def _migrate_merged(obj) -> bool:
+    """Выдачи на модули, слитые в Userbot → выдачи на соответствующие команды userbot. True — что-то поменялось."""
+    changed = False
+    mods, cmds = [], list(obj.get('commands') or [])
+    for m in obj.get('modules') or []:
+        if m in MERGED_INTO_USERBOT:
+            changed = True
+            cmds += [f"userbot:{new}" for new in MERGED_INTO_USERBOT[m].values() if new]
+        else:
+            mods.append(m)
+    out = []
+    for c in cmds:
+        mod, _, name = c.partition(':')
+        if mod in MERGED_INTO_USERBOT:
+            changed = True
+            new = MERGED_INTO_USERBOT[mod].get(name)
+            c = f"userbot:{new}" if new else None
+        if c and c not in PROTECTED_COMMANDS and c not in out:
+            out.append(c)
+        elif c:
+            changed = True
+    obj['modules'], obj['commands'] = mods, out
+    return changed
 
 CLASS_RE = re.compile(r'^\w{1,32}$')
 ALIAS_RE = re.compile(r'^[^\s]{1,32}$')
@@ -168,6 +212,7 @@ class AccessManager:
     async def load(self):
         raw = await self.db.get(ACCESS_KEY, None) or {}
         classes = raw.get('classes') if isinstance(raw.get('classes'), dict) else {}
+        migrated = False
         for name, spec in DEFAULT_CLASSES.items():
             if name not in classes:
                 classes[name] = copy.deepcopy(spec)
@@ -178,6 +223,7 @@ class AccessManager:
                     spec[key] = default.get(key) or spec.get(key) or (name if key == 'title' else '')
             spec.setdefault('description', '')
             _normalize_grants(spec)
+            migrated |= _migrate_merged(spec)
         classes[FULL].update({'system': True, 'scopes': ['all'], 'modules': [], 'commands': []})
         users = raw.get('users') if isinstance(raw.get('users'), dict) else {}
         for u in users.values():
@@ -188,7 +234,10 @@ class AccessManager:
             if u['class'] not in classes:
                 u['class'] = None
             _normalize_grants(u)
+            migrated |= _migrate_merged(u)
         self._data = {'classes': classes, 'users': users}
+        if migrated:
+            await self._save()
         return self
 
     def _d(self):
@@ -260,6 +309,8 @@ class AccessManager:
         """(разрешено: bool, причина: str) для команды cmd_key модуля module_name."""
         if not self.get_user(user_id):
             return False, 'нет доступа'
+        if cmd_key in PROTECTED_COMMANDS:
+            return False, 'только владелец'
         ok, why = self.module_allowed(user_id, module_name, is_builtin)
         if ok or module_name in PROTECTED_MODULES:
             return ok, why
@@ -355,6 +406,8 @@ class AccessManager:
             raise AccessError("Команда указывается как модуль:команда")
         if kind in ('module', 'command') and value.split(':', 1)[0] in PROTECTED_MODULES:
             raise AccessError("Управление доступом и алиасами — только для владельца")
+        if kind == 'command' and value in PROTECTED_COMMANDS:
+            raise AccessError("Эта команда — только для владельца (доступ, алиасы, автозапуск, полный лог)")
 
     async def grant(self, target, ident, kind, value, name='', username=''):
         """Выдать доступ (scope / модуль / команду) классу или пользователю (пользователя заводит при надобности)."""
@@ -467,6 +520,13 @@ class AliasManager:
     async def load(self):
         raw = await self.db.get(ALIAS_KEY, None)
         self._data = raw if isinstance(raw, dict) else {}
+        changed = False
+        for a in self._data.values():                   # .dping стал режимом .ping -d (модуль Userbot)
+            if isinstance(a, dict) and a.get('command') == 'dping':
+                a['command'], a['args'] = 'ping', ' '.join(x for x in ('-d', a.get('args') or '') if x)
+                changed = True
+        if changed:
+            await self.db.set(ALIAS_KEY, self._data)
         return self
 
     def all(self) -> dict:

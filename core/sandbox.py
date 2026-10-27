@@ -1795,7 +1795,7 @@ class SandboxEngine:
 
     async def _waiters_default_timeout(self):
         try:
-            return await self.get_config('default_timeout', module_name='waiters')
+            return await self.get_config('wait_timeout', module_name='userbot')
         except KeyError:
             return 60
 

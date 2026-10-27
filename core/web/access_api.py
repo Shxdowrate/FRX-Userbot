@@ -3,7 +3,7 @@ core/web/access_api.py — HTTP-слой вкладки «доступ» (#/acce
 Логика прав и алиасов — core/access.py; все запросы идут через WebPanel.api() (Host / Origin / X-FRX).
 """
 
-from ..access import AccessError, PROTECTED_MODULES, SCOPES, SCOPE_TITLES, command_key, describe_grant
+from ..access import AccessError, PROTECTED_COMMANDS, PROTECTED_MODULES, SCOPES, SCOPE_TITLES, command_key, describe_grant
 
 
 def register(panel, router):
@@ -55,7 +55,8 @@ class AccessApi:
                 'description': (info.get('description') or '').split('\n')[0][:200],
                 'danger': self.core.module_danger(name),
                 'commands': [{'key': f"{name}:{c['command']}", 'command': c['command'], 'aliases': c['aliases'],
-                              'description': (c['description'] or '').split('\n')[0][:160]} for c in info['commands']],
+                              'description': (c['description'] or '').split('\n')[0][:160]} for c in info['commands']
+                             if include_protected or f"{name}:{c['command']}" not in PROTECTED_COMMANDS],
             })
         return out
 

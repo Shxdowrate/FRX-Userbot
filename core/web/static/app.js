@@ -63,10 +63,26 @@ function logoMark(cls) {
 class SleepError extends Error {}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let SLEEP = false, SLEEP_TIMER = null, LAST_TARGET = null;
+let OFF = false;           // сайт выключили (кнопкой или .web stop) — больше ничего не опрашиваем, пока не обновят страницу
+
+/* Сайт выключен руками: экран «сайт выключен» и тишина — никаких опросов (раньше вкладка продолжала стучаться к сайту, и сторож
+ * keeper'а тут же поднимал его снова). Включить — .web в Telegram, потом обновить страницу. */
+function showOff() {
+  OFF = true;
+  clearTimeout(SLEEP_TIMER);
+  document.body.classList.remove('asleep');
+  $('#sleep').classList.remove('show');
+  const off = $('#off');
+  off.replaceChildren(h('div', { class: 'big' }, 'сайт выключен'),
+    h('div', { class: 'muted off-why' }, 'Включить — напишите ', h('code', {}, '.web'), ' в Telegram, затем обновите страницу.'),
+    h('div', { class: 'off-act' }, h('button', { class: 'btn small', type: 'button', onclick: () => location.reload() }, 'обновить страницу')));
+  off.classList.add('show');
+}
 
 /* юзербот перезагружается, а сайт живёт (его порт держит keeper). Пока он «спит» — над страницей
  * плашка, а любая попытка что-то сделать подсвечивает нажатую кнопку красным. */
 function setSleep(on) {
+  if (OFF && on) return;
   if (on === SLEEP) return;
   SLEEP = on;
   document.body.classList.toggle('asleep', on);
@@ -76,12 +92,14 @@ function setSleep(on) {
     let fails = 0;
     const tick = async () => {
       try {
+        if (OFF) return;
         const r = await fetch('/api/nav', { headers: { 'X-FRX': '1' } });
         fails = 0;
         if (r.ok) { setSleep(false); toast('юзербот снова на связи', 'ok'); wake(); return; }
+        if (r.status === 503) { let d = {}; try { d = await r.json(); } catch (e) { /* пусто */ } if (d.off) { showOff(); return; } }
         if (r.status === 401) { location.replace('/'); return; }
       } catch (e) {
-        if (++fails > 45) { showLost(); return; }       // ~1 минута тишины — сайт выключился совсем
+        if (++fails > 45) { if (!OFF) showLost(); return; }       // ~1 минута тишины — сайт выключился совсем
       }
       SLEEP_TIMER = setTimeout(tick, 1300);
     };
@@ -125,6 +143,7 @@ function wake() {
 }
 
 async function api(path, body) {
+  if (OFF) throw new Error('сайт выключен');
   let r, attempt = 0;
   for (;;) {
     try {
@@ -143,6 +162,7 @@ async function api(path, body) {
   }
   let data = {};
   try { data = await r.json(); } catch (e) { /* пустой ответ */ }
+  if (r.status === 503 && data.off) { showOff(); throw new Error('сайт выключен'); }
   if (r.status === 503 && data.sleeping) { setSleep(true); throw new SleepError('юзербот спит — действия появятся после запуска'); }
   if (r.status === 401 && data.auth) { location.replace('/'); throw new Error('нужно войти'); }   // сессия истекла — страница входа
   if (!r.ok) throw new Error(data.error || ('ошибка ' + r.status));
@@ -286,7 +306,7 @@ let lastPing = 0;
 ['pointerdown', 'keydown', 'wheel'].forEach((ev) =>
   window.addEventListener(ev, () => {
     const now = Date.now();
-    if (now - lastPing > 20000) { lastPing = now; fetch('/api/ping', { method: 'POST', headers: { 'X-FRX': '1' } }).catch(() => {}); }
+    if (!OFF && now - lastPing > 20000) { lastPing = now; fetch('/api/ping', { method: 'POST', headers: { 'X-FRX': '1' } }).catch(() => {}); }
   }, { passive: true }));
 
 function confirmBtn(label, fn, cls) {
@@ -552,7 +572,7 @@ function botLink() {
 }
 let MOVING = false;
 async function moveWatch() {
-  if (MOVING || IS_LOCAL || SLEEP) return;
+  if (MOVING || IS_LOCAL || SLEEP || OFF) return;
   let w;
   try {
     const r = await fetch('/api/tunnel/where', { headers: { 'X-FRX': '1' } });
@@ -599,7 +619,7 @@ function renderNav() {
   const right = h('button', { class: 'arrow', type: 'button', 'aria-label': 'вправо', onclick: () => tabsEl.scrollBy({ left: tabsEl.clientWidth * 0.7, behavior: 'smooth' }) }, '›');
   const more = h('button', { class: 'link more', type: 'button', onclick: toggleNav }, 'все');
   const wrap = h('div', { class: 'tabs-wrap' }, left, tabsEl, right);
-  const off = h('button', { class: 'link', type: 'button', onclick: () => act(async () => { await api('/shutdown', {}); $('#off').classList.add('show'); }) }, 'выключить');
+  const off = h('button', { class: 'link', type: 'button', onclick: () => act(async () => { await api('/shutdown', {}); showOff(); }) }, 'выключить');
   const logout = h('button', { class: 'link', type: 'button', title: 'выйти из сайта на этом устройстве', onclick: () => act(async () => { await api('/auth/logout', {}); location.replace('/'); }) }, 'выйти');
   Object.assign(NAV, { tabsEl, left, right, more, wrap });
   NAV.el.classList.toggle('open', NAV.open);
@@ -659,7 +679,7 @@ function buildDrawer(s, tabs) {
     window.addEventListener('hashchange', closeDrawer);
     window.addEventListener('resize', () => { if (!mobileNav()) closeDrawer(); });
   }
-  const off = h('button', { class: 'link', type: 'button', onclick: () => act(async () => { closeDrawer(); await api('/shutdown', {}); $('#off').classList.add('show'); }) }, 'выключить сайт');
+  const off = h('button', { class: 'link', type: 'button', onclick: () => act(async () => { closeDrawer(); await api('/shutdown', {}); showOff(); }) }, 'выключить сайт');
   const logout = h('button', { class: 'link', type: 'button', onclick: () => act(async () => { await api('/auth/logout', {}); location.replace('/'); }) }, 'выйти');
   DRAWER.list = h('nav', { class: 'drawer-tabs' }, tabs.map((t) => h('a', { class: 'tab', href: t.href, onclick: closeDrawer }, t.label)));
   DRAWER.el.replaceChildren(
@@ -1646,3 +1666,4 @@ async function appView(T, module, index, r) {
 NAV.el = $('#nav');
 refreshNav();
 route();
+window.FRX_BOOTED = true;                                  // boot.js: сайт стартовал, «не догрузился» не показываем

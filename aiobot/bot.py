@@ -400,9 +400,19 @@ def create_bot(token: str, core=None):
 
         async def _polling_with_botchat(*bots, **kwargs):
             from core.botchat import EXTRA_UPDATES
+            from aiogram.exceptions import TelegramNetworkError, TelegramServerError
             if kwargs.get('allowed_updates') is None:
                 kwargs['allowed_updates'] = sorted(set(dp.resolve_used_update_types()) | EXTRA_UPDATES)
-            return await _orig_polling(*bots, **kwargs)
+            # Первый же запрос polling'а (getMe) при мигающем интернете падал TelegramNetworkError — и ронял ВЕСЬ юзербот
+            # (keeper перезапускал его, а Startup потом пересоздавал бота). Теперь сеть пропала — ждём и пробуем снова.
+            delay = 2
+            while True:
+                try:
+                    return await _orig_polling(*bots, **kwargs)
+                except (TelegramNetworkError, TelegramServerError, OSError, asyncio.TimeoutError) as e:
+                    print(f"[FRX] [WARN] бот: нет связи с Telegram ({type(e).__name__}) — повтор через {delay} с")
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 60)
 
         dp.start_polling = _polling_with_botchat
 

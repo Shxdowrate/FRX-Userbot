@@ -2,10 +2,10 @@
 name: exchange_rate
 category: web
 title: Курс валют
-description: курс и пересчёт валют по коду ISO (USD, EUR, RUB, KZT, CNY…); amount — сколько единиц base пересчитать
+description: курс и пересчёт валют (живые данные). base/target — код ISO или название по-русски: рубль/RUB, белорусский рубль/буны/BYN, доллар/USD, евро/EUR, гривна/UAH, тенге/KZT, юань/CNY, биткоин — см. crypto_price; amount — сколько единиц base пересчитать («75000 рублей в бунах» → base RUB, target BYN, amount 75000)
 args: base: string, target?: string, amount?: number
 example: {"base": "USD", "target": "RUB", "amount": 100}
-keywords: курс, валют, доллар, евро, рубл, юань, тенге, обмен, конвертируй
+keywords: курс, валют, доллар, евро, рубл, юань, тенге, обмен, конвертируй, бун, byn, гривн
 """
 import asyncio
 import gzip
@@ -99,9 +99,30 @@ async def _rates(base):
     return {c: x / k for c, x in r.items()}, 'ЦБ РФ'
 
 
+NAMES = [  # русские названия → ISO (порядок важен: «белорусский рубль» раньше «рубль»)
+    (r'бел\w*\s*руб|бун|зайч|byr', 'BYN'), (r'руб|₽|rur', 'RUB'), (r'доллар|бакс|\$|usd', 'USD'), (r'евро|€|eur', 'EUR'),
+    (r'гривн|uah|₴', 'UAH'), (r'тенге|kzt|₸', 'KZT'), (r'юан|cny|rmb', 'CNY'), (r'фунт|gbp|£', 'GBP'), (r'лир|try', 'TRY'),
+    (r'иен|йен|jpy', 'JPY'), (r'злот|pln', 'PLN'), (r'драм|amd', 'AMD'), (r'лари|gel', 'GEL'), (r'сум|uzs', 'UZS'),
+    (r'сом|kgs', 'KGS'), (r'дирх|aed', 'AED'), (r'франк|chf', 'CHF'), (r'вон|krw', 'KRW'),
+]
+
+
+def _code(v, default=''):
+    s = str(v or '').strip()
+    if re.fullmatch(r'[A-Za-z]{3}', s):
+        return s.upper()
+    low = s.lower()
+    for pat, code in NAMES:
+        if re.search(pat, low):
+            return code
+    return s.upper() or default
+
+
 async def run(base: str = 'USD', target: str = '', amount: float = 1) -> str:
-    base = (base or 'USD').strip().upper()
-    target = (target or '').strip().upper()
+    base = _code(base, 'USD')
+    target = _code(target)
+    if isinstance(amount, str):
+        amount = re.sub(r'[^\d.,]', '', amount).replace(',', '.') or 1
     try:
         amount = float(amount or 1)
         rates, src = await _rates(base)

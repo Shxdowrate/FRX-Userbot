@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 
 from core.engine import Core, FRX_VERSION
-from core import paths
+from core import paths, netguard
 from aiobot.bot import create_bot
 
 CONFIG_PATH = paths.CONFIG_PATH
@@ -238,12 +238,30 @@ async def _run_client(core):
     Работает, пока подключён ТЕКУЩИЙ клиент Telegram. При переключении аккаунта (.acc) старый клиент отключается
     намеренно — тогда просто переходим к новому, а не считаем это обрывом связи.
     """
+    net_state = {'fails': 0, 'up_at': time.monotonic()}
     while True:
         client = core.client
         try:
             await client.run_until_disconnected()
-        except Exception:
-            if core.client is client:
+        except Exception as e:
+            if core.client is not client:
+                pass                                       # аккаунт переключили — старый клиент отключён намеренно
+            elif isinstance(e, _NET_ERRORS + (BufferError,)):
+                # Telethon не пережил обрыв сам (исчерпал попытки, 429 от Telegram). Раньше main.py падал, keeper
+                # перезапускал процесс — и новый снова упирался во флуд-бан Telegram. Теперь переподключаем этого же
+                # клиента с паузой (core/netguard.py); долгое отсутствие сети по-прежнему ведёт в гибернацию (_net_monitor).
+                delay = netguard.reconnect_delay(net_state, e)
+                print(f"[FRX] Соединение с Telegram оборвалось ({type(e).__name__}: {e}) — переподключаюсь через {delay:g} с")
+                await asyncio.sleep(delay)
+                if core.client is client:
+                    try:
+                        await client.connect()
+                        net_state['up_at'] = time.monotonic()
+                        print("[FRX] Соединение с Telegram восстановлено")
+                    except Exception as ce:
+                        print(f"[FRX] Переподключиться пока не вышло: {type(ce).__name__}: {ce}")
+                continue
+            else:
                 raise
         if core.client is client:
             return
@@ -351,6 +369,7 @@ if __name__ == '__main__':
         sys.exit(EXIT_NO_RETRY)
     from core import logs                    # метка времени «мм.дд чч:мм:сс» в терминале + буфер для вкладки «логи»
     logs.install()
+    netguard.install()                       # паузы между переподключениями Telethon — до создания клиентов (core/netguard.py)
     # Свой запуск цикла вместо asyncio.run(): тот при выходе ждёт ВСЕ фоновые потоки (до 5 минут — например, зависший
     # запрос в executor или потоки библиотек вроде py-tgcalls), и процесс «умирал» на перезапуске, не завершаясь.
     # Всё нужное (клиенты, бот, сайт, модули) закрывает _shutdown() в main(), дальше — сразу выходим с кодом.

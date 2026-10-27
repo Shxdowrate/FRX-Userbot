@@ -2,32 +2,24 @@
 name: user_info
 category: telegram
 title: Кто это
-description: сведения о пользователе, боте, группе или канале: имя, @username, id, телефон (если виден), премиум; user — id, @username или часть названия диалога
+description: сведения о пользователе, боте, группе или канале: имя, @username, id, телефон (если виден), премиум; user — id, @username, +телефон, «here» (собеседник в этом чате) или имя
 args: user: string
 example: {"user": "@durov"}
 keywords: кто это, информация о пользователе, узнай про, профиль
 """
 import re
 
+from core import neuro_tg as tg
+
 import engine
 
 
 async def _entity(chat):
-    chat = str(chat).strip()
-    if chat.lower() in ('me', 'saved', 'избранное', 'себе'):
-        return 'me'
-    if re.fullmatch(r'-?\d+', chat):
-        return await engine.client.get_entity(int(chat))
-    if chat.startswith('@') or re.fullmatch(r'[A-Za-z0-9_]{4,32}', chat):
-        try:
-            return await engine.client.get_entity(chat)
-        except Exception:
-            pass
-    low = chat.lower().lstrip('@')
-    async for d in engine.client.iter_dialogs(limit=300):
-        if low in (d.name or '').lower():
-            return d.entity
-    raise ValueError(f"чат «{chat}» не найден среди диалогов")
+    try:
+        ent, _how = await tg.resolve_chat(chat)
+    except tg.Ambiguous as e:
+        raise ValueError(tg.ambiguous_text(e, 'Не выбран чат'))
+    return ent
 
 
 def _who(m):

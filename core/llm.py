@@ -364,6 +364,8 @@ class LLM:
         avail = [m['ref'] for m in self.models()]
         if ref in avail:
             return ref
+        if surface == 'worker':                 # рабочий (delegate) — без запасного варианта: не выбран / пропал → None
+            return None
         fallback = self.store.prov['selected'].get('chat')
         if surface != 'chat' and fallback in avail:
             return fallback
@@ -375,6 +377,12 @@ class LLM:
         with self.store.lock:
             self.store.prov['selected'][surface] = ref
             self.store.save_prov()
+
+    def unselect(self, surface):
+        """Снять выбор модели для поверхности (например, выключить рабочего: unselect('worker'))."""
+        with self.store.lock:
+            if self.store.prov['selected'].pop(surface, None) is not None:
+                self.store.save_prov()
 
     def parse_ref(self, ref):
         if not ref or '|' not in ref:

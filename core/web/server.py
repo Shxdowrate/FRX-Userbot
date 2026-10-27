@@ -26,6 +26,8 @@ WebPanel — сайт управления FRX. Поднимается кома�
 
 import ast
 import asyncio
+import gzip
+import hashlib
 import json
 import mimetypes
 import os
@@ -49,7 +51,7 @@ from ..emulate import EmuSession, describe_commands
 from . import ui as ui_mod
 
 STATIC_DIR = Path(__file__).parent / 'static'
-STATIC_FILES = {'login.html', 'login.css', 'login.js', 'style.css', 'app.js', 'font.woff2', 'botchat.js', 'botchat.css', 'webide.js', 'webide.css', 'sandbox.js', 'lab_core.js', 'lab.js', 'lab.css', 'panel.js', 'panel.css', 'neuro.js', 'neuro.css', 'accent.css', 'fx.js', 'access.js', 'access.css', 'depth.js', 'depth.css', 'mobile.css', 'mobile.js', 'logo.svg', 'icon.png'}
+STATIC_FILES = {'login.html', 'login.css', 'login.js', 'style.css', 'app.js', 'boot.js', 'font.woff2', 'botchat.js', 'botchat.css', 'webide.js', 'webide.css', 'sandbox.js', 'lab_core.js', 'lab.js', 'lab.css', 'panel.js', 'panel.css', 'neuro.js', 'neuro.css', 'accent.css', 'fx.js', 'access.js', 'access.css', 'depth.js', 'depth.css', 'mobile.css', 'mobile.js', 'logo.svg', 'icon.png'}
 DEFAULT_PORT = 8878
 IDLE_TIMEOUT = 5 * 60          # значение по умолчанию (конфиг `autostop_minutes` модуля Web); секунд без запросов -> сайт выключается
 WEB_MODULE = 'web_panel'       # MODULE_NAME модуля Web: его конфиги (автозапуск, автовыключение, настройки Emulate)
@@ -57,6 +59,7 @@ STATE_FILE = KEEPER_DIR / 'web_state.json'      # сайт «переживае�
 TAKEOVER_FILE = KEEPER_DIR / 'web_takeover'     # новый процесс просит keeper освободить порт
 WAKE_FILE = KEEPER_DIR / 'web_wake'             # сторож keeper'а: «кто-то зашёл на localhost — поднимай сайт»
 SENTINEL_FILE = KEEPER_DIR / 'web_sentinel.json'  # keeper держит порт сайта лёгким сторожем
+OFF_FILE = KEEPER_DIR / 'web_off'              # сайт выключили руками: сторож не поднимает его по заходу (только .web)
 RESUME_MAX_AGE = 15 * 60
 CHANGELOG_PATH = Path(__file__).resolve().parents[2] / 'CHANGELOG.md'
 MODULE_ID_RE = re.compile(r'^[A-Za-z0-9_\-]{1,64}$')
@@ -71,6 +74,29 @@ PASSIVE_PATHS = {'/api/auth/state', '/api/emulate/poll', '/api/botchat/poll', '/
 
 mimetypes.add_type('font/woff2', '.woff2')
 mimetypes.add_type('image/webp', '.webp')
+
+_STATIC_REF_RE = re.compile(r'/static/([A-Za-z0-9_.\-]+)(?=["\'])')
+_STATIC_CACHE = {}             # имя -> {'key', 'raw', 'gz', 'etag', 'ctype'}; пересчитывается, когда файл изменился
+
+
+def _static_blob(name: str) -> dict:
+    """Файл статики из памяти: исходник, gzip-версия (для текстовых), ETag. Файл обновили (.update) — перечитываем."""
+    p = STATIC_DIR / name
+    st = p.stat()
+    key = (st.st_mtime_ns, st.st_size)
+    cur = _STATIC_CACHE.get(name)
+    if cur is not None and cur['key'] == key:
+        return cur
+    raw = p.read_bytes()
+    ctype = mimetypes.guess_type(name)[0] or 'application/octet-stream'
+    gz = None
+    if name.rsplit('.', 1)[-1] in ('js', 'css', 'html', 'svg', 'txt') and len(raw) > 512:
+        gz = gzip.compress(raw, 6)
+        if len(gz) >= len(raw):
+            gz = None
+    cur = {'key': key, 'raw': raw, 'gz': gz, 'etag': hashlib.sha1(raw).hexdigest()[:16], 'ctype': ctype}
+    _STATIC_CACHE[name] = cur
+    return cur
 
 
 class ApiError(Exception):
@@ -293,6 +319,7 @@ class WebPanel:
         if self.running:
             self.touch()
             return self.url
+        OFF_FILE.unlink(missing_ok=True)                   # .web / кнопка «запустить» снимает ручное выключение
         self._sleeping = False
         if port is None and not takeover:                  # порт держит сторож keeper'а — просим отдать, а не уходим на соседний
             sp = self._sentinel_port()
@@ -372,7 +399,7 @@ class WebPanel:
                 try:
                     if WAKE_FILE.exists():
                         WAKE_FILE.unlink(missing_ok=True)
-                        if not self.running:
+                        if not self.running and not OFF_FILE.exists():   # выключили руками — заход не будит
                             self.core.tlog('Кто-то зашёл на адрес сайта — поднимаю сайт')
                             await self.start()
                 except asyncio.CancelledError:
@@ -431,7 +458,15 @@ class WebPanel:
             return False
         return True
 
-    async def stop(self, reason: str = ''):
+    async def stop(self, reason: str = '', off: bool = False):
+        """off=True — выключили руками (кнопка на сайте, .web stop): сторож keeper'а держит порт, но по заходу сайт больше НЕ
+        поднимает (раньше открытая вкладка или обновление страницы тут же включали сайт обратно), до .web в Telegram."""
+        if off:
+            try:
+                OFF_FILE.parent.mkdir(parents=True, exist_ok=True)
+                OFF_FILE.write_text(str(time.time()), encoding='utf-8')
+            except OSError:
+                pass
         if not self.running:
             return
         runner, self._runner, self._site = self._runner, None, None
@@ -591,7 +626,16 @@ class WebPanel:
     async def h_index(self, request):
         page = 'index.html' if self.authed(request) else 'login.html'
         html = (STATIC_DIR / page).read_text(encoding='utf-8')
-        return web.Response(text=html, content_type='text/html', headers={'Cache-Control': 'no-cache'})
+        # ссылки на статику — с версией файла (?v=<хеш>): такие ответы браузер кэширует надолго, и повторный заход через
+        # медленный туннель не тянет сотни КБ скриптов заново. Сменился файл — сменился хеш — браузер берёт новый.
+        html = _STATIC_REF_RE.sub(lambda m: m.group(0) + '?v=' + _static_blob(m.group(1))['etag']
+                                  if m.group(1) in STATIC_FILES else m.group(0), html)
+        body = html.encode('utf-8')
+        headers = {'Cache-Control': 'no-cache', 'Vary': 'Accept-Encoding'}
+        if 'gzip' in request.headers.get('Accept-Encoding', ''):
+            body = gzip.compress(body, 6)
+            headers['Content-Encoding'] = 'gzip'
+        return web.Response(body=body, content_type='text/html', charset='utf-8', headers=headers)
 
     # ------------------------------------------------------------------ #
     # Вход (core/web/auth.py)
@@ -683,10 +727,22 @@ class WebPanel:
         name = request.match_info['name']
         if name not in STATIC_FILES:
             raise web.HTTPNotFound()
-        ctype = mimetypes.guess_type(name)[0] or 'application/octet-stream'
-        # шрифт кэшируется, остальное — нет: иначе после обновления браузер (или кэш туннеля Cloudflare) отдаёт старые скрипты
-        headers = {'Cache-Control': 'max-age=3600'} if name in ('font.woff2', 'logo.svg', 'icon.png') else {'Cache-Control': 'no-cache'}
-        return web.Response(body=(STATIC_DIR / name).read_bytes(), content_type=ctype, headers=headers)
+        blob = _static_blob(name)
+        etag = '"' + blob['etag'] + '"'
+        # ?v=<тот же хеш> — ссылка из index.html: файл с такой версией не меняется, кэшируем надолго.
+        # Без версии (или со старой) — no-cache + ETag: браузер переспросит и получит 304, если файл тот же.
+        versioned = request.query.get('v') == blob['etag']
+        headers = {'ETag': etag, 'Vary': 'Accept-Encoding',
+                   'Cache-Control': 'public, max-age=31536000, immutable' if versioned else 'no-cache'}
+        if etag in request.headers.get('If-None-Match', ''):
+            return web.Response(status=304, headers=headers)
+        body = blob['raw']
+        # Сжатие: скрипты сайта ~1 МБ, сжатые — в 4–5 раз меньше. Бесплатный localhost.run отдаёт всего несколько КБ/с и рвёт
+        # ответ на ~30-й секунде — без сжатия app.js приходил обрезанным, и после входа был пустой экран.
+        if blob['gz'] is not None and 'gzip' in request.headers.get('Accept-Encoding', ''):
+            body = blob['gz']
+            headers['Content-Encoding'] = 'gzip'
+        return web.Response(body=body, content_type=blob['ctype'], headers=headers)
 
     # ------------------------------------------------------------------ #
     # Общее
@@ -763,7 +819,7 @@ class WebPanel:
         return {'ok': True}
 
     async def a_shutdown(self, request):
-        asyncio.get_running_loop().call_later(0.4, lambda: asyncio.ensure_future(self.stop('по запросу')))
+        asyncio.get_running_loop().call_later(0.4, lambda: asyncio.ensure_future(self.stop('кнопкой на сайте', off=True)))
         return {'ok': True}
 
     # ------------------------------------------------------------------ #

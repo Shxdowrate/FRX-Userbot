@@ -93,7 +93,12 @@ from .paths import ASSETS_DIR, BUILTIN_DIR, FILES_DIR, MODULES_DIR, SESSION_PATH
 # Версия ЯДРА FRX (не путать с VERSION отдельных модулей, см. ModuleInfo) —
 # правится вручную при каждом обновлении движка. Показывается в .about
 # (modules/builtin/Helper.py) и в баннере запуска (main.py).
-FRX_VERSION = "1.0.5"
+FRX_VERSION = "1.0.6"
+
+# Встроенные модули, слитые в modules/builtin/Userbot.py (1.0.6). Если их файлы остались в modules/builtin/ —
+# движок их не грузит и удаляет (см. _load_folder).
+MERGED_BUILTIN_FILES = frozenset({'Access.py', 'Aliases.py', 'Autostart.py', 'Changelog.py', 'Info.py',
+                                  'InlineStuff.py', 'Logging.py', 'ping.py', 'Waiters.py'})
 
 # Папки (подробно — core/paths.py):
 #   ASSETS_DIR      — стоковые статичные файлы FRX (assets/ проекта, обновляются вместе с кодом);
@@ -373,7 +378,7 @@ class Core:
         self.web = WebPanel(self)
         # BotChat — «аккаунт» стационарного бота на сайте (core/botchat.py, modules/builtin/BotChat.py)
         self.botchat = BotChat(self)
-        # доступ гостей к командам и алиасы команд (core/access.py, modules/builtin/Access.py)
+        # доступ гостей к командам и алиасы команд (core/access.py, modules/builtin/Userbot.py)
         self.access = AccessManager(self.db)
         self.aliases = AliasManager(self.db)
         self._guest_replies: dict = {}               # (chat_id, msg_id) команды гостя -> наш ответ (answer() правит его)
@@ -428,7 +433,7 @@ class Core:
         self._form_pool_task = None
         self._active_forms: dict[int, InlineForm] = {}  # inline_message_id -> InlineForm
         self._member_cache: dict[tuple, tuple] = {}    # (chat_id, user_id) -> (bool, expires_at)
-        self._click_bucket = TokenBucket(rate=5)        # обновляется modules/builtin/InlineStuff.py
+        self._click_bucket = TokenBucket(rate=5)        # обновляется modules/builtin/Userbot.py (clicks_per_second)
 
         # кнопки "Введите значение" (InputButton, core/inline_forms.py) —
         # user_id -> {'form', 'data', 'chat_id', 'created_at'}; см.
@@ -968,6 +973,15 @@ class Core:
         for file in sorted(folder_path.glob('*.py')):
             if file.name.startswith('_'):
                 continue
+            if target == 'builtin' and file.name in MERGED_BUILTIN_FILES:
+                # модуль слит в Userbot.py; файл остался от старой версии (распаковали поверх) — убираем,
+                # иначе его команды встали бы двойниками команд Userbot
+                try:
+                    file.unlink()
+                    print(f"[FRX] {file.name}: модуль теперь часть Userbot — старый файл удалён")
+                except OSError as e:
+                    print(f"[FRX] {file.name}: модуль теперь часть Userbot — старый файл не загружаю (удалить не вышло: {e})")
+                continue
             try:
                 await self._load_from_source(file.read_text(encoding='utf-8'), target=target, source_path=str(file))
             except Exception as e:
@@ -978,6 +992,17 @@ class Core:
     # ------------------------------------------------------------------ #
 
     async def _on_new_message(self, event):
+        # одно сообщение — одна обработка: команду, отправленную нейросетью (run_command), её инструмент сам отдаёт сюда —
+        # если Telegram всё-таки пришлёт и обычное событие о ней, второй раз она не выполнится
+        seen = self.__dict__.setdefault('_handled_msgs', {})
+        key = (id(getattr(event, 'client', None)), getattr(event, 'chat_id', None), getattr(event, 'id', None))
+        if key[2] is not None:
+            if key in seen:
+                return
+            seen[key] = True
+            if len(seen) > 500:
+                for k in list(seen)[:250]:
+                    seen.pop(k, None)
         token = current_event.set(event)
         try:
             # "эхо" значения, введённого через InputButton (core/inline_forms.py,
@@ -1075,7 +1100,7 @@ class Core:
     async def _access_settings(self) -> dict:
         async def cfg(key, default):
             try:
-                value = await self.get_config(key, module_name='access')
+                value = await self.get_config(key, module_name='userbot')
             except KeyError:
                 return default
             return default if value is None else value
@@ -1106,10 +1131,10 @@ class Core:
         if not cmd or not cmd.isascii() or not self._is_command(cmd):
             return None
         try:
-            if not await self.get_config('layout_commands', module_name='aliases'):
+            if not await self.get_config('layout_commands', module_name='userbot'):
                 return None
         except KeyError:
-            pass                                         # модуль aliases ещё не объявил настройку — по умолчанию вкл
+            pass                                         # модуль Userbot ещё не объявил настройку — по умолчанию вкл
         return prefix + cmd + m.group(2)
 
     def _is_command(self, name):
@@ -2060,7 +2085,7 @@ class Core:
         return asyncio.ensure_future(self._botlog_pipeline(message))
 
     async def _botlog_pipeline(self, message: str) -> str:
-        if not await self._botlog_cfg('enabled', True):
+        if not await self._botlog_cfg('logs_enabled', True):
             return 'disabled'
         if self._aiogram_bot is None:
             self.tlog(f"[botlog] бот не подключён: {re.sub(r'<[^>]+>', '', _html.unescape(message))}")
@@ -2069,7 +2094,7 @@ class Core:
 
     async def _botlog_cfg(self, key, default):
         try:
-            value = await self.get_config(key, module_name='logging')
+            value = await self.get_config(key, module_name='userbot')
         except Exception:
             return default
         return default if value is None else value
@@ -3306,8 +3331,8 @@ class Core:
                  сам владелец юзербота — Telegram шлёт NewMessage и на
                  исходящие сообщения тоже). 'me' -> только владелец
                  юзербота. int -> конкретный user_id. list -> любое совпадение.
-        timeout: None -> берётся из конфига модуля 'waiters' (см.
-                 modules/builtin/Waiters.py), резолвится лениво при первом
+        timeout: None -> берётся из настройки wait_timeout модуля Userbot
+                 (modules/builtin/Userbot.py), резолвится лениво при первом
                  реальном ожидании. Для одиночного await — при истечении
                  бросает TimeoutError. Для async-for — истёк таймаут между
                  сообщениями — цикл просто заканчивается (как обычный for).
@@ -3353,7 +3378,7 @@ class Core:
 
     async def _waiters_default_timeout(self):
         try:
-            return await self.get_config('default_timeout', module_name='waiters')
+            return await self.get_config('wait_timeout', module_name='userbot')
         except KeyError:
             return 60
 
@@ -4003,7 +4028,7 @@ class Core:
 
     async def _instant_forms_enabled(self) -> bool:
         try:
-            return bool(await self.get_config('instant_forms', module_name='inline_stuff'))
+            return bool(await self.get_config('instant_forms', module_name='userbot'))
         except Exception:
             return True
 
@@ -4182,13 +4207,13 @@ class Core:
 
     async def _inline_confirm_timeout(self):
         try:
-            return await self.get_config('confirm_timeout', module_name='inline_stuff')
+            return await self.get_config('form_confirm_timeout', module_name='userbot')
         except KeyError:
             return 10
 
     async def _inline_member_cache_ttl(self):
         try:
-            return await self.get_config('member_cache_ttl', module_name='inline_stuff')
+            return await self.get_config('member_cache_ttl', module_name='userbot')
         except KeyError:
             return 300
 

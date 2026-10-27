@@ -29,7 +29,7 @@ import db
 
 NAME = "Helper"
 MODULE_NAME = "helper"
-VERSION = "2.5"
+VERSION = "2.6"
 AUTHOR = "FRX"
 DESCRIPTION = "Информация о модулях (инлайн-меню), проверка файлов и помощь"
 TG_URL = "https://t.me/mescr_m"
@@ -72,6 +72,58 @@ def format_commands_for_list(commands, max_length=40):
             break
 
     return result
+
+
+
+# ------------------------------------------------------------------ #
+# Префикс команд — тот, что выставлен у пользователя (.prefix), а не стандартная точка
+# ------------------------------------------------------------------ #
+
+def _prefix():
+    """Текущий префикс команд (engine.get_prefix() держит его в кэше; при сбое — '.')."""
+    p = getattr(engine, '_prefix_cache', None)
+    return p if isinstance(p, str) and p else '.'
+
+
+def _p():
+    """Префикс для вставки в HTML-текст справки."""
+    return html.escape(_prefix())
+
+
+async def _refresh_prefix():
+    """Обновляет кэш префикса из БД — вдруг его только что сменили через .prefix."""
+    try:
+        await engine.get_prefix()
+    except Exception:
+        pass
+
+
+def _all_command_names():
+    names = set()
+    for module_name in engine.get_module_list():
+        info = engine.get_module_info(module_name) or {}
+        for c in info.get('commands', []):
+            names.add(str(c['command']).lower())
+            names.update(str(a).lower() for a in c.get('aliases', []))
+    return names
+
+
+_DOT_CMD_RE = re.compile(r'(?<![\w./:])\.([A-Za-z][\w]*)')
+
+
+def _localize(text):
+    """В описаниях модулей команды записаны с точкой («.loadmod») — подставляем префикс пользователя.
+    Трогаем только «.слово», где слово — реальная команда, чтобы не задеть «.py», «т.е.» и ссылки."""
+    if not text or _prefix() == '.' or '.' not in text:
+        return text
+    names = _all_command_names()
+    return _DOT_CMD_RE.sub(lambda m: _p() + m.group(1) if m.group(1).lower() in names else m.group(0), text)
+
+
+def _strip_prefix(query):
+    """«.help ,ping» при префиксе «,» — ищем «ping»."""
+    p = _prefix()
+    return query[len(p):] if p and query.startswith(p) else query
 
 
 # ------------------------------------------------------------------ #
@@ -120,7 +172,7 @@ def _module_line(module_name):
     commands = info.get('commands', [])
     if commands:
         cmd_list = format_commands_for_list(commands, 40)
-        cmd_str = ', '.join([f'<code>.{cmd}</code>' for cmd in cmd_list])
+        cmd_str = ', '.join([f'<code>{_p()}{cmd}</code>' for cmd in cmd_list])
     else:
         cmd_str = "<i>нет команд</i>"
     extra = []
@@ -166,7 +218,7 @@ def _list_pages():
     blocks = []                      # (заголовок раздела | None, строка)
     for title, names, empty in (
         (visual.section(f"Встроенные ({len(builtin)})"), builtin, visual.hint('нет встроенных модулей')),
-        (visual.section(f"Загруженные ({len(loaded)})"), loaded, visual.hint('нет загруженных модулей — <code>.loadmod</code>')),
+        (visual.section(f"Загруженные ({len(loaded)})"), loaded, visual.hint(f'нет загруженных модулей — <code>{_p()}loadmod</code>')),
         *([(visual.section(f"Сломанные ({len(broken)})"), broken, '')] if broken else []),
     ):
         if not names:
@@ -231,7 +283,7 @@ def _menu_buttons(page=0, total=1):
 
 def _search_modules(query):
     """Модули по запросу: имя, MODULE_NAME, команды и описание (без учёта регистра); ничего — ближайшее по написанию."""
-    q = (query or '').strip().lower().lstrip('.')
+    q = _strip_prefix((query or '').strip().lower())
     if not q:
         return _ordered_modules()
     exact, partial = [], []
@@ -318,7 +370,7 @@ def _broken_lines(info, module_name):
                                    f"{html.escape(str(z.get('reason') or '')[:200])}"))
         if len(sleeping) > 12:
             out.append(visual.hint(f"… и ещё {len(sleeping) - 12}"))
-    out.append(visual.hint(f"исправьте файл и выполните <code>.reloadmod {html.escape(module_name)}</code> — "
+    out.append(visual.hint(f"исправьте файл и выполните <code>{_p()}reloadmod {html.escape(module_name)}</code> — "
                            "остальные функции модуля работают"))
     out.append("")
     return out
@@ -329,7 +381,7 @@ def _module_detail_text(info, module_name):
     display_name = info.get('name', module_name)
     version = info.get('version', 'Не указана')
     author = info.get('author', 'Не указан')
-    description = info.get('description', 'Нет описания')
+    description = _localize(info.get('description', 'Нет описания'))
     commands = info.get('commands', [])
     kind = "встроенный" if info.get('is_builtin') else "загруженный"
     if info.get('is_broken'):
@@ -354,10 +406,10 @@ def _module_detail_text(info, module_name):
         for cmd_info in commands:
             cmd = cmd_info['command']
             aliases = cmd_info.get('aliases', [])
-            cmd_description = cmd_info.get('description', 'Нет описания')
-            cmd_str = f"<code>.{cmd}</code>"
+            cmd_description = _localize(cmd_info.get('description', 'Нет описания'))
+            cmd_str = f"<code>{_p()}{cmd}</code>"
             if aliases:
-                cmd_str += " " + visual.hint(', '.join(f".{a}" for a in aliases))
+                cmd_str += " " + visual.hint(', '.join(f"{_p()}{a}" for a in aliases))
             lines.append(visual.item(f"{cmd_str} — {cmd_description}"))
     else:
         lines.append(visual.hint('нет зарегистрированных команд'))
@@ -545,7 +597,7 @@ def _bind_helper_form(form, event, focus=None):
         text = (
             visual.warn(f"<b>Удалить модуль</b> <code>{module_name}</code><b>?</b>") + "\n"
             + visual.hint('он будет выгружен, а его файл — удалён с диска (это необратимо). '
-                          'Выгрузить с возможностью вернуть — <code>.unloadmod</code>')
+                          f'Выгрузить с возможностью вернуть — <code>{_p()}unloadmod</code>')
         )
         buttons = [
             [(visual.btn('Да, удалить'), f"help_del_confirm:{module_name}", "danger")],
@@ -596,6 +648,7 @@ def _bind_helper_form(form, event, focus=None):
 @decorators.command('modules', 'mods')
 async def list_modules_cmd(event):
     """показывает список всех модулей (инлайн-меню, если доступно)"""
+    await _refresh_prefix()
     try:
         pages, sorted_modules = _list_pages()
         if not sorted_modules:
@@ -635,7 +688,8 @@ async def help_cmd(event):
         await list_modules_cmd(event)
         return
 
-    query = args.strip()
+    await _refresh_prefix()
+    query = _strip_prefix(args.strip())
 
     async def open_module(resolved, note=''):
         info = engine.get_module_info(resolved)
@@ -720,7 +774,7 @@ def _closest(query, modules):
     -> ('module' | 'command', найденное имя, MODULE_NAME, это алиас?) или None, если ничего даже отдалённо не похоже.
     """
     import difflib
-    q = query.strip().lower().lstrip('.,!/')
+    q = _strip_prefix(query.strip().lower()).lstrip('.,!/')
     if not q:
         return None
     cands = []          # (имя, kind, module_name, is_alias)
@@ -766,19 +820,19 @@ async def show_command_info(event, command, info, module_name, is_alias=False, n
         text = (note + "\n" if note else '') + visual.title('Команда') + "\n"
 
         if is_alias:
-            text += visual.field('алиас', f".{command}") + "\n"
+            text += visual.field('алиас', f"{_p()}{command}") + "\n"
         else:
-            text += visual.field('команда', f".{command}") + "\n"
+            text += visual.field('команда', f"{_p()}{command}") + "\n"
 
         text += visual.item(f"модуль  <b>{display_name}</b>  <code>{module_name}</code>") + "\n"
 
         if cmd_info:
             if cmd_info.get('aliases') and not is_alias:
-                aliases = [f"<code>.{a}</code>" for a in cmd_info['aliases']]
+                aliases = [f"<code>{_p()}{a}</code>" for a in cmd_info['aliases']]
                 text += visual.item(f"алиасы  {', '.join(aliases)}") + "\n"
 
             if cmd_info.get('description'):
-                text += "\n" + visual.section('Описание') + f"\n{cmd_info['description']}"
+                text += "\n" + visual.section('Описание') + f"\n{_localize(cmd_info['description'])}"
 
         await engine.answer(event, text)
 

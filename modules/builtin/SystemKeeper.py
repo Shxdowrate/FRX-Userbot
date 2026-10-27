@@ -618,7 +618,7 @@ async def setup():
 
 @bot.on_start()
 async def _send_pending_details():
-    """Стационарный бот поднят — отправляем накопленные подробности (см. Logging.py, тот же путь)."""
+    """Стационарный бот поднят — отправляем накопленные подробности (см. логи модуля Userbot, тот же путь)."""
     global _pending_details, _pending_form
     form, _pending_form = _pending_form, None
     if form:

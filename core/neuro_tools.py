@@ -48,18 +48,36 @@ DEFAULT_CATEGORIES = {
     'time': {'title': 'Время', 'description': 'текущие дата и время', 'keywords': 'время, который час, сколько времени, дата, сегодня, сейчас, день недели, часовой пояс'},
     'files': {'title': 'Файлы', 'description': 'чтение и запись файлов в песочнице ai_files', 'keywords': 'файл, запиши в, сохрани в, txt'},
     'memory': {'title': 'Память', 'description': 'заметки, которые переживают перезапуск', 'keywords': 'запомни, помнишь, вспомни, заметк, не забудь, что я говорил'},
-    'web': {'title': 'Интернет', 'description': 'открыть страницу по адресу и поиск в сети', 'keywords': 'найди, поищи, поиск, интернет, сайт, http, www., ссылк, страниц, новост, погод, курс'},
+    'web': {'title': 'Интернет', 'description': 'курсы валют и крипты, погода, новости, перевод, википедия, поиск в сети, открыть страницу', 'keywords': 'найди, поищи, поиск, интернет, сайт, http, www., ссылк, страниц, новост, погод, курс'},
     'telegram': {'title': 'Telegram', 'description': 'действия в Telegram от имени аккаунта', 'keywords': 'отправь, напиши пользовател, напиши в чат, сообщение в, telegram, телеграм'},
     'system': {'title': 'Система', 'description': 'сведения о системе и модулях, выполнение Python-кода (опасно)', 'keywords': 'python, питон, выполни код, запусти код, скрипт, eval, система, модул, конфиг, настройк, версия, нагрузка, память, диск'},
     'utils': {'title': 'Утилиты', 'description': 'хеши, пароли, base64, regex, JSON, статистика текста, случайные числа', 'keywords': 'хеш, md5, sha, пароль, base64, regex, регуляр, json, случайн, рандом, количество слов, символов'},
 }
 DEFAULT_CATEGORIES['system']['keywords'] += ', frx, фрикс, юзербот, справка, документац, что нового, твои команды, команду'
+DEFAULT_CATEGORIES.update({
+    'tg_inline': {'title': 'Инлайн-формы', 'description': 'отправить форму с кнопками (вопрос, опрос, меню), узнать, кто что нажал; нажатие может разбудить агента',
+                  'keywords': 'форму, форма, кнопк, опрос, голосовани, проголосу, меню с кнопками, инлайн, кто нажал, что нажали'},
+    'modules': {'title': 'Модули', 'description': 'установленные модули юзербота и их команды: найти нужный и запустить',
+                'keywords': 'модул, команд, плагин, воспользуйся, используй, через модуль, умеешь использовать, запусти, выполни'},
+    'agent': {'title': 'Сам по себе', 'description': 'разбудить себя позже (будильник) или по событию (входящее сообщение) и продолжить без запроса',
+              'keywords': 'проверь потом, проверь позже, проверь вечером, разбуди, будильник, жди ответ, дождись, потом скажешь, потом скажи, сообщи когда, когда ответит, когда напишет, когда пришлет, когда придет, напишет, пришлет, пришлёт, ответит, скинет, позвонит, если напишет, если пришлет, если спросят, как только, следи, каждый час, каждый день, задачи, отмени будильник'},
+    'tg_schedule': {'title': 'Отложенное', 'description': 'отложенные сообщения и напоминания (родные отложенные Telegram)',
+                    'keywords': 'напомни, напоминан, отложен, запланируй, завтра напиши, напиши завтра, утром напиши, вечером напиши, в 9, через час, через минут, по расписанию, отправь в'},
+    'tg_files': {'title': 'Файлы Telegram', 'description': 'найти файлы/фото/ссылки в чатах, отправить их кому-то, поиск по всем чатам',
+                 'keywords': 'файл, документ, отчет, отчёт, скинь, перекинь, пришли, кидал, скидывал, присылал, фото от, видео от, голосовое от, во всех чатах, где мне кидали, ссылку на, pdf, xlsx, docx, таблиц'},
+    'tg_groups': {'title': 'Группы, каналы, боты', 'description': 'сведения о группе/канале/боте, участники, вступить/выйти, модерация, кнопки и команды ботов',
+                  'keywords': 'групп, канал, участник, админ, вступи, подпишись, выйди из, отпишись, замуть, забань, кикни, выгони, разбань, бот, нажми кнопку, /start, команду бот'},
+})
 DEFAULT_CATEGORIES['math']['keywords'] += ', единиц, переведи в, километр, миль, градус, статистик, среднее, медиана'
 DEFAULT_CATEGORIES['time']['keywords'] += ', через сколько, сколько дней, до дня, прибавь дней, возраст'
 DEFAULT_CATEGORIES['files']['keywords'] += ', папк, список файлов, удали файл'
 DEFAULT_CATEGORIES['memory']['keywords'] += ', задач, todo, напомни, список дел, забудь'
 DEFAULT_CATEGORIES['web']['keywords'] += ', википед, курс валют, доллар, евро, биткоин, bitcoin, крипт, переведи на, github, гитхаб'
+DEFAULT_CATEGORIES['web']['keywords'] += ', рубл, руб., бун, byn, rub, usd, eur, uah, kzt, cny, гривн, тенге, юан, валют, сколько стоит, цена, конверт, в долларах, в евро, в рублях, курс'
 DEFAULT_CATEGORIES['telegram']['keywords'] += ', чат, чаты, диалог, переписк, прочитай чат, последние сообщения, найди сообщение, избранное, saved, пользователь, юзер'
+DEFAULT_CATEGORIES['telegram']['keywords'] += ', спроси, узнай у, уточни у, жди ответ, дождись, что ответил, ответил что, это @, кто такой @'
+DEFAULT_CATEGORIES['telegram']['keywords'] += ', поговори, обсуди, попереписыв, поболтай, пообщайся, побеседуй, расспроси, разузнай, перетри'
+DEFAULT_CATEGORIES['telegram']['keywords'] += ', напиши , передай, скажи , сообщи, ответь , контакт, номер телефона, найди человека, кто такая, кто такой, сюда, в этот чат, это сообщение, на что я ответил'
 
 
 class ToolError(Exception):
@@ -648,8 +666,11 @@ class ToolStore:
             if not c['enabled'] or not c['enabled_tools']:
                 continue
             words = [w.strip() for w in c['keywords'].lower().split(',') if w.strip()]
-            if any(w in low for w in words) or (c['id'] == 'math' and re.search(r'\d\s*[-+*/^]\s*\d', low)):
+            if (any(w in low for w in words) or (c['id'] == 'math' and re.search(r'\d\s*[-+*/^]\s*\d', low))
+                    or (c['id'] == 'system' and re.search(r'(?:^|\s)\.[a-zа-я]{2,}', low))):   # «вызови .config» — команда юзербота
                 hit.append(c['id'])
+        if 'telegram' in hit and 'tg_inline' not in hit and any(c['id'] == 'tg_inline' and c['enabled'] for c in self.categories()):
+            hit.append('tg_inline')                         # спрашивать других кнопками агент решает сам — инструмент должен быть под рукой
         return hit
 
     # ---- выполнение ---- #
@@ -666,8 +687,28 @@ class ToolStore:
         fn = ns.get('run')
         if not callable(fn):
             raise ToolError('В файле нет функции run')
-        self._code_cache[name] = (mtime, fn, meta)
+        self._code_cache[name] = (mtime, fn, meta, ns.get('describe'))
         return fn, meta
+
+    async def describe(self, name, arguments):
+        """Необязательная функция инструмента describe(**args): что именно он сделает — для кнопок подтверждения
+        («Написать Катя Иванова · @katya: «…»»). Может вернуть {'block': 'текст'} — тогда инструмент не запускаем и подтверждение
+        не спрашиваем (например, получатель неоднозначен). Нет функции или ошибка — None."""
+        try:
+            self._load(name)
+            fn = self._code_cache.get(name, (None, None, None, None))[3]
+            if not callable(fn):
+                return None
+            token = current_module.set(OWNER_MODULE)
+            try:
+                res = fn(**_fit_args(fn, dict(arguments or {})))
+                if inspect.isawaitable(res):
+                    res = await asyncio.wait_for(res, 30)
+            finally:
+                current_module.reset(token)
+            return res if isinstance(res, (str, dict)) else None
+        except Exception:                                               # noqa: BLE001
+            return None
 
     async def run(self, name, arguments, timeout=60.0, limit=3500):
         """Вызывает run(**arguments); любые ошибки превращаются в понятный текст (результат инструмента для модели)."""
@@ -679,6 +720,7 @@ class ToolStore:
             return f"Ошибка загрузки инструмента '{name}': {type(e).__name__}: {e}"
         if not isinstance(arguments, dict):
             return f"Ошибка: аргументы инструмента '{name}' должны быть объектом"
+        arguments = _fit_args(fn, arguments)
         try:
             inspect.signature(fn).bind(**arguments)
         except TypeError as e:
@@ -698,6 +740,61 @@ class ToolStore:
         text = res if isinstance(res, str) else json.dumps(res, ensure_ascii=False, default=str)
         limit = max(limit, meta.get('limit') or 0)
         return text if len(text) <= limit else text[:limit] + f"\n…(обрезано, всего {len(text)} симв.)"
+
+
+def _fit_args(fn, arguments):
+    """Подгоняет аргументы от модели под run(): позиционные (__pos__) — по порядку, имена без учёта регистра/дефисов,
+    единственный аргумент с «не тем» именем — в единственный параметр, лишние ключи (если нет **kwargs) — выбрасываем,
+    числа и флаги строкой — в нужный тип по аннотации. Модели часто ошибаются в мелочах — из-за этого инструмент «не всегда» запускался."""
+    try:
+        params = [p for p in inspect.signature(fn).parameters.values() if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)]
+        var_kw = any(p.kind == p.VAR_KEYWORD for p in inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return arguments
+    names = [p.name for p in params]
+    args = dict(arguments)
+    pos = args.pop('__pos__', None)
+    out = {}
+    canon = {re.sub(r'[^a-z0-9]', '', n.lower()): n for n in names}
+    extra = {}
+    for k, v in args.items():
+        if k in names:
+            out[k] = v
+        else:
+            c = canon.get(re.sub(r'[^a-z0-9]', '', str(k).lower()))
+            if c and c not in out:
+                out[c] = v
+            else:
+                extra[k] = v
+    if pos:
+        free = [n for n in names if n not in out]
+        for n, v in zip(free, pos if isinstance(pos, list) else [pos]):
+            out[n] = v
+    if extra:
+        if var_kw:
+            out.update(extra)
+        else:
+            missing = [p.name for p in params if p.name not in out]
+            if len(extra) == 1 and missing:                  # один аргумент «не с тем» именем — в первый незаполненный параметр
+                out[missing[0]] = next(iter(extra.values()))
+    for p in params:                                        # "5" → 5, "true" → True по аннотации
+        if p.name not in out or p.annotation is inspect.Parameter.empty:
+            continue
+        v, ann = out[p.name], p.annotation
+        try:
+            if ann in (int, 'int') and isinstance(v, str) and re.fullmatch(r'\s*-?\d+\s*', v):
+                out[p.name] = int(v)
+            elif ann in (float, 'float') and isinstance(v, (str, int)) and not isinstance(v, bool):
+                out[p.name] = float(v)
+            elif ann in (bool, 'bool') and isinstance(v, str):
+                out[p.name] = _bool(v)
+            elif ann in (str, 'str') and isinstance(v, (int, float)) and not isinstance(v, bool):
+                out[p.name] = str(v)
+            elif ann in (str, 'str') and isinstance(v, (dict, list)):
+                out[p.name] = json.dumps(v, ensure_ascii=False)
+        except (TypeError, ValueError):
+            pass
+    return out
 
 
 _store = None

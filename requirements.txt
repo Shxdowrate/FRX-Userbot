@@ -1,6 +1,8 @@
 # Ядро FRX — без этого не запустится. Ставится само при каждом старте, если чего-то не хватает (frx_deps.py).
 telethon>=1.36
+cryptg; sys_platform != 'android'   # шифрование Telethon на C: загрузка/выгрузка файлов в разы быстрее (без него — чистый Python)
 aiogram>=3.25,<4.0      # 3.25+: цветные кнопки (style)
 aiohttp>=3.9            # сайт .web, нейросети; aiogram и так тянет aiohttp
 Pillow>=10.0            # картинки: стикеры, цитаты, аватарки (`import media`)
 imageio-ffmpeg>=0.5.1; sys_platform != 'android'   # запасной ffmpeg (на Android не нужен), если своего нет (полный ffmpeg + ffprobe frx_deps.py скачает в user/data/bin)
+tzdata; sys_platform == 'win32'   # часовые пояса для нейро-инструмента времени (на Windows нет системной базы IANA)

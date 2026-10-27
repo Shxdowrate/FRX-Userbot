@@ -16,8 +16,8 @@ engine.wait_message(chat_id=None, user_id=None, timeout=None) — заменяе
              'me'                -> только от владельца юзербота.
              int                 -> конкретный user_id.
              list из перечисленного выше -> любое совпадение.
-    timeout: None -> берётся из конфига модуля 'waiters' (default_timeout,
-             см. modules/builtin/Waiters.py).
+    timeout: None -> берётся из настройки wait_timeout модуля Userbot
+             (modules/builtin/Userbot.py, .config userbot).
 
 Возвращает Waiter — работает и как обычный await (одно сообщение), и как
 async-итератор (Python-цикл: ждёт сообщение, выполняет тело, снова ждёт):
@@ -54,7 +54,7 @@ class Waiter:
     def __init__(self, client, chats, from_users, timeout, core=None):
         self._client = client
         self._timeout = timeout
-        self._core = core            # для ленивого резолвинга timeout=None через конфиг 'waiters'
+        self._core = core            # для ленивого резолвинга timeout=None через настройку wait_timeout (Userbot)
         self._ev_builder = events.NewMessage(chats=chats, from_users=from_users)
         self._queue = asyncio.Queue()
         self._cancelled = asyncio.Event()
@@ -82,7 +82,7 @@ class Waiter:
         if self._cancelled.is_set():
             raise WaiterCancelled
         if not self._timeout_resolved:
-            # timeout=None -> берём дефолт из конфига 'waiters' (async,
+            # timeout=None -> берём дефолт из wait_timeout модуля Userbot (async,
             # поэтому резолвится здесь, а не в синхронном wait_message())
             self._timeout = await self._core._waiters_default_timeout() if self._core else 60
             self._timeout_resolved = True
