@@ -1,12 +1,12 @@
 {
   "type": "frx-manifest",
   "frx_version": "1.0.6",
-  "created": "2026-10-27T21:54:39",
+  "created": "2026-10-27T23:56:59",
   "files": {
     ".dockerignore": "c07d9ee79882e54185277253d31d81fe8e9d6179b5558ef341ddea44736661a4",
     ".gitattributes": "451be9676c789202ebe722cad91f48a1ca1abffb16d90efc2dbd30e01b393f47",
     ".gitignore": "b7554b5cb4890977df54c2f04e96331de2e923bd5e69b28331b1642a27381d8c",
-    "CHANGELOG.md": "ef179ea29e8c87a09e444e50109782b5b918997733805806ca85dd5ab12e5a04",
+    "CHANGELOG.md": "f6020d96faa26c783fe7f97190655f12debf8946fe469c006d0786a2c99177cb",
     "Dockerfile": "aeb8f98b11d2fd73c3642d09e18f8ebe772be5cb19d6fbdf019c279c18f3682a",
     "LICENSE": "0765f66ff494ef1131ab521e1613a701a65f6122c3fc1bcd3f6d8fecef423529",
     "README.md": "7a89848bfbf088aff63b13dce07489fc8f14ab58827cda5a9106342358fb4016",
@@ -119,7 +119,7 @@
     "core/neuro_seed/weather.py": "321259d533e9089dacc8ddd1df7167838a5378bfa98c589d8db8636170e390a0",
     "core/neuro_seed/web_search.py": "63f5eb8197eaf579e60ca6d115b51a42614177b85dce601b6b9464b1861a518e",
     "core/neuro_seed/wikipedia.py": "2b527fec5e729eb65ea3af37686bcfb5347c4f47e59fc34f4a339e76b55fdaf6",
-    "core/neuro_tg.py": "504ba977c8cc32f5de46319001183e472694206e50453a75957405e641c1ff05",
+    "core/neuro_tg.py": "f146d49021d3925719dc429dea6fd225320b9eddf97eb0720273a223fff0ad36",
     "core/neuro_tools.py": "404021c1ef18e00458d9baa557d0599188058c9b5c5fbd426be424ec1cc15c14",
     "core/paths.py": "443b3dd5a5dc0b2b9d8f0885ff1cbf26f746ac5ab23a6e07e2301c982eaccbdb",
     "core/requirements.py": "59fbb7722460fb459c0a9a433cc797e628a6607b774b729f056b71146418c898",

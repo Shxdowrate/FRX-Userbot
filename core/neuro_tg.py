@@ -175,7 +175,7 @@ def _aliases_path():
 
 
 def aliases() -> dict:
-    """Прозвища людей, которые назвал владелец: {'шикс': {'id': 5195118663, 'line': 'Shx · @Shxdowrate · id …'}}."""
+    """Прозвища людей, которые назвал владелец: {'вася': {'id': 123456789, 'line': 'Вася · @vasya · id …'}}."""
     try:
         d = json.loads(_aliases_path().read_text(encoding='utf-8'))
         return d if isinstance(d, dict) else {}
