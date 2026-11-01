@@ -293,6 +293,9 @@ async function accessUser(T, id) {
         [h('a', { class: 'link', href: '#/access/class/' + acEnc(cls.idn) }, 'открыть'),
           confirmBtn('снять класс', () => act(async () => { await api('/access/user_class', { id, class: null }); toast('класс снят', 'ok'); reload(); }))])
       : empty('класса нет')));
+    sections.push(h('div', { class: 'h2', style: 'padding-left:6px' }, 'написание команд'));
+    sections.push(glass((u.options || []).map((o) => row(nameSub(o.label, o.description),
+      toggle(o.on, (v) => act(async () => { await api('/access/user_option', { id, option: o.key, on: v }); toast(o.label + ': ' + (v ? 'вкл' : 'выкл'), 'ok'); }))))));
     sections.push(h('div', { class: 'h2', style: 'padding-left:6px' }, 'личные разрешения'));
     sections.push(glass(acGrantRows(u.grants, (g) => act(async () => {
       await api('/access/revoke', { target: 'user', id, kind: g.kind, value: g.value });

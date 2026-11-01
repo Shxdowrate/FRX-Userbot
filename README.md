@@ -1148,6 +1148,12 @@ API для модулей — [раздел 31](#31-accounts-мультиакк�
 модуль не загрузит код «от имени» гостя. Запуск команды другого модуля из кнопки (`engine.exec_modcmd`) тоже
 проверяет выдачи гостя.
 
+**Написание команды.** По умолчанию гость, как и вы, может писать `.Ping` или `. ping` — команда выполнится.
+У каждого человека с доступом есть два своих переключателя (в меню `.access`, на сайте и `.access ignore`):
+**«игнорировать .Cmd»** — его команды с заглавными буквами (`.Ping`, `.PING`) не выполняются, только `.ping`;
+**«игнорировать . cmd»** — не выполняются команды с пробелом после префикса (`. ping`). Такие команды молча
+игнорируются, даже если они выданы. По умолчанию оба выключены; на ваши собственные команды они не влияют.
+
 **Инлайн-формы.** Форма, которую создала команда гостя, доступна для нажатия и владельцу, и этому гостю.
 
 > Класс `FULL`, «все модули» и любые критически опасные модули — это **полный контроль** над вашим аккаунтом.
@@ -1165,6 +1171,8 @@ API для модулей — [раздел 31](#31-accounts-мультиакк�
   тогда доступ будет только к этой команде). Для опасных модулей перед выдачей — отдельное подтверждение.
 - **«Отозвать доступ»** (если доступ есть) — класс и каждое разрешение отдельной кнопкой, нажатие отзывает;
   внизу «Отозвать весь доступ» с подтверждением.
+- **«игнорировать .Cmd»** и **«игнорировать . cmd»** (если доступ есть) — переключатели написания команд этого
+  человека (см. «Написание команды» выше); ✅ — включён.
 
 | Команда | Что делает |
 |---|---|
@@ -1174,9 +1182,10 @@ API для модулей — [раздел 31](#31-accounts-мультиакк�
 | `.access grant [пользователь] <что>` | выдать текстом: класс (`LOADED`), модуль (`userbot`), команду (`.ping` или `userbot:ping`), набор (`all`, `builtin`, `loaded`) |
 | `.access revoke [пользователь] [что \| class]` | отозвать одну выдачу или класс; без «что» — весь доступ |
 | `.access check [пользователь] <команда>` | доступна ли команда и почему |
+| `.access ignore [пользователь] case\|space [on\|off]` | переключатели написания: `case` — игнорировать `.Cmd`, `space` — игнорировать `. cmd`; без `on`/`off` — переключить |
 | `.access list`, `.access classes` | списки текстом |
 
-Если `grant`/`revoke`/`check` отправлены ответом на сообщение, пользователя указывать не нужно. Текстовые
+Если `grant`/`revoke`/`check`/`ignore` отправлены ответом на сообщение, пользователя указывать не нужно. Текстовые
 подкоманды работают и без стационарного бота. Ваш аккаунт должен хотя бы раз «видеть» человека (личка, общий
 чат), чтобы выдать доступ по `@username` или id.
 
@@ -1187,7 +1196,8 @@ API для модулей — [раздел 31](#31-accounts-мультиакк�
 - **Страница человека** — то же, что инлайн-меню, но удобнее: сколько команд доступно; «выдать класс» (окно со
   списком классов → карточка класса с тем, что он даёт, и предупреждениями → «выдать класс»); «+ выдать
   разрешение» (окно выбора, см. ниже); блок «класс» с кнопкой «снять класс»; «личные разрешения» — каждое с
-  «отозвать»; проверка команды («доступна ли и почему»); «отозвать весь доступ».
+  «отозвать»; блок «написание команд» с переключателями «игнорировать .Cmd» и «игнорировать . cmd»; проверка
+  команды («доступна ли и почему»); «отозвать весь доступ».
 - **Классы:** «новый класс» — idn, название, описание (и можно начать с копии другого класса). Страница класса —
   те же три поля (idn можно переименовать, люди с классом переедут на новый idn), «что даёт класс» со списком
   выдач и кнопкой «отозвать» у каждой, **«+ добавить доступ»** и список людей с этим классом; «удалить класс»
@@ -2060,16 +2070,19 @@ ok = await engine.exec_modcmd(event, module, command, args='')
 ### Сообщения
 
 ```python
-await engine.answer(message, text, file=None)        # правит message (если это ваше сообщение), иначе отвечает новым
-await engine.reply(message, text, file=None)         # всегда новое сообщение-ответ
-await engine.noreply(message, text, file=None)       # в тот же чат, без ответа
-await engine.send_message(chat_id, text, file=None)  # в любой чат по id
+await engine.answer(message, text, file=None, link_preview=None)        # правит message (если это ваше сообщение), иначе отвечает новым
+await engine.reply(message, text, file=None, link_preview=None)         # всегда новое сообщение-ответ
+await engine.noreply(message, text, file=None, link_preview=None)       # в тот же чат, без ответа
+await engine.send_message(chat_id, text, file=None, link_preview=None)  # в любой чат по id
 engine.get_args()                                     # СИНХРОННО: аргументы текущей команды строкой ('' вне события)
 engine.get_args_html()                                # то же с разметкой: жирный, ссылки, премиум-эмодзи (<tg-emoji>)
 ```
 
 - `answer` — паттерн «ожидание → результат»: первый `answer(event, "…")` на вашу команду правит саму команду,
   следующий — то же сообщение.
+- `link_preview` — превью ссылок в тексте: `None` — как решит Telegram (обычно превью есть), `False` — без превью,
+  `True` — с превью. Telegram не помнит его между правками: `answer(..., link_preview=False)`, а следом `answer()`
+  без него — превью вернётся; передавайте в каждый вызов. На сообщения с `file` не влияет.
 - Текст — HTML (`parse_mode='html'`) и проходит `safe_html()`: настоящие теги Telegram работают,
   `<не_теги>` и одиночные `<`, `&` показываются как есть ([раздел 34](#34-безопасный-html-safe_html)).
 - `file` — путь на диске или id/имя из реестра `files`. **Заглушка «загрузка…»**: загрузка файла начинается сразу;
@@ -2385,7 +2398,7 @@ async def vote_cmd(event):
 ```python
 form = await engine.create_inlineform(
     chat_id, text, buttons=None,
-    for_user=None, black_list=None, timeout=None, reply_to=None, media=None, styles=None,
+    for_user=None, black_list=None, timeout=None, reply_to=None, media=None, styles=None, link_preview=None,
 )
 ```
 
@@ -2397,6 +2410,7 @@ form = await engine.create_inlineform(
 | `black_list` | id или список id, кому нельзя никогда (проверяется раньше `for_user`) |
 | `timeout` | секунд **без кликов**, после которых форма закроется сама; `None` — живёт, пока модуль не вызовет `form.close()` |
 | `reply_to` | `None` — если команда была ответом на сообщение, форма тоже отвечает на него; `False` — не отвечать; число — id сообщения |
+| `link_preview` | превью ссылок в тексте: `None` — как решит Telegram, `False` — без превью, `True` — превью первой ссылки, `'https://…'` — превью этого адреса (крупно, над текстом). Держится на всех `form.edit()` и листании страниц; `form.edit(..., link_preview=...)` меняет его. У формы с `media` не действует |
 | `media` | картинка или анимация над текстом: путь, `http(s)`-ссылка или `file_id` бота. `.jpg/.png/.webp` — картинка, `.mp4/.gif/.webm` — анимация (как GIF, без звука). Текст становится подписью (до 1024 символов). Файл загружается ботом один раз, дальше берётся из кэша. Пока файл грузится впервые, форма уже стоит в чате с анимацией «загрузка…» — и меняет её на файл сама |
 
 Ошибки: нет бота — `RuntimeError`; у бота выключен инлайн-режим — `RuntimeError` с подсказкой. Подтверждения
@@ -2417,7 +2431,7 @@ async def _(inp): ...
 @form.on_search(data='search')                    # запрос из SearchButton (то же, что on_input(data='search'))
 async def _(inp): ...
 
-await form.edit(text, buttons=None)               # переписать текст и кнопки (None — убрать кнопки)
+await form.edit(text, buttons=None)               # переписать текст и кнопки (None — убрать кнопки); styles=, link_preview= — сменить цвета / превью
 await form.close(remove_buttons=True)             # прекратить обработку; сообщение остаётся в чате
 await form.click("Да", wait="edit")              # нажать кнопку своей формы от имени юзербота (см. «Клики по кнопкам»)
 form.chat_id, form.text, form.page, form.owner_module, form.for_user, form.black_list, form.media
@@ -2451,6 +2465,12 @@ form = await engine.create_inlineform(event.chat_id, "Удалить файл?",
 
 Кнопка-ссылка — `('Открыть', 'url:https://example.com')`: открывает адрес (также `http://`, `tg://`), в `on_click` не
 приходит; на сайте (Emulate, Sandbox) рисуется ссылкой.
+
+Кнопка «скопировать» — `('📋 Скопировать', 'copy:ABC-123')` (или `{'text': '📋 Скопировать', 'copy': 'ABC-123'}`):
+нажатие кладёт текст после `copy:` в буфер обмена того, кто нажал, а Telegram показывает «скопировано». В `on_click`
+не приходит. Текст — от 1 до 256 символов (ограничение Telegram), иначе `ValueError`; ограничение 64 байт на
+`callback_data` к нему не относится. Работает и в `form.edit()`, `InlineResult`, `engine.bot.send_message(buttons=…)`;
+на сайте (Emulate, Sandbox) кнопка копирует текст в буфер браузера.
 
 `callback_data` — не длиннее 64 байт (ограничение Bot API). Объёмные данные храните в `cache`/`db` под
 коротким ключом и кладите в кнопку только ключ.
@@ -2676,14 +2696,15 @@ async def weather_start(event, payload):                # event — BotMessageEv
 ### engine.bot — сообщения от имени бота
 
 ```python
-await engine.bot.send_message(chat_id, "Привет", file=None, buttons=[[("Ок", "ok")]], reply_to=None)
-await engine.bot.reply(aiogram_message, "Принято", file=None, buttons=None)
-await engine.bot.edit(aiogram_message, "Обновлено", file=None, buttons=None)
+await engine.bot.send_message(chat_id, "Привет", file=None, buttons=[[("Ок", "ok")]], reply_to=None, link_preview=None)
+await engine.bot.reply(aiogram_message, "Принято", file=None, buttons=None, link_preview=None)
+await engine.bot.edit(aiogram_message, "Обновлено", file=None, buttons=None, link_preview=None)
 engine.bot.raw                       # aiogram.Bot — любые методы Bot API
 await engine.bot_send_to_owner(text, file=None, buttons=None)
 ```
 
 - `message` в `reply/edit` — `aiogram.types.Message` (не Telethon).
+- `link_preview` — превью ссылок, как у инлайн-форм: `None` / `False` / `True` / `'https://…'` (только у текста без `file`).
 - `file`: `.jpg/.jpeg/.png/.webp/.gif` уходят фото, остальное — документом. `edit(..., file=...)` удаляет
   старое сообщение и отправляет новое (Bot API не превращает текст в медиа).
 - Без бота — `RuntimeError`.
@@ -2745,6 +2766,8 @@ engine.access.users()                     # {'<id>': {'name', 'username', 'class
 engine.access.classes()                   # {'FULL': {'title', 'description', 'scopes', 'modules', 'commands', 'system'}, ...}
 engine.access.get_user(user_id)           # запись или None
 engine.access.check(user_id, module, 'module:команда', is_builtin)   # (bool, причина)
+engine.access.user_option(user_id, 'ignore_case' | 'ignore_space')    # переключатель написания команд (bool)
+await engine.access.set_user_option(user_id, 'ignore_case' | 'ignore_space', True | False)
 engine.access.module_allowed(user_id, module, is_builtin)          # выдан ли модуль целиком: (bool, причина)
 engine.access.grants_of(obj)              # [('scope'|'module'|'command', значение), ...] у класса или пользователя
 await engine.access.grant('user' | 'class', ident, 'scope' | 'module' | 'command', value)

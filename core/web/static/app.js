@@ -1287,11 +1287,12 @@ async function emulateModule(T, moduleId) {
     if ((e.rows || []).length) {
       box.appendChild(h('div', { class: 'emu-kb' }, e.rows.map((r) => h('div', { class: 'emu-krow' }, r.map((b) => (b.input !== undefined
         ? h('button', { class: 'btn small' + (b.style ? ' st-' + b.style : ''), type: 'button', onclick: () => openInput(b) }, b.text)
+        : b.copy !== undefined ? h('button', { class: 'btn small' + (b.style ? ' st-' + b.style : ''), type: 'button', title: 'кнопка «скопировать»: ' + b.copy, onclick: () => { navigator.clipboard?.writeText(b.copy); toast('скопировано', 'ok'); } }, b.text)
         : /^url:(https?|tg):/.test(b.data || '') ? h('a', { class: 'btn small' + (b.style ? ' st-' + b.style : ''), href: b.data.slice(4), target: '_blank', rel: 'noopener noreferrer' }, b.text + ' ↗')
         : h('button', { class: 'btn small' + (b.style ? ' st-' + b.style : ''), type: 'button', onclick: () => post('/emulate/click', { form: e.form, data: b.data }) }, b.text)))))));
     }
     box.appendChild(inpBox);
-    box._sig = 'f' + JSON.stringify((e.rows || []).map((r) => r.map((b) => [b.text, b.data, b.input, b.style])));
+    box._sig = 'f' + JSON.stringify((e.rows || []).map((r) => r.map((b) => [b.text, b.data, b.input, b.copy, b.style])));
     return box;
   }
 

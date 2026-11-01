@@ -1012,14 +1012,14 @@ class SbBotFacade:
     def raw(self):
         return self._raw
 
-    async def send_message(self, chat_id, text, file=None, buttons=None, reply_to=None):
+    async def send_message(self, chat_id, text, file=None, buttons=None, reply_to=None, link_preview=None):
         media = media_from_file(self._s.files.resolve(file)) if file is not None else None
         return await self._s.send_as_bot(chat_id, safe_html(text) if text else text, buttons=buttons, reply_to=reply_to, media=media, html=True)
 
-    async def reply(self, message, text, file=None, buttons=None):
+    async def reply(self, message, text, file=None, buttons=None, link_preview=None):
         return await self.send_message(message.chat.id, text, file=file, buttons=buttons, reply_to=message.message_id)
 
-    async def edit(self, message, text, file=None, buttons=None):
+    async def edit(self, message, text, file=None, buttons=None, link_preview=None):
         if file is not None:
             await self._raw.delete_message(message.chat.id, message.message_id)
             return await self.send_message(message.chat.id, text, file=file, buttons=buttons)
@@ -1578,7 +1578,7 @@ class SbForm:
             self._msg._publish()
         self._s.feed.update(self._msg._entry, closed=closed)
 
-    async def edit(self, text, buttons=None):
+    async def edit(self, text, buttons=None, styles=None, link_preview=None):   # цвет и превью Sandbox не рисует
         if self._closed:
             raise RuntimeError(f"Форма '{self.form_id}' уже закрыта (form.close())")
         self.text = text
@@ -1733,7 +1733,8 @@ class SandboxEngine:
     async def _resolve_file(self, file):
         return self.s.files.resolve(file) if file is not None else None
 
-    async def answer(self, message, text, file=None):
+    # link_preview (превью ссылок) Sandbox не рисует — принимается, чтобы код модуля работал как в Telegram
+    async def answer(self, message, text, file=None, link_preview=None):
         path = await self._resolve_file(file)
         text = safe_html(text)
         try:
@@ -1741,16 +1742,16 @@ class SandboxEngine:
         except Exception:
             return await message.reply(text, file=path, parse_mode='html')
 
-    async def reply(self, message, text, file=None):
+    async def reply(self, message, text, file=None, link_preview=None):
         path = await self._resolve_file(file)
         return await message.reply(safe_html(text), file=path, parse_mode='html')
 
-    async def noreply(self, message, text, file=None):
+    async def noreply(self, message, text, file=None, link_preview=None):
         path = await self._resolve_file(file)
         chat = message._chat if isinstance(message, SbMessage) else self.s.resolve_chat(message.chat_id, 'user')
         return await self.s.send_as_owner(chat, safe_html(text), file=path, parse_mode='html')
 
-    async def send_message(self, chat_id, text, file=None):
+    async def send_message(self, chat_id, text, file=None, link_preview=None):
         path = await self._resolve_file(file)
         chat = self.s.resolve_chat(chat_id, 'user')
         return await self.s.send_as_owner(chat, safe_html(text), file=path, parse_mode='html')
@@ -1800,7 +1801,8 @@ class SandboxEngine:
             return 60
 
     # ---- формы ---- #
-    async def create_inlineform(self, chat_id, text, buttons=None, for_user=None, black_list=None, timeout=None, reply_to=None):
+    async def create_inlineform(self, chat_id, text, buttons=None, for_user=None, black_list=None, timeout=None, reply_to=None,
+                                link_preview=None):
         if not self.s.bot_enabled:
             raise RuntimeError("Стационарный бот не запущен (aiogram_token не задан)")
         chat = self.s.resolve_chat(chat_id, 'user')

@@ -3,7 +3,8 @@ core/web/access_api.py — HTTP-слой вкладки «доступ» (#/acce
 Логика прав и алиасов — core/access.py; все запросы идут через WebPanel.api() (Host / Origin / X-FRX).
 """
 
-from ..access import AccessError, PROTECTED_COMMANDS, PROTECTED_MODULES, SCOPES, SCOPE_TITLES, command_key, describe_grant
+from ..access import (AccessError, PROTECTED_COMMANDS, PROTECTED_MODULES, SCOPES, SCOPE_TITLES, USER_OPTIONS, command_key,
+                      describe_grant)
 
 
 def register(panel, router):
@@ -12,8 +13,8 @@ def register(panel, router):
     r = router
     r.add_get('/api/access/state', panel.api(api.state))
     r.add_get('/api/access/user', panel.api(api.user))
-    for name in ('resolve', 'grant', 'revoke', 'user_class', 'user_del', 'class_create', 'class_update',
-                 'class_delete', 'check'):
+    for name in ('resolve', 'grant', 'revoke', 'user_class', 'user_del', 'user_option', 'class_create',
+                 'class_update', 'class_delete', 'check'):
         r.add_post(f'/api/access/{name}', panel.api(getattr(api, name)))
     r.add_get('/api/aliases', panel.api(api.aliases))
     r.add_post('/api/aliases/set', panel.api(api.alias_set))
@@ -97,7 +98,9 @@ class AccessApi:
     def _user_out(self, uid, u, modules, prefix):
         allowed, total = self._count(uid, modules)
         return {'id': uid, 'name': u.get('name') or '', 'username': u.get('username') or '', 'class': u.get('class'),
-                'grants': self._grants(u, modules, prefix), 'added': u.get('added'), 'allowed': allowed, 'total': total}
+                'grants': self._grants(u, modules, prefix), 'added': u.get('added'), 'allowed': allowed, 'total': total,
+                'options': [{'key': k, 'label': label, 'description': desc, 'on': bool(u.get(k))}
+                            for k, (label, desc) in USER_OPTIONS.items()]}
 
     def _class_out(self, idn, c, modules, prefix):
         users = [uid for uid, u in self._am().users().items() if u.get('class') == idn]
@@ -191,6 +194,12 @@ class AccessApi:
         b = await self._body(request)
         await self._call(self._am().set_user_class(str(b.get('id') or ''), b.get('class') or None,
                                                    name=str(b.get('name') or ''), username=str(b.get('username') or '')))
+        return {'ok': True}
+
+    async def user_option(self, request):
+        """Переключатель написания команд у пользователя: {id, option: ignore_case|ignore_space, on}."""
+        b = await self._body(request)
+        await self._call(self._am().set_user_option(str(b.get('id') or ''), str(b.get('option') or ''), bool(b.get('on'))))
         return {'ok': True}
 
     async def user_del(self, request):

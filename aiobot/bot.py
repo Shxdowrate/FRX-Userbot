@@ -45,6 +45,7 @@ from core.time_utils import parse_interval
 from core.engine import build_inline_function_text
 from core import visual as visual_module
 from core.html_utils import sanitize_bot_method, strip_bot_method_custom_emoji
+from core.inline_results import link_preview_options
 from aiogram.exceptions import TelegramBadRequest
 
 
@@ -159,6 +160,12 @@ async def cmd_status(message: types.Message):
 # хэндлерам этого модуля (например, cmd_status выше), у которых, в отличие
 # от "сырых" aiogram-хэндлеров, нет параметра core в сигнатуре.
 _core_ref = None
+
+
+def _preview_kw(value):
+    """create_inlineform(link_preview=...) → {'link_preview_options': …} для первого показа формы ({} — как решит Telegram)."""
+    lp = link_preview_options(value)
+    return {'link_preview_options': lp} if lp is not None else {}
 
 
 def _is_owner(user_id, core):
@@ -485,7 +492,8 @@ def create_bot(token: str, core=None):
                 id=iq.query,  # echo form_id обратно — по нему SendInlineBotResult выберет именно этот результат
                 title="FRX · форма",
                 description=(text or "")[:100],
-                input_message_content=InputTextMessageContent(message_text=text or _INLINE_FORM_PLACEHOLDER),
+                input_message_content=InputTextMessageContent(message_text=text or _INLINE_FORM_PLACEHOLDER,
+                                                              **_preview_kw(pending_form.get('link_preview'))),
                 reply_markup=markup,
             )
             await iq.answer([result], cache_time=0, is_personal=True)

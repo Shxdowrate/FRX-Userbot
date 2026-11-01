@@ -297,12 +297,28 @@ def normalize_style(style):
     return norm
 
 
+COPY_PREFIX = 'copy:'
+COPY_TEXT_LIMIT = 256          # Bot API: CopyTextButton.text — от 1 до 256 символов
+
+
+def copy_text_value(value):
+    """Текст кнопки «скопировать» (copy:<текст>) с проверкой ограничений Telegram."""
+    value = str(value)
+    if not value:
+        raise ValueError("Кнопка copy: пустой текст — Telegram требует от 1 до 256 символов: ('📋 Скопировать', 'copy:ABC-123')")
+    if len(value) > COPY_TEXT_LIMIT:
+        raise ValueError(f"Кнопка copy: текст длиннее {COPY_TEXT_LIMIT} символов ({len(value)}) — Telegram такой не примет; "
+                         f"длинное отправьте текстом или файлом (form.send_text_file())")
+    return value
+
+
 def parse_button(btn, styles=None):
     """
     Одна кнопка в любом поддерживаемом виде -> dict:
-        {'kind': 'input'|'url'|'callback', 'text', 'data', 'style', 'hint'?, 'url'?}
+        {'kind': 'input'|'url'|'copy'|'callback', 'text', 'data', 'style', 'hint'?, 'url'?, 'copy'?}
     Форматы: (text, data) · (text, data, style) · {'text', 'data', 'style'} · InputButton(...).
-    styles — {callback_data: style} формы; цвет у самой кнопки важнее.
+    Особые data: 'url:https://…' — кнопка-ссылка, 'copy:<текст>' — кнопка «скопировать» (в словаре — ключи
+    'url' / 'copy'). styles — {callback_data: style} формы; цвет у самой кнопки важнее.
     Возвращает None, если формат не распознан.
     """
     styles = styles or {}
@@ -313,6 +329,8 @@ def parse_button(btn, styles=None):
         text, data, style = btn.get('text'), btn.get('data', btn.get('callback_data')), btn.get('style')
         if btn.get('url'):
             data = 'url:' + str(btn['url'])
+        elif btn.get('copy') is not None:
+            data = COPY_PREFIX + str(btn['copy'])
     elif isinstance(btn, (list, tuple)) and len(btn) in (2, 3):
         text, data = btn[0], btn[1]
         style = btn[2] if len(btn) == 3 else None
@@ -322,9 +340,23 @@ def parse_button(btn, styles=None):
         return None
     data = str(data)
     style = normalize_style(style) if style else styles.get(data)
+    if data.startswith(COPY_PREFIX):
+        return {'kind': 'copy', 'text': str(text), 'data': data, 'copy': copy_text_value(data[len(COPY_PREFIX):]),
+                'style': style}
     if data.startswith(('url:http://', 'url:https://', 'url:tg://')):
         return {'kind': 'url', 'text': str(text), 'data': data, 'url': data[4:], 'style': style}
     return {'kind': 'callback', 'text': str(text), 'data': data, 'style': style}
+
+
+class _Keep:
+    """Значение аргумента «не передан» (form.edit(link_preview=...): None там — осмысленное значение)."""
+    __slots__ = ()
+
+    def __repr__(self):
+        return 'KEEP'
+
+
+KEEP = _Keep()
 
 
 class TokenBucket:
@@ -558,6 +590,7 @@ class InlineForm:
         self._ready = None             # Future: inline_message_id подтверждён ботом (create_inlineform не ждёт его)
         self.media = None              # {'kind', 'file_id'}, если форма с картинкой/анимацией (текст — подпись)
         self.styles = {}               # {callback_data: 'primary'|'success'|'danger'} — цвет кнопок (create_inlineform(styles=...))
+        self.link_preview = None       # превью ссылок в тексте: None | False | True | 'https://…' (create_inlineform(link_preview=...))
         self._media_task = None        # загрузка настоящего медиа вместо заглушки «загрузка…» (Core._swap_form_media)
 
     # ------------------------------------------------------------------ #
@@ -611,7 +644,7 @@ class InlineForm:
             return func
         return deco
 
-    async def edit(self, text, buttons=None, styles=None):
+    async def edit(self, text, buttons=None, styles=None, link_preview=KEEP):
         """
         Переписывает текст и/или клавиатуру формы. buttons=None — без кнопок.
         Если buttons содержит InputButton(...) — заново регистрирует
@@ -627,15 +660,22 @@ class InlineForm:
 
         styles — цвет кнопок по их callback_data: {'del': 'danger', 'ok': 'success'};
         None — оставить как было (при create_inlineform(styles=...)). Цвет можно задать
-        и у самой кнопки третьим элементом: ("Удалить", "del", "danger")."""
+        и у самой кнопки третьим элементом: ("Удалить", "del", "danger").
+
+        link_preview — превью ссылок в тексте: не указан — как у формы (create_inlineform(link_preview=...));
+        None — Telegram решит сам, False — без превью, True — превью первой ссылки, 'https://…' — превью этого
+        адреса. Новое значение запоминается для следующих правок и листания страниц."""
         if self._closed:
             raise RuntimeError(f"Форма '{self.form_id}' уже закрыта (form.close())")
         if styles is not None:
             self.styles = {str(k): normalize_style(v) for k, v in dict(styles).items()}
+        if link_preview is not KEEP:
+            self.link_preview = link_preview
         pages, total_pages = paginate_button_rows(buttons or [])
         text_pages = split_form_text(text, bool(self.media))
         rendered = render_page_rows(pages, 0, total_pages) + text_page_rows(0, len(text_pages))
-        await self._core._inline_edit(await self._imid(), text_pages[0], rendered, self.media, styles=self.styles)
+        await self._core._inline_edit(await self._imid(), text_pages[0], rendered, self.media, styles=self.styles,
+                                      link_preview=self.link_preview)
         self.text = text
         self._raw_buttons = buttons
         self._pages = pages
@@ -663,7 +703,8 @@ class InlineForm:
         if not (0 <= index < len(pages)) or index == getattr(self, 'text_page', 0):
             return
         self.text_page = index
-        await self._core._inline_edit(await self._imid(), pages[index], self._rows(), self.media, styles=self.styles)
+        await self._core._inline_edit(await self._imid(), pages[index], self._rows(), self.media, styles=self.styles,
+                                      link_preview=self.link_preview)
 
     async def send_text_file(self, name=None):
         """Весь текст формы (без разметки) — файлом .txt в чат формы (от лица аккаунта)."""

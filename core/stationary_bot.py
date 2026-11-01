@@ -27,6 +27,13 @@ _PHOTO_EXT = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
 PLACEHOLDER_MIN_BYTES = 512 * 1024      # файлы больше — сначала уходят заглушкой «загрузка…»
 
 
+def _preview_kw(link_preview) -> dict:
+    """link_preview → {'link_preview_options': …} для Bot API ({} — как решит Telegram)."""
+    from .inline_results import link_preview_options
+    lp = link_preview_options(link_preview)
+    return {'link_preview_options': lp} if lp is not None else {}
+
+
 def _big_local(path) -> bool:
     try:
         p = Path(str(path))
@@ -77,18 +84,20 @@ class BotFacade:
         self._core.note_bot_message(message, module_name)
         return message
 
-    async def send_message(self, chat_id, text, file=None, buttons=None, reply_to=None):
+    async def send_message(self, chat_id, text, file=None, buttons=None, reply_to=None, link_preview=None):
         """Отправляет сообщение в chat_id. file/buttons опциональны, reply_to — message_id, на который отвечаем.
+        link_preview — превью ссылок: None (Telegram решит сам) | False | True | 'https://…' (только у текста без file).
         Сообщение запоминается за текущим модулем: клики по его кнопкам получит только его @bot.callback."""
-        msg = await self._send_message(chat_id, text, file=file, buttons=buttons, reply_to=reply_to)
+        msg = await self._send_message(chat_id, text, file=file, buttons=buttons, reply_to=reply_to,
+                                       link_preview=link_preview)
         self._core.note_bot_message(msg)
         return msg
 
-    async def _send_message(self, chat_id, text, file=None, buttons=None, reply_to=None):
+    async def _send_message(self, chat_id, text, file=None, buttons=None, reply_to=None, link_preview=None):
         markup = self._markup(buttons)
         if file is None:
             return await self.raw.send_message(
-                chat_id, text, reply_markup=markup, reply_to_message_id=reply_to,
+                chat_id, text, reply_markup=markup, reply_to_message_id=reply_to, **_preview_kw(link_preview),
             )
         input_file, path_hint = await self._resolve_input_file(file)
         # большой файл: сначала мгновенно — анимация «загрузка…» (assets/loading.gif), потом она меняется на файл
@@ -128,19 +137,20 @@ class BotFacade:
                 pass
             return None
 
-    async def reply(self, message, text, file=None, buttons=None):
-        """Отвечает на message (aiogram.types.Message)."""
+    async def reply(self, message, text, file=None, buttons=None, link_preview=None):
+        """Отвечает на message (aiogram.types.Message). link_preview — как у send_message()."""
         return await self.send_message(
-            message.chat.id, text, file=file, buttons=buttons, reply_to=message.message_id,
+            message.chat.id, text, file=file, buttons=buttons, reply_to=message.message_id, link_preview=link_preview,
         )
 
-    async def edit(self, message, text, file=None, buttons=None):
+    async def edit(self, message, text, file=None, buttons=None, link_preview=None):
         """
         Редактирует message (aiogram.types.Message).
         file=... — Bot API не даёт превратить текстовое сообщение в
         сообщение с вложением через edit, поэтому в этом случае старое
         сообщение удаляется и на его место отправляется новое (тот же
         chat_id, без reply — Telegram не позволяет "ответить" на удалённое).
+        link_preview — как у send_message(); Telegram не помнит его между правками.
         """
         markup = self._markup(buttons)
         if file is not None:
@@ -151,6 +161,7 @@ class BotFacade:
             return await self.send_message(message.chat.id, text, file=file, buttons=buttons)
         msg = await self.raw.edit_message_text(
             text, chat_id=message.chat.id, message_id=message.message_id, reply_markup=markup,
+            **_preview_kw(link_preview),
         )
         self._core.note_bot_message(msg if msg is not True else message)
         return msg

@@ -17,7 +17,8 @@ core/access.py — доступ к юзерботу для других люде
 
     класс        = {title, description, scopes: [...], modules: [...], commands: [...], system}
                    ключ класса — его idn: одно слово (буквы, цифры, _), например FULL, helpers, my_friends
-    пользователь = {name, username, class (idn или None), scopes, modules, commands, added}
+    пользователь = {name, username, class (idn или None), scopes, modules, commands, added,
+                    ignore_case, ignore_space}
 
 Команда разрешена гостю, если её покрывает хоть одна выдача — его личная или его класса. Исключения:
 модули из PROTECTED_MODULES и команды из PROTECTED_COMMANDS (управление доступом, алиасами, автозапуском и полный
@@ -28,6 +29,10 @@ core/access.py — доступ к юзерботу для других люде
 сессиями, перезапуском. Интерфейсы (`.access`, сайт) показывают пометку и переспрашивают перед выдачей.
 
 Классы FULL (системный: все модули, удалить и изменить его выдачи нельзя) и LOADED создаются сами.
+
+НАПИСАНИЕ КОМАНД (у каждого пользователя свои переключатели, USER_OPTIONS; по умолчанию выключены)
+    ignore_case   — команды с заглавными буквами (.Ping, .PING) этого гостя не выполняются, только .ping
+    ignore_space  — команды с пробелом после префикса («. ping») этого гостя не выполняются
 
 АЛИАСЫ
 ------
@@ -94,6 +99,12 @@ def _migrate_merged(obj) -> bool:
             changed = True
     obj['modules'], obj['commands'] = mods, out
     return changed
+
+# Переключатели написания команд у пользователя: ключ → (кнопка, пояснение). По умолчанию все выключены.
+USER_OPTIONS = {
+    'ignore_case': ('игнорировать .Cmd', 'команды с заглавными буквами (.Ping, .PING) не выполняются — только .ping'),
+    'ignore_space': ('игнорировать . cmd', 'команды с пробелом после префикса («. ping») не выполняются — только .ping'),
+}
 
 CLASS_RE = re.compile(r'^\w{1,32}$')
 ALIAS_RE = re.compile(r'^[^\s]{1,32}$')
@@ -231,6 +242,8 @@ class AccessManager:
             u.setdefault('username', '')
             u.setdefault('class', None)
             u.setdefault('added', time.time())
+            for opt in USER_OPTIONS:
+                u[opt] = bool(u.get(opt, False))
             if u['class'] not in classes:
                 u['class'] = None
             _normalize_grants(u)
@@ -336,7 +349,8 @@ class AccessManager:
         u = users.get(key)
         if u is None:
             u = users[key] = {'name': name or '', 'username': username or '', 'class': cls,
-                              'scopes': [], 'modules': [], 'commands': [], 'added': time.time()}
+                              'scopes': [], 'modules': [], 'commands': [], 'added': time.time(),
+                              **{opt: False for opt in USER_OPTIONS}}
         else:
             if name:
                 u['name'] = name
@@ -352,6 +366,22 @@ class AccessManager:
         if self.users().pop(_uid(user_id), None) is None:
             raise AccessError("У этого пользователя нет доступа")
         await self._save()
+
+    def user_option(self, user_id, option) -> bool:
+        """Включён ли у пользователя переключатель написания команд (USER_OPTIONS). Нет пользователя — False."""
+        u = self.get_user(user_id)
+        return bool(u and u.get(option))
+
+    async def set_user_option(self, user_id, option, value):
+        """Включить / выключить переключатель (ignore_case, ignore_space) у пользователя с доступом."""
+        if option not in USER_OPTIONS:
+            raise AccessError(f"Настройка: {', '.join(USER_OPTIONS)}")
+        u = self.get_user(user_id)
+        if u is None:
+            raise AccessError("У этого пользователя нет доступа")
+        u[option] = bool(value)
+        await self._save()
+        return u
 
     def _prune(self, user_id):
         """Пользователь без класса и без выдач больше не гость — убираем запись."""

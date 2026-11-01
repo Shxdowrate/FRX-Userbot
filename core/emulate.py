@@ -146,7 +146,8 @@ def _to_nodes(text, parse_mode) -> list:
 
 
 def serialize_buttons(buttons, styles=None) -> list:
-    """buttons формы (любой формат create_inlineform) → [[{'text','data','style'?} | {'text','input','hint'}], ...]."""
+    """buttons формы (любой формат create_inlineform) →
+    [[{'text','data','style'?} | {'text','input','hint'} | {'text','copy'}], ...]."""
     out = []
     for row in normalize_button_rows(buttons or []):
         cells = []
@@ -159,6 +160,8 @@ def serialize_buttons(buttons, styles=None) -> list:
                 continue
             if p['kind'] == 'input':
                 cell = {'text': p['text'], 'input': p['data'], 'hint': str(p.get('hint') or '')}
+            elif p['kind'] == 'copy':
+                cell = {'text': p['text'], 'copy': p['copy']}
             else:
                 cell = {'text': p['text'], 'data': p['data']}
             if p.get('style'):
@@ -401,7 +404,7 @@ class EmuForm:
     def _entry_nodes(self):
         return self._entry['nodes'] if self._entry else []
 
-    async def edit(self, text, buttons=None, styles=None):
+    async def edit(self, text, buttons=None, styles=None, link_preview=None):    # превью ссылок сайт не рисует
         if self._closed:
             raise RuntimeError(f"Форма '{self.form_id}' уже закрыта (form.close())")
         if styles is not None:

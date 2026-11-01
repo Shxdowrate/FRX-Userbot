@@ -58,7 +58,8 @@ import visual
 import time_utils
 import accounts
 
-from core.access import AccessError, PROTECTED_COMMANDS, PROTECTED_MODULES, SCOPES, command_key, describe_grant
+from core.access import (AccessError, PROTECTED_COMMANDS, PROTECTED_MODULES, SCOPES, USER_OPTIONS, command_key,
+                         describe_grant)
 from core.paths import DATA_DIR, PROJECT_DIR
 
 NAME = "Userbot"
@@ -1464,9 +1465,17 @@ def _acc_user_text(uid, name, username, prefix):
         lines.append(visual.item("разрешения:"))
         lines += [visual.item(_acc_grant_line(k, v, prefix), 1) for k, v in grants]
     allowed, total = _acc_count(uid)
-    lines += [visual.field("доступно команд", f"{allowed} из {total}"),
-              visual.hint("доступ, алиасы, автозапуск и полный лог — всегда только у владельца")]
+    lines.append(visual.field("доступно команд", f"{allowed} из {total}"))
+    lines.append(visual.section("Написание команд"))
+    lines += [visual.item(f"{_esc(label)}: <b>{'вкл' if u.get(key) else 'выкл'}</b> — {_esc(desc)}")
+              for key, (label, desc) in USER_OPTIONS.items()]
+    lines.append(visual.hint("доступ, алиасы, автозапуск и полный лог — всегда только у владельца"))
     return "\n".join(lines)
+
+
+_ACC_OPT_WORDS = {'case': 'ignore_case', 'регистр': 'ignore_case', 'space': 'ignore_space', 'пробел': 'ignore_space'}
+_ACC_ON = ('on', 'вкл', '1', 'true', 'да')
+_ACC_OFF = ('off', 'выкл', '0', 'false', 'нет')
 
 
 async def _acc_open_form(event, uid=None, name='', username=''):
@@ -1505,8 +1514,11 @@ async def _acc_open_form(event, uid=None, name='', username=''):
 
     async def show_user():
         rows = [[(visual.btn('Выдать доступ'), 'give', "success")]]
-        if engine.access.get_user(st['uid']):
+        u = engine.access.get_user(st['uid'])
+        if u:
             rows.append([(visual.btn('Отозвать доступ'), 'revoke', "danger")])
+            rows.append([(("✅ " if u.get(key) else "▫️ ") + label, f"opt:{key}", "primary" if u.get(key) else None)
+                         for key, (label, _d) in USER_OPTIONS.items()])
         rows.append(close_row())
         await form.edit(_acc_user_text(st['uid'], st['name'], st['username'], prefix), buttons=rows)
 
@@ -1711,6 +1723,12 @@ async def _acc_open_form(event, uid=None, name='', username=''):
                     return
                 await do_grant('command', key, click)
                 await show_cmd()
+            elif d.startswith('opt:'):
+                key = d[4:]
+                on = not engine.access.user_option(st['uid'], key)
+                await engine.access.set_user_option(st['uid'], key, on)
+                await click.answer(f"{USER_OPTIONS[key][0]}: {'вкл' if on else 'выкл'}")
+                await show_user()
             elif d == 'rc':
                 await engine.access.set_user_class(st['uid'], None)
                 await click.answer("класс отозван")
@@ -1743,12 +1761,12 @@ async def _acc_open_form(event, uid=None, name='', username=''):
 
 @decorators.command('access', 'acs')
 async def access_cmd(event):
-    """доступ других людей: ответом на сообщение — меню этого человека; без ответа — список; grant / revoke / check / list / classes"""
+    """доступ других людей: ответом на сообщение — меню этого человека; без ответа — список; grant / revoke / check / ignore / list / classes"""
     prefix = await engine.get_prefix()
     args = engine.get_args().split()
     sub = args[0].lower() if args else ''
     try:
-        if sub in ('grant', 'revoke', 'check'):
+        if sub in ('grant', 'revoke', 'check', 'ignore'):
             await _acc_sub(event, sub, args[1:], prefix)
             return
         if sub in ('list', 'classes'):
@@ -1768,7 +1786,7 @@ async def access_cmd(event):
 
 
 async def _acc_sub(event, sub, args, prefix):
-    """grant/revoke/check: пользователь — из ответа или первым словом."""
+    """grant/revoke/check/ignore: пользователь — из ответа или первым словом."""
     if event.is_reply:
         uid, name, username = await _acc_resolve_user(event, '')
     else:
@@ -1806,6 +1824,18 @@ async def _acc_sub(event, sub, args, prefix):
         else:
             await engine.access.revoke('user', uid, kind, value)
         await engine.answer(event, visual.ok(f"{label}: отозвано — {_esc(value if kind == 'class' else describe_grant(kind, value, prefix))}"))
+    elif sub == 'ignore':                 # .access ignore [пользователь] case|space [on|off]
+        if not args or args[0].lower() not in _ACC_OPT_WORDS:
+            raise AccessError(f"Формат: {prefix}access ignore [пользователь] case|space [on|off] — "
+                              f"case: игнорировать .Cmd, space: игнорировать «. cmd»")
+        key = _ACC_OPT_WORDS[args[0].lower()]
+        if len(args) > 1 and args[1].lower() not in _ACC_ON + _ACC_OFF:
+            raise AccessError("Последнее слово: on или off (без него — переключить)")
+        on = (args[1].lower() in _ACC_ON) if len(args) > 1 else not engine.access.user_option(uid, key)
+        await engine.access.set_user_option(uid, key, on)
+        label_opt, desc = USER_OPTIONS[key]
+        await engine.answer(event, visual.ok(f"{label}: {_esc(label_opt)} — {'вкл' if on else 'выкл'}")
+                            + "\n" + visual.hint(_esc(desc)))
     else:  # check
         if not args:
             raise AccessError(f"Формат: {prefix}access check [пользователь] <команда>")

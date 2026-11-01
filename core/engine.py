@@ -93,7 +93,7 @@ from .paths import ASSETS_DIR, BUILTIN_DIR, FILES_DIR, MODULES_DIR, SESSION_PATH
 # Версия ЯДРА FRX (не путать с VERSION отдельных модулей, см. ModuleInfo) —
 # правится вручную при каждом обновлении движка. Показывается в .about
 # (modules/builtin/Helper.py) и в баннере запуска (main.py).
-FRX_VERSION = "1.0.6"
+FRX_VERSION = "1.0.7"
 
 # Встроенные модули, слитые в modules/builtin/Userbot.py (1.0.6). Если их файлы остались в modules/builtin/ —
 # движок их не грузит и удаляет (см. _load_folder).
@@ -1150,11 +1150,13 @@ class Core:
         if not rest:
             return
         parts = rest.split(maxsplit=1)
-        cmd = parts[0].lower()
+        typed = parts[0]                      # как набрано (переключатели гостя ignore_case / ignore_space, core/access.py)
+        cmd = typed.lower()
         run_event = event
         # «. cmd аргументы» — пробелы между префиксом и командой: модуль получает текст «.cmd аргументы»,
         # иначе engine.get_args() и модули, читающие event.raw_text сами, приняли бы команду за аргумент
-        if text[len(prefix):len(prefix) + 1].isspace():
+        spaced = text[len(prefix):len(prefix) + 1].isspace()
+        if spaced:
             run_event = CommandEvent(event, prefix + text[len(prefix):].lstrip())
         entry = self.command_map.get(cmd)
         if entry is None:
@@ -1176,6 +1178,16 @@ class Core:
             if guest is None or guest == self._owner_id or not self.access.get_user(guest):
                 return
             st = await self._access_settings()
+            # строгое написание (переключатели этого гостя в .access): проверяется раньше выдач — команда не
+            # запустится, даже если она выдана; гость, как и при «нет доступа», ответа не получает
+            strict = ('заглавные буквы' if typed != cmd and self.access.user_option(guest, 'ignore_case') else
+                      'пробел после префикса' if spaced and self.access.user_option(guest, 'ignore_space') else None)
+            if strict:
+                if st['log']:
+                    who = self.access.get_user(guest).get('name') or str(guest)
+                    self.tlog(f"[access] {who} ({guest}): {prefix}{' ' if spaced else ''}{typed} — "
+                              f"проигнорировано ({strict})")
+                return
             info = self.modules.get(module_name)
             ok, why = self.access.check(guest, module_name, command_key(module_name, func),
                                         bool(info and info.is_builtin))
@@ -2934,31 +2946,40 @@ class Core:
         obj = await self.file_registry.get(query=file)
         return obj['path'] if obj else file
 
-    async def answer(self, message, text, file=None):
+    @staticmethod
+    def _tl_preview(link_preview) -> dict:
+        """link_preview у answer/reply/noreply/send_message → аргумент Telethon. None — как решит Telegram (превью есть)."""
+        return {} if link_preview is None else {'link_preview': bool(link_preview)}
+
+    async def answer(self, message, text, file=None, link_preview=None):
         """
         Изменяет сообщение (если это наше сообщение), иначе — отправляет новое. file — путь/ID вложения (см. core/files.py).
         Чужое сообщение (команда гостя): первый answer отвечает на него, следующие правят этот ответ — как у владельца.
         Файл, который грузится дольше мгновения, сначала показывается анимацией «загрузка…» (см. _deliver_media).
+        link_preview — превью ссылок: None (Telegram решит сам) | False — без превью | True — с превью.
+        Telegram не помнит его между правками: answer() без link_preview снова покажет превью.
         """
         path = await self._resolve_file(file)
         text = safe_html(text)   # <не_теги> показываются как есть, а не пропадают
         if self._too_long(text, path):
-            return await self._paged(text, path, lambda t: self.answer(message, t, file=path), message)
+            return await self._paged(text, path, lambda t: self.answer(message, t, file=path, link_preview=link_preview),
+                                     message, link_preview=link_preview)
         self._drop_pager(message)
+        lp = self._tl_preview(link_preview)
         if getattr(message, 'out', True) is False:
             key = (getattr(message, 'chat_id', None), getattr(message, 'id', None))
             prev = self._guest_replies.get(key)
             if prev is not None:
                 async def edit_prev(f):
                     try:
-                        return await prev.edit(text, file=f, parse_mode='html')
+                        return await prev.edit(text, file=f, parse_mode='html', **lp)
                     except MessageNotModifiedError:
                         return prev
                 try:
                     return await self._deliver_media(path, text, edit_prev)
                 except Exception:
                     pass
-            sent = await self._deliver_media(path, text, lambda f: message.reply(text, file=f, parse_mode='html'))
+            sent = await self._deliver_media(path, text, lambda f: message.reply(text, file=f, parse_mode='html', **lp))
             self._guest_replies[key] = sent
             while len(self._guest_replies) > 300:
                 self._guest_replies.pop(next(iter(self._guest_replies)))
@@ -2966,52 +2987,58 @@ class Core:
 
         async def edit_or_reply(f):
             try:
-                return await message.edit(text, file=f, parse_mode='html')
+                return await message.edit(text, file=f, parse_mode='html', **lp)
             except Exception:
-                return await message.reply(text, file=f, parse_mode='html')
+                return await message.reply(text, file=f, parse_mode='html', **lp)
         return await self._deliver_media(path, text, edit_or_reply)
 
-    async def reply(self, message, text, file=None):
-        """Отвечает на message. file — путь на диске / ID из реестра (core/files.py)."""
+    async def reply(self, message, text, file=None, link_preview=None):
+        """Отвечает на message. file — путь на диске / ID из реестра (core/files.py). link_preview — как у answer()."""
         path = await self._resolve_file(file)
         text = safe_html(text)
         if self._too_long(text, path):
-            return await self._paged(text, path, lambda t: self.reply(message, t, file=path))
-        return await self._deliver_media(path, text, lambda f: message.reply(text, file=f, parse_mode='html'))
+            return await self._paged(text, path, lambda t: self.reply(message, t, file=path, link_preview=link_preview),
+                                     link_preview=link_preview)
+        lp = self._tl_preview(link_preview)
+        return await self._deliver_media(path, text, lambda f: message.reply(text, file=f, parse_mode='html', **lp))
 
-    async def noreply(self, message, text, file=None):
+    async def noreply(self, message, text, file=None, link_preview=None):
         """
         Отправляет сообщение в том же чате, но не отвечая на message.
         chat_id резолвится через _resolve_entity() (см. выше) —
         на практике здесь почти всегда есть быстрый путь (чат уже прогрет
         самим входящим message), но резолв остаётся единообразным со всеми
-        остальными функциями движка.
+        остальными функциями движка. link_preview — как у answer().
         """
         path = await self._resolve_file(file)
         text = safe_html(text)
         if self._too_long(text, path):
-            return await self._paged(text, path, lambda t: self.noreply(message, t, file=path))
+            return await self._paged(text, path, lambda t: self.noreply(message, t, file=path, link_preview=link_preview),
+                                     link_preview=link_preview)
         emu = current_emulation.get()                      # Emulate — ответ уходит на сайт
         if emu is not None and emu.owns_chat(getattr(message, 'chat_id', None)):
             return await emu.send_text(text, path)
         entity = await self._resolve_entity(message.chat_id)
-        return await self._deliver_media(path, text, lambda f: self.client.send_message(entity, text, file=f, parse_mode='html'))
+        lp = self._tl_preview(link_preview)
+        return await self._deliver_media(path, text, lambda f: self.client.send_message(entity, text, file=f, parse_mode='html', **lp))
 
-    async def send_message(self, chat_id, text, file=None):
+    async def send_message(self, chat_id, text, file=None, link_preview=None):
         """
         Отправляет сообщение в указанный чат. file — путь на диске / ID из
         реестра (core/files.py). chat_id резолвится через _resolve_entity() — сработает и для юзера/чата, которого юзербот ещё
-        ни разу не "видел" в этой сессии, а не только для уже закэшированных.
+        ни разу не "видел" в этой сессии, а не только для уже закэшированных. link_preview — как у answer().
         """
         path = await self._resolve_file(file)
         text = safe_html(text)
         if self._too_long(text, path):
-            return await self._paged(text, path, lambda t: self.send_message(chat_id, t, file=path))
+            return await self._paged(text, path, lambda t: self.send_message(chat_id, t, file=path, link_preview=link_preview),
+                                     link_preview=link_preview)
         emu = current_emulation.get()                      # Emulate — «свой» чат = сайт
         if emu is not None and emu.owns_chat(chat_id):
             return await emu.send_text(text, path)
         entity = await self._resolve_entity(chat_id)
-        return await self._deliver_media(path, text, lambda f: self.client.send_message(entity, text, file=f, parse_mode='html'))
+        lp = self._tl_preview(link_preview)
+        return await self._deliver_media(path, text, lambda f: self.client.send_message(entity, text, file=f, parse_mode='html', **lp))
 
     # ------------------------------------------------------------------ #
     # Длинный текст — страницами (core/textpages.py)
@@ -3043,7 +3070,7 @@ class Core:
         if old is not None:
             asyncio.ensure_future(old['close']())
 
-    async def _paged(self, text, path, deliver, message=None):
+    async def _paged(self, text, path, deliver, message=None, link_preview=None):
         pages = textpages_module.split_html(
             text, textpages_module.CAPTION_PAGE_LIMIT if path else textpages_module.PAGE_LIMIT)
         total = len(pages)
@@ -3111,7 +3138,7 @@ class Core:
                 return
             state['i'] = i
             try:
-                await sent.edit(page_text(i), parse_mode='html')
+                await sent.edit(page_text(i), parse_mode='html', **self._tl_preview(link_preview))
             except MessageNotModifiedError:
                 pass
             await form.edit(f"📄 Длинный ответ — {total} стр.", buttons=buttons())
@@ -3523,7 +3550,7 @@ class Core:
 
     async def create_inlineform(self, chat_id, text, buttons=None,
                                  for_user=None, black_list=None, timeout=None, reply_to=None, media=None,
-                                 styles=None):
+                                 styles=None, link_preview=None):
         """
         Создаёт "живую" инлайн-форму — сообщение от лица стационарного
         бота ("via @bot"), которым управляет юзербот: текст/кнопки можно
@@ -3551,6 +3578,10 @@ class Core:
                   ('danger' красный, 'success' зелёный, 'primary' синий; синонимы red/green/blue).
                   Цвет можно задать и у самой кнопки третьим элементом: ("Удалить", "del", "danger"),
                   и у InputButton(..., style='primary'). Нужен aiogram >= 3.25, на старом — кнопки без цвета.
+        link_preview: превью ссылок в тексте формы — None (Telegram решит сам) | False — без превью |
+                  True — превью первой ссылки | 'https://…' — превью этого адреса (крупно, над текстом).
+                  Держится на всех form.edit() и листании страниц; form.edit(link_preview=...) меняет его.
+                  У формы с media не действует (подпись к картинке превью не показывает).
         reply_to: если команда отправлена ОТВЕТОМ на сообщение, форма
                   по умолчанию (None) тоже отвечает на него. False — не отвечать,
                   int — ответить на сообщение с этим id.
@@ -3616,6 +3647,7 @@ class Core:
         self._pending_forms[form_id] = {
             'future': fut, 'chat_id': chat_id, 'created_at': time.monotonic(),
             'text': shown_text, 'media': media_ref, 'buttons': rendered0, 'styles': styles,  # чтобы aiobot/bot.py мог сразу
+            'link_preview': link_preview,
                                                  # ответить на inline_query РЕАЛЬНЫМ
                                                  # (уже постранично нарезанным)
                                                  # содержимым формы, без лишнего
@@ -3685,6 +3717,7 @@ class Core:
         )
         form.media = media_ref
         form.styles = styles
+        form.link_preview = link_preview
         form.message_id = getattr(sent_msg, 'id', None)    # для form.delete()
         form._ready = loop.create_future()
         form._init_state(text, buttons, pages, text_pages)
@@ -3710,7 +3743,8 @@ class Core:
                 # в чате заглушка из заготовки — ставим настоящий текст и кнопки (страница 0) до set_result:
                 # правки модуля, ждущие подтверждения, лягут уже поверх
                 try:
-                    await self._inline_edit(inline_message_id, shown_text, rendered0, None, styles=form.styles)
+                    await self._inline_edit(inline_message_id, shown_text, rendered0, None, styles=form.styles,
+                                            link_preview=form.link_preview)
                 except Exception as e:
                     self.tlog(f"[core] инлайн-форма: не удалось подставить содержимое в заглушку: {e}")
             elif not rendered0 and not form._closed:
@@ -3718,7 +3752,8 @@ class Core:
                 # inline_message_id) — раз модуль кнопок не просил, снимаем её. До set_result: правки модуля,
                 # ждущие подтверждения, лягут уже поверх.
                 try:
-                    await self._inline_edit(inline_message_id, shown_text, [], form.media, styles=form.styles)
+                    await self._inline_edit(inline_message_id, shown_text, [], form.media, styles=form.styles,
+                                            link_preview=form.link_preview)
                 except Exception as e:
                     self.tlog(f"[core] инлайн-форма: не удалось снять кнопку-заглушку: {e}")
             form._ready.set_result(inline_message_id)
@@ -3801,7 +3836,8 @@ class Core:
             self.tlog(f"[core] медиа формы не загрузилось: {e}")
             try:
                 await self._inline_edit(form.inline_message_id, (form._shown_text() or '') + "\n\n<i>медиа не загрузилось</i>",
-                                        form._rows(), form.media, styles=form.styles)
+                                        form._rows(), form.media, styles=form.styles,
+                                        link_preview=form.link_preview)
             except Exception:
                 pass
             return
@@ -4241,6 +4277,7 @@ class Core:
                 [("Ок", "ok"), ("Да", "yes")]
         Каждая кнопка — (text, callback_data), (text, callback_data, style),
         {'text', 'data', 'style'} или InputButton(text, data, hint=..., style=...) —
+        особые data: 'url:https://…' — ссылка, 'copy:<текст>' — копирует текст в буфер (в обработчики не приходит);
         кнопка "Введите значение" (core/inline_forms.py, см. docstring
         InputButton и README «Инлайн-формы»). Все виды можно свободно мешать.
         style — цвет кнопки: 'primary' (синий), 'success' (зелёный), 'danger' (красный);
@@ -4248,7 +4285,7 @@ class Core:
         """
         if not buttons:
             return None
-        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+        from aiogram.types import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
 
         rows = self._normalize_button_rows(buttons)
 
@@ -4284,14 +4321,16 @@ class Core:
                     keyboard_row.append(make(b['style'], text=b['text'], switch_inline_query_current_chat=b.get('prefill') or ''))
                 elif b['kind'] == 'url':
                     keyboard_row.append(make(b['style'], text=b['text'], url=b['url']))   # кнопка-ссылка
+                elif b['kind'] == 'copy':                                                 # «скопировать»: клика нет
+                    keyboard_row.append(make(b['style'], text=b['text'], copy_text=CopyTextButton(text=b['copy'])))
                 else:
                     keyboard_row.append(make(b['style'], text=b['text'], callback_data=b['data']))
             keyboard.append(keyboard_row)
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-    async def _inline_edit(self, inline_message_id, text, buttons, media=None, styles=None):
+    async def _inline_edit(self, inline_message_id, text, buttons, media=None, styles=None, link_preview=None):
         try:
-            await self._inline_edit_raw(inline_message_id, text, buttons, media, styles)
+            await self._inline_edit_raw(inline_message_id, text, buttons, media, styles, link_preview)
         except Exception as e:
             # форма уже показывает ровно это (например, клик не в свой ход — модуль перерисовал то же самое):
             # для Telegram это ошибка, для формы — нет
@@ -4299,7 +4338,7 @@ class Core:
                 return
             raise
 
-    async def _inline_edit_raw(self, inline_message_id, text, buttons, media=None, styles=None):
+    async def _inline_edit_raw(self, inline_message_id, text, buttons, media=None, styles=None, link_preview=None):
         markup = self._build_markup(buttons, styles) if buttons is not None else None
         if text is not None and media:                      # форма с картинкой/анимацией — меняем подпись
             await self._aiogram_bot.edit_message_caption(
@@ -4312,9 +4351,12 @@ class Core:
                 inline_message_id=inline_message_id, reply_markup=markup,
             )
         else:
+            # Telegram не помнит прежние настройки превью: без link_preview_options правка вернёт превью по умолчанию
+            lp = link_preview_options(link_preview)
             await self._aiogram_bot.edit_message_text(
                 text=text, inline_message_id=inline_message_id,
                 reply_markup=markup, parse_mode='HTML',
+                **({'link_preview_options': lp} if lp is not None else {}),
             )
 
     # --- InputButton ("Введите значение") — регистрация/диспетчеризация ---- #

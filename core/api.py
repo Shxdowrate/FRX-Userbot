@@ -244,19 +244,20 @@ async def get_config(key: str, module_name: Optional[str] = None) -> Any:
 # Сообщения
 # ==================================================================== #
 
-async def answer(message: Message, text: str) -> Message:
-    """Изменяет сообщение, если возможно, иначе отправляет новое."""
+async def answer(message: Message, text: str, file: Any = None, link_preview: Optional[bool] = None) -> Message:
+    """Изменяет сообщение, если возможно, иначе отправляет новое. link_preview=False — без превью ссылок."""
     ...
 
-async def reply(message: Message, text: str) -> Message:
+async def reply(message: Message, text: str, file: Any = None, link_preview: Optional[bool] = None) -> Message:
     """Отвечает на message."""
     ...
 
-async def noreply(message: Message, text: str) -> Message:
+async def noreply(message: Message, text: str, file: Any = None, link_preview: Optional[bool] = None) -> Message:
     """Отправляет сообщение в тот же чат, не отвечая на message."""
     ...
 
-async def send_message(chat_id: Union[int, str], text: str) -> Message:
+async def send_message(chat_id: Union[int, str], text: str, file: Any = None,
+                       link_preview: Optional[bool] = None) -> Message:
     """Отправляет сообщение в указанный чат."""
     ...
 

@@ -212,6 +212,7 @@ function sbCreateDock(opts) {
           return h('button', { class: 'sb-kbtn input' + (b.style ? ' st-' + b.style : ''), type: 'button', title: 'кнопка «введите значение»', onclick: () => inlinePrompt(box, (b.hint && b.hint !== 'Enter value...') ? b.hint : 'значение',
             (v) => act(async () => { await api('/sandbox/input', { key, form: e.form, data: b.input, value: v, user: clicker() }); pollSoon(); })) }, b.text);
         }
+        if (b.copy !== undefined) return h('button', { class: 'sb-kbtn' + (b.style ? ' st-' + b.style : ''), type: 'button', title: 'кнопка «скопировать»: ' + b.copy, onclick: () => { navigator.clipboard?.writeText(b.copy); toast('скопировано', 'ok'); } }, b.text);
         if (/^url:(https?|tg):/.test(b.data || '')) return h('a', { class: 'sb-kbtn' + (b.style ? ' st-' + b.style : ''), href: b.data.slice(4), target: '_blank', rel: 'noopener noreferrer', title: 'кнопка-ссылка' }, b.text + ' ↗');
         return h('button', { class: 'sb-kbtn' + (b.style ? ' st-' + b.style : ''), type: 'button', title: 'callback data: ' + b.data, onclick: () => act(async () => {
           if (e.form) await api('/sandbox/click', { key, form: e.form, data: b.data, user: clicker() });
