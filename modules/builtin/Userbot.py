@@ -59,8 +59,9 @@ import time_utils
 import accounts
 
 from core.access import (AccessError, PROTECTED_COMMANDS, PROTECTED_MODULES, SCOPES, USER_OPTIONS, command_key,
-                         describe_grant)
+                         describe_grant, parse_duration, format_duration, grant_key)
 from core.paths import DATA_DIR, PROJECT_DIR
+from core import error_reports
 
 NAME = "Userbot"
 MODULE_NAME = "userbot"
@@ -135,6 +136,11 @@ CONFIGS = [
     ('layout_commands', 'aliases', 'layout_commands', 'bool', True,
      'Команды · понимать команды в русской раскладке: «юзштп» → .ping (только ваши сообщения; аргументы не '
      'переводятся; кириллические команды главнее)', None),
+    ('notify_access_expired', 'userbot_new', 'notify_access_expired', 'bool', True,
+     'Доступ · сообщать в ЛС, когда у гостя истёк срок выданного доступа', None),
+    ('errors_in_chat', 'userbot_new', 'errors_in_chat', 'bool', True,
+     'Команды · ошибку команды показывать прямо в чате: ваше сообщение с командой заменяется текстом ошибки, '
+     'гостю — ответом на его сообщение', None),
     # инлайн-формы и ожидания
     ('instant_forms', 'inline_stuff', 'instant_forms', 'bool', True,
      'Формы · мгновенные: заранее готовить заглушку и показывать форму сразу (раз в минуту — один фоновый '
@@ -1136,7 +1142,7 @@ def _now_str():
     return time_utils.time_format(time_utils.get_time(), '%d.%m.%Y %H:%M:%S')
 
 
-async def _send_log(text: str, throttle_key: str = None):
+async def _send_log(text: str, throttle_key: str = None, buttons=None):
     """В лог-чат через общий лимитер (engine.botlog_raw). Одинаковые ошибки троттлятся, но не теряются бесследно:
     сколько раз ошибка повторилась, пока молчали, — допишется к следующему сообщению о ней."""
     if not await cfg('logs_enabled', True):
@@ -1160,7 +1166,7 @@ async def _send_log(text: str, throttle_key: str = None):
     if engine._aiogram_bot is None:
         engine.tlog(f"{visual.visual('info')} [Userbot] бот не подключён, лог остался только в терминале")
         return
-    engine.botlog_raw(text)
+    engine.botlog_raw(text, buttons=buttons)
 
 
 def _error_text(title, module_name, func_name, error_text) -> str:
@@ -1179,7 +1185,49 @@ async def _log_userbot_error(error_text: str, context: dict):
     if not await cfg('notify_userbot_errors', True):
         return
     m, f = context.get('module', '?'), context.get('function', '?')
-    await _send_log(_error_text('Ошибка юзербота', m, f, error_text), throttle_key=f"userbot:{m}:{f}")
+    report = context.get('report')
+    if report is None:                        # разбор не удался — как раньше, одним текстом
+        await _send_log(_error_text('Ошибка юзербота', m, f, error_text), throttle_key=f"userbot:{m}:{f}")
+        return
+    await _send_log(error_reports.dm_short(report), throttle_key=f"userbot:{m}:{f}",
+                    buttons=_err_buttons(report['id'], 'short'))
+
+
+# --- Кнопки под ошибкой в ЛС: кратко ⇄ подробно ⇄ traceback, и весь отчёт файлом ---------------------------
+
+def _err_buttons(rid, view):
+    more = (visual.btn('Подробнее'), f"errrep:{rid}:more", 'primary')
+    tb = (visual.btn('Traceback'), f"errrep:{rid}:tb")
+    back = (visual.btn('Свернуть', 'back'), f"errrep:{rid}:short")
+    row = {'short': [more, tb], 'more': [back, tb], 'tb': [back, more]}.get(view, [more, tb])
+    return [row, [("📄 Файлом", f"errrep:{rid}:file")]]
+
+
+@bot.callback(data_startswith='errrep:', access='self')
+async def _err_report_click(click):
+    try:
+        _, rid, view = click.data.split(':', 2)
+    except ValueError:
+        return await click.answer()
+    report = await engine.error_report(rid)
+    if report is None:
+        return await click.answer("Подробности этой ошибки уже не хранятся (помнятся последние "
+                                  f"{engine._ERROR_REPORTS_MAX})", show_alert=True)
+    if view == 'file':
+        from aiogram.types import BufferedInputFile
+        data = error_reports.file_text(report).encode('utf-8')
+        doc = BufferedInputFile(data, filename=f"frx_error_{rid}.txt")
+        await click.answer("Отправляю файлом")
+        await engine.bot.send_message(click.chat_id, visual.hint(f"полный отчёт об ошибке {report['type']}"),
+                                      file=doc, reply_to=click.message_id)
+        return
+    text = {'more': error_reports.dm_details, 'tb': error_reports.dm_traceback}.get(view, error_reports.dm_short)(report)
+    await click.answer()
+    try:
+        await click.edit(text, buttons=_err_buttons(rid, view))
+    except Exception as e:
+        if 'not modified' not in str(e).lower():
+            raise
 
 
 @bot.on_error()
@@ -1365,36 +1413,95 @@ def _acc_count(uid):
     return allowed, total
 
 
-def _acc_grant_target(query):
-    """(вид, значение) по тексту: класс, all/builtin/loaded, модуль, .команда, модуль:команда."""
-    q = (query or '').strip()
-    if not q:
-        raise AccessError("Укажите, что выдать: класс, модуль или команду")
+_ACC_KW_MODULE = ('модуль', 'module', 'mod')
+_ACC_KW_COMMAND = ('команда', 'команду', 'command', 'cmd')
+_ACC_KW_CLASS = ('класс', 'class')
+
+
+def _acc_cmd_in_module(module, name):
+    """Ключ «модуль:команда» для команды name модуля module (по любому её имени) или None."""
+    name = name.strip().lower().lstrip('.')
+    for k, f in engine.modules[module].commands.items():
+        if k.lower() == name:
+            return command_key(module, f)
+    return None
+
+
+def _acc_parse_target(words, prefix, uid=None, revoke=False):
+    """
+    Что выдать / отозвать — по словам после пользователя (срок уже отрезан):
+        ping              команда (точка не нужна)            fastnotes        модуль целиком
+        fastnotes nadd    команда nadd модуля fastnotes       fastnotes:nadd   то же
+        FULL / LOADED     класс                               all / builtin / loaded — все модули / встроенные / ваши
+        модуль X · команда X · класс X — явно, если имя и команда, и модуль
+    Имя и команды, и модуля: модуль (команда — с точкой: .fastnotes); при отзыве — то, что у человека есть.
+    -> (вид, значение, пояснение или '').
+    """
+    words = [w for w in words if w]
+    if not words:
+        raise AccessError("Укажите, что выдать: команду, модуль или класс")
+    first = words[0].lower()
+    if len(words) >= 2 and first in _ACC_KW_CLASS + _ACC_KW_MODULE + _ACC_KW_COMMAND:
+        rest = ' '.join(words[1:])
+        if first in _ACC_KW_CLASS:
+            low = {k.lower(): k for k in engine.access.classes()}
+            if rest.lower() not in low:
+                raise AccessError(f"Класса «{rest}» нет")
+            return 'class', low[rest.lower()], ''
+        if first in _ACC_KW_MODULE:
+            module = engine.resolve_module(rest)
+            if not module:
+                raise AccessError(f"Модуль «{rest}» не найден")
+            return 'module', module, ''
+        rest = words[1:]                                  # «команда nadd» или «команда fastnotes nadd»
+        if len(rest) == 1:
+            rest = ['.' + _strip_prefix(rest[0], prefix).lstrip('.')]
+        return _acc_parse_target(rest, prefix, uid, revoke)
+    if len(words) == 2:                                   # «fastnotes nadd» — команда модуля
+        module = engine.resolve_module(words[0])
+        if not module:
+            raise AccessError(f"Модуль «{words[0]}» не найден")
+        key = _acc_cmd_in_module(module, _strip_prefix(words[1], prefix))
+        if key is None:
+            raise AccessError(f"В модуле {module} нет команды «{words[1]}»")
+        return 'command', key, ''
+    if len(words) > 2:
+        raise AccessError("Лишние слова. Формат: <команда> | <модуль> | <модуль> <команда> | <класс>, срок — в конце")
+    q = words[0]
     classes = engine.access.classes()
     if q in classes:
-        return 'class', q
-    low = {k.lower(): k for k in classes}
-    if q.lower() in low and not q.startswith('.'):
-        return 'class', low[q.lower()]
+        return 'class', q, ''
     if q.lower() in SCOPES:
-        return 'scope', q.lower()
+        return 'scope', q.lower(), ''
     if ':' in q:
         mod, cmd = q.split(':', 1)
-        module = engine.resolve_module(mod.strip())
-        if not module:
-            raise AccessError(f"Модуль «{mod}» не найден")
-        func = {k.lower(): f for k, f in engine.modules[module].commands.items()}.get(cmd.strip().lower().lstrip('.'))
-        if func is None:
-            raise AccessError(f"В модуле {module} нет команды «{cmd}»")
-        return 'command', command_key(module, func)
-    if not q.startswith('.'):
-        module = engine.resolve_module(q)
-        if module:
-            return 'module', module
-    entry = engine.command_map.get(q.lstrip('.').lower())
-    if entry:
-        return 'command', command_key(entry[0], entry[1])
-    raise AccessError(f"«{q}» — не класс, не модуль и не команда")
+        return _acc_parse_target([mod, cmd], prefix, uid, revoke)
+    dotted = q.startswith('.') or (prefix and q.startswith(prefix))
+    name = _strip_prefix(q, prefix).lstrip('.').lower()
+    entry = engine.command_map.get(name)
+    cmd = ('command', command_key(entry[0], entry[1])) if entry else None
+    module = None if dotted else engine.resolve_module(q)
+    mod = ('module', module) if module else None
+    if cmd and mod:                                       # имя и модуля, и команды: модуль, команда — через точку
+        if revoke and uid is not None:
+            u = engine.access.get_user(uid) or {}
+            if cmd[1] in u.get('commands', []) and mod[1] not in u.get('modules', []):
+                return cmd[0], cmd[1], ''
+        how = 'отозван' if revoke else 'выдан'
+        return mod[0], mod[1], (f"«{q}» — и модуль, и команда: {how} модуль целиком. "
+                                f"Только команду — с точкой: {prefix}access {'revoke' if revoke else 'grant'} … .{name}")
+    if cmd or mod:
+        return (cmd or mod)[0], (cmd or mod)[1], ''
+    low = {k.lower(): k for k in classes}
+    if q.lower() in low:
+        return 'class', low[q.lower()], ''
+    raise AccessError(f"«{q}» — не команда, не модуль и не класс")
+
+
+def _acc_grant_target(query):
+    """Совместимость: (вид, значение) по одной строке — см. _acc_parse_target()."""
+    kind, value, _note = _acc_parse_target((query or '').split(), '.')
+    return kind, value
 
 
 def _acc_danger(kind, value):
@@ -1406,8 +1513,37 @@ def _acc_danger(kind, value):
     return []
 
 
-def _acc_grant_line(kind, value, prefix):
-    return (f"{DANGER} " if _acc_danger(kind, value) else '') + _esc(describe_grant(kind, value, prefix))
+def _acc_grant_line(kind, value, prefix, uid=None):
+    line = (f"{DANGER} " if _acc_danger(kind, value) else '') + _esc(describe_grant(kind, value, prefix))
+    return line + (_acc_left(uid, kind, value) if uid is not None else '')
+
+
+def _acc_left(uid, kind, value=None, short=False):
+    """« · ⏳ ещё 23 ч (до 05.11 13:20)» — сколько осталось у выдачи со сроком; бессрочная — ''."""
+    ts = engine.access.expires_at(uid, kind, value)
+    if ts is None:
+        return ''
+    left = ts - time.time()
+    if left <= 0:
+        return ' · ⏳ истёк'
+    if short:
+        return f" ⏳{format_duration(left)}"
+    return f" · ⏳ ещё {format_duration(left)} (до {time.strftime('%d.%m %H:%M', time.localtime(ts))})"
+
+
+def _acc_split_ttl(args):
+    """Срок в конце аргументов («1d», «на 1 день», «2ч 30мин») → (аргументы без него, секунды или None)."""
+    for n in (4, 3, 2, 1):
+        if len(args) > n and parse_duration(' '.join(args[-n:])):
+            return args[:-n], parse_duration(' '.join(args[-n:]))
+    return args, None
+
+
+_ACC_TTLS = [None, 3600, 86400, 7 * 86400, 30 * 86400]      # срок в меню .access: кнопка перебирает по кругу
+
+
+def _acc_ttl_label(ttl):
+    return 'навсегда' if not ttl else f"на {format_duration(ttl)}"
 
 
 def _acc_class_lines(idn, prefix, level=1):
@@ -1437,7 +1573,9 @@ def _acc_list_text(prefix):
     lines = [visual.title("Доступ", sub="кто ещё может пользоваться вашим юзерботом")]
     for uid, u in users.items():
         n = len(engine.access.grants_of(u))
-        what = ', '.join(x for x in ((f"класс {u['class']}" if u.get('class') else ''), (f"разрешений: {n}" if n else '')) if x)
+        timed = len(u.get('expires') or {})
+        what = ', '.join(x for x in ((f"класс {u['class']}" if u.get('class') else ''), (f"разрешений: {n}" if n else ''),
+                                     (f"⏳ со сроком: {timed}" if timed else '')) if x)
         lines.append(visual.item(f"<b>{_esc(u.get('name') or uid)}</b>" + (f" @{_esc(u['username'])}" if u.get('username') else '')))
         lines.append(visual.item(f"id <code>{uid}</code>" + (f", {_esc(what)}" if what else ''), 1))
     if not users:
@@ -1456,14 +1594,15 @@ def _acc_user_text(uid, name, username, prefix):
     lines.append(visual.section("Доступ сейчас"))
     if u.get('class'):
         c = engine.access.get_class(u['class']) or {}
-        lines.append(visual.item(f"класс <b>{_esc(u['class'])}</b> — {_esc(c.get('title') or '')}"))
+        lines.append(visual.item(f"класс <b>{_esc(u['class'])}</b> — {_esc(c.get('title') or '')}"
+                                 + _acc_left(uid, 'class')))
         lines += _acc_class_lines(u['class'], prefix)
     else:
         lines.append(visual.item("класс: нет"))
     grants = engine.access.grants_of(u)
     if grants:
         lines.append(visual.item("разрешения:"))
-        lines += [visual.item(_acc_grant_line(k, v, prefix), 1) for k, v in grants]
+        lines += [visual.item(_acc_grant_line(k, v, prefix, uid), 1) for k, v in grants]
     allowed, total = _acc_count(uid)
     lines.append(visual.field("доступно команд", f"{allowed} из {total}"))
     lines.append(visual.section("Написание команд"))
@@ -1481,7 +1620,8 @@ _ACC_OFF = ('off', 'выкл', '0', 'false', 'нет')
 async def _acc_open_form(event, uid=None, name='', username=''):
     prefix = await engine.get_prefix()
     st = {'uid': str(uid) if uid is not None else None, 'name': name, 'username': username,
-          'mods': [], 'mod': None, 'cmds': [], 'cmd': None, 'page': 0, 'classes': [], 'cls': None, 'grants': [], 'users': []}
+          'mods': [], 'mod': None, 'cmds': [], 'cmd': None, 'page': 0, 'classes': [], 'cls': None, 'grants': [], 'users': [],
+          'ttl': None}                                    # срок новых выдач из меню (None — навсегда)
 
     def back(data):
         return [(visual.btn('Назад', 'back'), data)]
@@ -1527,7 +1667,9 @@ async def _acc_open_form(event, uid=None, name='', username=''):
             visual.title("Выдать доступ", sub=who()),
             visual.item(f"<b>класс</b> — готовый набор прав (создаются на сайте: {_esc(prefix)}web → доступ)"),
             visual.item("<b>разрешение</b> — доступ к одному модулю целиком или к одной его команде"),
+            visual.item(f"<b>срок</b> — {_acc_ttl_label(st['ttl'])}: по истечении выдача снимется сама"),
         ]), buttons=[[(visual.btn('Выдать класс'), 'gcls', "success")], [(visual.btn('Выдать разрешение'), 'gperm:0', "success")],
+                     [(f"⏳ Срок: {_acc_ttl_label(st['ttl'])}", 'ttl', "primary" if st['ttl'] else None)],
                      back('user')])
 
     async def show_classes():
@@ -1557,7 +1699,9 @@ async def _acc_open_form(event, uid=None, name='', username=''):
             return
         if u.get('class'):
             lines += ["", visual.hint(f"текущий класс {_esc(u['class'])} будет заменён; личные разрешения останутся")]
-        await form.edit("\n".join(lines), buttons=[[(visual.btn(f'Выдать класс {idn}'), 'cok')], back('gcls')])
+        lines += ["", visual.hint(f"срок: {_acc_ttl_label(st['ttl'])} — меняется на экране «Выдать доступ»")]
+        await form.edit("\n".join(lines), buttons=[[(visual.btn(f'Выдать класс {idn} {_acc_ttl_label(st["ttl"])}'), 'cok')],
+                                                   back('gcls')])
 
     async def show_mods(page=0):
         st['mods'] = _acc_modules()
@@ -1595,7 +1739,8 @@ async def _acc_open_form(event, uid=None, name='', username=''):
         if whole:
             lines.append(visual.item(f"доступен целиком <i>({_esc(why)})</i>"))
         else:
-            rows.append([(visual.btn('Выдать доступ ко всему модулю'), 'gm', "success")])
+            rows.append([(visual.btn('Выдать доступ ко всему модулю') + (f" {_acc_ttl_label(st['ttl'])}" if st['ttl'] else ''),
+                          'gm', "success")])
         lines += ["", visual.hint("или выберите одну команду:")]
         for i, (key, cmd, _d) in enumerate(st['cmds']):
             ok = has_user and engine.access.check(st['uid'], mname, key, builtin)[0]
@@ -1618,22 +1763,23 @@ async def _acc_open_form(event, uid=None, name='', username=''):
         if ok:
             lines.append(visual.item(f"уже доступна <i>({_esc(why)})</i>"))
         else:
-            rows.append([(visual.btn(f'Выдать доступ к {prefix}{cmd}'), 'gk')])
+            rows.append([(visual.btn(f'Выдать доступ к {prefix}{cmd}') + (f" {_acc_ttl_label(st['ttl'])}" if st['ttl'] else ''),
+                          'gk')])
         rows.append(back('mod'))
         await form.edit("\n".join(lines), buttons=rows)
 
     async def confirm_danger(kind, value, ok_data, back_data):
         await form.edit("\n".join([
             visual.title("Критически опасный доступ", sub=who()),
-            visual.item(f"выдаётся: <b>{_esc(describe_grant(kind, value, prefix))}</b>"),
+            visual.item(f"выдаётся: <b>{_esc(describe_grant(kind, value, prefix))}</b> — {_acc_ttl_label(st['ttl'])}"),
             visual.warn(_esc('; '.join(_acc_danger(kind, value)))),
             "", visual.hint("по сути это доступ ко всему аккаунту и компьютеру, где запущен юзербот. "
                             "Выдавайте только тем, кому доверяете как себе."),
         ]), buttons=[[(visual.btn('Да, выдать'), ok_data, "success")], back(back_data)])
 
     async def do_grant(kind, value, click):
-        await engine.access.grant('user', st['uid'], kind, value, name=st['name'], username=st['username'])
-        await click.answer("выдано: " + describe_grant(kind, value, prefix)[:150])
+        await engine.access.grant('user', st['uid'], kind, value, name=st['name'], username=st['username'], ttl=st['ttl'])
+        await click.answer(f"выдано {_acc_ttl_label(st['ttl'])}: " + describe_grant(kind, value, prefix)[:140])
 
     async def show_revoke():
         u = engine.access.get_user(st['uid'])
@@ -1641,8 +1787,9 @@ async def _acc_open_form(event, uid=None, name='', username=''):
             await show_user()
             return
         st['grants'] = engine.access.grants_of(u)
-        rows = [[(f"✕ класс {u['class']}", 'rc')]] if u.get('class') else []
-        rows += [[(f"✕ {describe_grant(k, v, prefix)}"[:60], f"rg:{i}")] for i, (k, v) in enumerate(st['grants'])]
+        rows = [[(f"✕ класс {u['class']}{_acc_left(st['uid'], 'class', short=True)}", 'rc')]] if u.get('class') else []
+        rows += [[(f"✕ {describe_grant(k, v, prefix)}"[:48] + _acc_left(st['uid'], k, v, short=True), f"rg:{i}")]
+                 for i, (k, v) in enumerate(st['grants'])]
         rows.append([(visual.btn('Отозвать весь доступ'), 'rall', "danger")])
         rows.append(back('user'))
         await form.edit(visual.title("Отозвать доступ", sub=who()) + "\n" + visual.hint("нажмите на то, что нужно отозвать"),
@@ -1693,9 +1840,14 @@ async def _acc_open_form(event, uid=None, name='', username=''):
                 await click.answer()
                 st['cls'] = st['classes'][int(d[2:])]
                 await show_class_confirm()
+            elif d == 'ttl':
+                st['ttl'] = _ACC_TTLS[(_ACC_TTLS.index(st['ttl']) + 1) % len(_ACC_TTLS)] if st['ttl'] in _ACC_TTLS else None
+                await click.answer(f"срок новых выдач: {_acc_ttl_label(st['ttl'])}")
+                await show_give()
             elif d == 'cok':
-                await engine.access.set_user_class(st['uid'], st['cls'], name=st['name'], username=st['username'])
-                await click.answer(f"класс {st['cls']} выдан")
+                await engine.access.set_user_class(st['uid'], st['cls'], name=st['name'], username=st['username'],
+                                                   ttl=st['ttl'])
+                await click.answer(f"класс {st['cls']} выдан {_acc_ttl_label(st['ttl'])}")
                 await show_user()
             elif d.startswith('gperm:'):
                 await click.answer()
@@ -1761,7 +1913,7 @@ async def _acc_open_form(event, uid=None, name='', username=''):
 
 @decorators.command('access', 'acs')
 async def access_cmd(event):
-    """доступ других людей: ответом на сообщение — меню этого человека; без ответа — список; grant / revoke / check / ignore / list / classes"""
+    """доступ других людей: ответом на сообщение — меню этого человека; без ответа — список. grant [@user] <команда | модуль | модуль команда | класс> [срок] · revoke [@user] [что] · check · ignore · list · classes"""
     prefix = await engine.get_prefix()
     args = engine.get_args().split()
     sub = args[0].lower() if args else ''
@@ -1785,45 +1937,76 @@ async def access_cmd(event):
         await engine.answer(event, visual.err(_esc(e)))
 
 
+def _acc_is_user_word(word):
+    """Слово похоже на пользователя: @username, числовой id или ссылка t.me/…"""
+    w = (word or '').strip()
+    return w.startswith('@') or w.isdigit() or 't.me/' in w.lower()
+
+
 async def _acc_sub(event, sub, args, prefix):
-    """grant/revoke/check/ignore: пользователь — из ответа или первым словом."""
-    if event.is_reply:
+    """
+    grant / revoke / check / ignore. Кто — первым словом (@username или id) или ответом на сообщение человека.
+    Без ответа первое слово — всегда пользователь (id, @username или имя того, у кого уже есть доступ).
+    """
+    if args and (_acc_is_user_word(args[0]) or not event.is_reply):
+        uid, name, username = await _acc_resolve_user(event, args.pop(0))
+    elif event.is_reply:
         uid, name, username = await _acc_resolve_user(event, '')
     else:
-        if not args:
-            raise AccessError("Укажите пользователя (id или @username) или отправьте команду ответом на его сообщение")
-        uid, name, username = await _acc_resolve_user(event, args.pop(0))
+        raise AccessError(f"Кому? Ответьте на сообщение человека или укажите его: "
+                          f"{prefix}access {sub} @username …")
     label = _esc(name or uid)
-    if sub == 'grant':
-        kind, value = _acc_grant_target(' '.join(args))
+    if sub == 'grant':                    # .access grant [пользователь] <что> [срок]
+        args, ttl = _acc_split_ttl(args)
+        if not args:
+            raise AccessError(f"Что выдать? Например: {prefix}access grant @user ping 1d")
+        kind, value, note = _acc_parse_target(args, prefix, uid)
         if kind == 'class':
-            await engine.access.set_user_class(uid, value, name=name, username=username)
+            await engine.access.set_user_class(uid, value, name=name, username=username, ttl=ttl)
             text = f"{label}: выдан класс {_esc(value)}"
             danger = sum((_acc_danger(k, v) for k, v in engine.access.grants_of(engine.access.get_class(value))), [])
         else:
-            await engine.access.grant('user', uid, kind, value, name=name, username=username)
+            await engine.access.grant('user', uid, kind, value, name=name, username=username, ttl=ttl)
             text = f"{label}: выдано — {_esc(describe_grant(kind, value, prefix))}"
             danger = _acc_danger(kind, value)
-        await engine.answer(event, visual.ok(text) + (("\n" + visual.warn("критически опасный доступ: "
-                                                                          + _esc('; '.join(dict.fromkeys(danger))))) if danger else ''))
-    elif sub == 'revoke':
+        text += _acc_left(uid, kind, value) if ttl else " · бессрочно"
+        await engine.answer(event, visual.ok(text)
+                            + (("\n" + visual.warn("критически опасный доступ: " + _esc('; '.join(dict.fromkeys(danger)))))
+                               if danger else '')
+                            + (("\n" + visual.hint(_esc(note))) if note else ''))
+    elif sub == 'revoke':                 # .access revoke [пользователь] [что]
         if not args:
             await engine.access.remove_user(uid)
             await engine.answer(event, visual.ok(f"{label}: весь доступ отозван"))
             return
-        what = ' '.join(args)
-        if what.lower() == 'class':
+        if [a.lower() for a in args] in (['class'], ['класс']):
             await engine.access.set_user_class(uid, None)
             await engine.answer(event, visual.ok(f"{label}: класс отозван"))
             return
-        kind, value = _acc_grant_target(what)
+        kind, value, note = _acc_parse_target(args, prefix, uid, revoke=True)
+        u = engine.access.get_user(uid)
+        if u is None:
+            raise AccessError("У этого человека и так нет доступа")
         if kind == 'class':
-            if (engine.access.get_user(uid) or {}).get('class') != value:
-                raise AccessError(f"Класс {value} этому пользователю не выдан")
+            if u.get('class') != value:
+                raise AccessError(f"Класс {value} этому человеку не выдан")
             await engine.access.set_user_class(uid, None)
         else:
+            if value not in u.get({'scope': 'scopes', 'module': 'modules', 'command': 'commands'}[kind], []):
+                module = value.split(':', 1)[0]
+                ok, why = (engine.access.check(uid, module, value, _acc_is_builtin(module)) if kind == 'command'
+                           else engine.access.module_allowed(uid, value, _acc_is_builtin(value)) if kind == 'module'
+                           else (False, ''))
+                if ok:
+                    raise AccessError(f"«{describe_grant(kind, value, prefix)}» отдельно не выдавалась — она доступна "
+                                      f"через: {why}. Отзовите это или весь доступ ({prefix}access revoke без слов)")
+                raise AccessError(f"У этого человека нет выдачи «{describe_grant(kind, value, prefix)}»")
             await engine.access.revoke('user', uid, kind, value)
-        await engine.answer(event, visual.ok(f"{label}: отозвано — {_esc(value if kind == 'class' else describe_grant(kind, value, prefix))}"))
+        gone = engine.access.get_user(uid) is None
+        await engine.answer(event, visual.ok(f"{label}: отозвано — "
+                                             f"{_esc(value if kind == 'class' else describe_grant(kind, value, prefix))}")
+                            + (("\n" + visual.hint(_esc(note))) if note else '')
+                            + (("\n" + visual.hint("других выдач не осталось — доступа больше нет")) if gone else ''))
     elif sub == 'ignore':                 # .access ignore [пользователь] case|space [on|off]
         if not args or args[0].lower() not in _ACC_OPT_WORDS:
             raise AccessError(f"Формат: {prefix}access ignore [пользователь] case|space [on|off] — "
@@ -1839,8 +2022,10 @@ async def _acc_sub(event, sub, args, prefix):
     else:  # check
         if not args:
             raise AccessError(f"Формат: {prefix}access check [пользователь] <команда>")
-        word = args[0][len(prefix):] if args[0].startswith(prefix) else args[0]
-        _kind, key = _acc_grant_target(word if ':' in word else '.' + word)
+        words = args if len(args) == 2 or ':' in args[0] else ['.' + _strip_prefix(args[0], prefix).lstrip('.')]
+        _kind, key, _n = _acc_parse_target(words, prefix)
+        if _kind != 'command':
+            raise AccessError(f"Формат: {prefix}access check [пользователь] <команда> или <модуль> <команда>")
         module, cmd = key.split(':', 1)
         ok, why = engine.access.check(uid, module, key, _acc_is_builtin(module))
         await engine.answer(event, (visual.ok if ok else visual.err)(f"{_esc(prefix + cmd)}: {'разрешено' if ok else 'нет доступа'}")
@@ -2239,8 +2424,11 @@ async def _forms_gc():
 async def _inputs_gc():
     """Ожидания ввода (InputButton) старше часа и устаревшие служебные записи о вводе и эхе бота."""
     now = time.monotonic()
-    for user_id, pending in list(engine._pending_inputs.items()):
-        if now - pending['created_at'] >= 3600:
+    for user_id, entries in list(engine._pending_inputs.items()):       # user_id -> {ID поля: ожидание}
+        for tok, pending in list(entries.items()):
+            if now - pending['created_at'] >= 3600:
+                entries.pop(tok, None)
+        if not entries:
             engine._pending_inputs.pop(user_id, None)
     for store, field in ((engine._pending_input_deletes, 'created_at'), (engine._recent_bot_echoes, 'seen_at')):
         for chat_id, items in list(store.items()):

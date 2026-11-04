@@ -1,6 +1,11 @@
 /* FRX — вкладка «доступ» и алиасы (access.js) */
 .tag.ac-danger { color: var(--danger); border-color: rgba(255, 155, 143, .5); cursor: help; }
 .ac-has { color: var(--ink-2); font-size: 13px; }
+.tag.ac-ttl { color: var(--ink-2); cursor: help; }
+.tag.ac-ttl.soon { color: var(--danger); border-color: rgba(255, 155, 143, .5); }
+.ac-ttl-pick { align-items: center; flex-wrap: wrap; }
+.ac-ttl-pick > .faint { margin-right: 4px; }
+.ac-ttl-own { width: 150px; }
 
 .veil .glass.ac-wide { max-width: 760px; max-height: calc(100vh - 40px); display: flex; flex-direction: column; }
 .veil .glass.ac-wide > .stack, .veil .glass.ac-wide > div:not(.actions) { overflow-y: auto; min-height: 0; }

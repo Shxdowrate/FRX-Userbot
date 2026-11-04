@@ -60,11 +60,17 @@ InputButton ("Введите значение") — как в config Hikka Userb
 когда InputButton попадает в text/buttons формы (Core._register_input_targets(),
 вызывается из InlineForm.edit() и сразу после создания формы). Дальше:
 
-  1. Пользователь печатает "@botname <значение>" — Telegram шлёт боту
+  0. У каждого поля ввода свой ID — 4 случайных символа, уникальных среди
+     полей, которые сейчас ждут ввода (Core._input_token()). Тап по кнопке
+     ставит в поле «@botname <ID> » — по ID движок знает, в какую форму и
+     какое поле идёт значение, поэтому одновременно можно держать сколько
+     угодно форм с вводом. Если ID стёрли — значение уходит в поле, которое
+     этот человек получил последним (как было до ID).
+  1. Пользователь печатает "@botname <ID> <значение>" — Telegram шлёт боту
      inline_query на КАЖДОЕ нажатие клавиши. aiobot/bot.py проверяет
-     core.get_pending_input(user_id) — если для этого юзера есть
-     ожидание ввода, отвечает ОДНИМ результатом, который просто эхо
-     набранного текста (живой предпросмотр того, что отправится).
+     core.get_pending_input(user_id, query) — если для этого юзера есть
+     ожидание ввода, отвечает ОДНИМ результатом: куда уйдёт значение
+     и само значение (живой предпросмотр того, что отправится).
   2. Когда пользователь выбирает этот результат (отправляет), Telegram
      шлёт chosen_inline_result с query == набранный текст — так же, как
      и подтверждение create_inlineform(), это требует включённого у бота
@@ -72,9 +78,10 @@ InputButton ("Введите значение") — как в config Hikka Userb
   3. aiobot/bot.py зовёт core.dispatch_inline_input(chosen) — тот находит
      форму по user_id, собирает InlineInput(value=chosen.query, ...) и
      вызывает form.on_input(...)-хендлеры.
-  4. Само "эхо"-сообщение (та самая реплика "via @bot" с введённым
-     текстом, которую Telegram-клиент только что опубликовал в чат) —
-     движок тут же его удаляет, до того как оно попадёт вотчерам/командам
+  4. Само "эхо"-сообщение (реплика "via @bot", которую Telegram-клиент
+     только что опубликовал в чат) — введённого текста в нём НЕТ: бот кладёт
+     туда только INPUT_ECHO («🟥»), значение приходит отдельно, в
+     chosen_inline_result. Движок тут же удаляет и это сообщение, до того как оно попадёт вотчерам/командам
      модулей. Это сообщение прилетает через MTProto (Core._on_new_message,
      telethon), а chosen_inline_result из шага 2 — отдельным каналом через
      Bot API; порядок доставки между ними НЕ гарантирован (Bot API обычно
@@ -324,7 +331,7 @@ def parse_button(btn, styles=None):
     styles = styles or {}
     if isinstance(btn, InputButton):
         return {'kind': 'input', 'text': str(btn.text), 'data': str(btn.data), 'hint': btn.hint, 'prefill': btn.prefill,
-                'style': btn.style or styles.get(str(btn.data))}
+                'style': btn.style or styles.get(str(btn.data)), 'button': btn}
     if isinstance(btn, dict):
         text, data, style = btn.get('text'), btn.get('data', btn.get('callback_data')), btn.get('style')
         if btn.get('url'):
@@ -384,6 +391,11 @@ class TokenBucket:
                 await asyncio.sleep((1 - self._tokens) / self.rate)
 
 
+# Текст «эхо»-сообщения, которое Telegram публикует в чат при отправке значения через InputButton (см. шаг 4 выше).
+# Значения в нём нет — оно приходит боту отдельно (chosen_inline_result), поэтому в чате не светится даже на миг.
+INPUT_ECHO = "🟥"
+
+
 class InputButton:
     """
     Кнопка "Введите значение" (см. докстринг модуля выше) — кладётся в
@@ -408,7 +420,7 @@ class InputButton:
     style    — цвет кнопки: 'primary' (синий), 'success' (зелёный),
                'danger' (красный); None — обычная.
     """
-    __slots__ = ('text', 'data', 'hint', 'for_user', 'style', 'prefill')
+    __slots__ = ('text', 'data', 'hint', 'for_user', 'style', 'prefill', 'token')
 
     def __init__(self, text, data, hint="Введите значение", for_user=None, style=None, prefill=""):
         self.text = text
@@ -417,6 +429,7 @@ class InputButton:
         self.prefill = prefill or ""
         self.for_user = for_user
         self.style = normalize_style(style)   # цвет кнопки: 'primary' | 'success' | 'danger'
+        self.token = None                     # ID поля (4 символа) — выдаёт движок при отрисовке, см. Core._input_token()
 
 
 class SearchButton(InputButton):

@@ -474,7 +474,17 @@ async def _module_detail_buttons(module_name, show_back=True):
     module_info = engine.modules.get(module_name)
     is_builtin = module_info is not None and module_info.is_builtin
 
-    rows = list(engine.module_links(module_name))          # ↗ Канал автора · ↗ GitHub (TG_URL / GIT_URL из шапки)
+    # «✚ Подписаться» (только если не подписаны на канал автора) · «↗ Канал автора» — одной строкой; исходник — ссылкой в тексте
+    links = list(engine.module_links(module_name, row=False))
+    tg = getattr(module_info, 'tg_url', '') if module_info is not None else ''
+    if tg:
+        try:
+            _entity, joined = await engine.channel_subscription(tg)
+        except Exception:
+            joined = None
+        if joined is False:
+            links.insert(0, ("✚ Подписаться", f"help_join:{module_name}", "primary"))
+    rows = [links] if links else []
     if show_back:
         rows.append([(visual.btn('К выбору модуля', 'back'), "help_back")])
     if await _has_config(module_name):       # кнопка только если конфиг действительно есть
@@ -576,6 +586,20 @@ def _bind_helper_form(form, event, focus=None):
         except Exception as e:
             engine.tlog(f"Ошибка открытия конфига {module_name} из .help: {e}")
             await engine.reply(event, visual.err('Не удалось открыть конфиг') + "\n" + visual.field('модуль', module_name) + f"\n<code>{html.escape(str(e))}</code>")
+
+    @form.on_click(data_startswith="help_join:")
+    async def _join(click):
+        module_name = click.data.split(":", 1)[1]
+        info = engine.modules.get(module_name)
+        if info is None or not info.tg_url:
+            await click.answer("Модуль не найден")
+            return
+        if not await engine.join_channel(info.tg_url):
+            await click.answer("Не получилось — откройте канал по кнопке", show_alert=True)
+            return
+        await click.answer("Вы подписаны ✓")
+        detail = engine.get_module_info(module_name)
+        await form.edit(_module_detail_text(detail, module_name), buttons=await _module_detail_buttons(module_name))
 
     @form.on_click(data_startswith="help_send:")
     async def _send(click):

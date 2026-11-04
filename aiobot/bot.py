@@ -46,6 +46,7 @@ from core.engine import build_inline_function_text
 from core import visual as visual_module
 from core.html_utils import sanitize_bot_method, strip_bot_method_custom_emoji
 from core.inline_results import link_preview_options
+from core.inline_forms import INPUT_ECHO
 from aiogram.exceptions import TelegramBadRequest
 
 
@@ -500,22 +501,27 @@ def create_bot(token: str, core=None):
             return
 
         user_id = iq.from_user.id if iq.from_user else None
-        pending_input = core.get_pending_input(user_id) if user_id is not None else None
+        pending_input = core.get_pending_input(user_id, iq.query) if user_id is not None else None
 
         def input_result():
-            """Эхо набранного текста — «отправить значение в форму» (InputButton ждёт ввода)."""
-            value = iq.query or ""
+            """
+            «Отправить значение в форму» (InputButton ждёт ввода). Набранное видно только в подсказке у того, кто
+            вводит; в чат публикуется лишь INPUT_ECHO — значение приходит в chosen_inline_result.
+            """
+            value = pending_input.get('value') or ""          # набранное без ID поля
             hint = str(pending_input.get('hint') or '').strip()
+            keep = f"⚠️ Не удаляйте ID {pending_input.get('token') or ''}".strip()   # по ID значение найдёт своё поле
             if value:
-                title, descr = visual_module.btn("Отправить в форму: ") + value[:60], hint or "значение уйдёт в форму"
+                title = visual_module.btn("Отправить в форму: ") + value[:60]
+                descr = f"{hint} · {keep}" if hint else keep
             else:
                 title = "✏️ " + (hint or "Введите значение")
-                descr = f"«{pending_input.get('title') or ''}» — наберите после @бота и нажмите сюда".strip()
+                descr = f"{keep} — наберите значение после него"
             return InlineQueryResultArticle(
                 id=f"{_INPUT_RESULT_PREFIX}{uuid.uuid4().hex}",
                 title=title,
                 description=descr,
-                input_message_content=InputTextMessageContent(message_text=value or "…"),
+                input_message_content=InputTextMessageContent(message_text=INPUT_ECHO),
             )
 
         # @bot.inline_query модулей — настоящие инлайн-результаты (core/inline_results.py).

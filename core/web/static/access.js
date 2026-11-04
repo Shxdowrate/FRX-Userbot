@@ -24,12 +24,73 @@ function acModal(title, body, actions) {
   return close;
 }
 
-/* Список выдач (класса или пользователя) с кнопкой «отозвать» у каждой. */
-function acGrantRows(grants, onRevoke, emptyText) {
+/* ------------------------------------------------------------------ сроки выдач (core/access.py: expires) ------------------------------------------------------------------ */
+
+const AC_TTLS = [[0, 'навсегда'], [3600, '1 ч'], [86400, '1 д'], [7 * 86400, '7 д'], [30 * 86400, '30 д']];
+
+function acDur(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const parts = [];
+  for (const [size, name] of [[86400, 'д'], [3600, 'ч'], [60, 'мин']]) {
+    if (sec >= size) { parts.push(Math.floor(sec / size) + ' ' + name); sec %= size; }
+    if (parts.length === 2) break;
+  }
+  return parts.join(' ') || 'меньше минуты';
+}
+
+function acUntil(ts) {
+  return new Date(ts * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+/* «⏳ ещё 23 ч» — у выдачи со сроком; бессрочная — null. */
+function acTtlTag(ts) {
+  if (!ts) return null;
+  const left = ts - Date.now() / 1000;
+  return h('span', { class: 'tag ac-ttl' + (left < 3600 ? ' soon' : ''), title: 'до ' + acUntil(ts) }, '⏳ ' + (left > 0 ? 'ещё ' + acDur(left) : 'истёк'));
+}
+
+function acTtlLabel(ttl) {
+  if (!ttl) return 'навсегда';
+  return typeof ttl === 'number' ? 'на ' + acDur(ttl) : 'на ' + ttl;
+}
+
+/* Выбор срока: чипы «навсегда / 1 ч / 1 д / 7 д / 30 д» и поле «своё» (2h30m, 3д). st.ttl — секунды или строка. */
+function acTtlChips(st) {
+  const own = h('input', { class: 'field short ac-ttl-own', placeholder: 'своё: 2h30m, 3д', spellcheck: 'false', autocomplete: 'off' });
+  const btns = AC_TTLS.map(([v, label]) => {
+    const b = h('button', { class: 'chip', type: 'button', onclick: () => { st.ttl = v; own.value = ''; sync(); } }, label);
+    b.dataset.v = v;
+    return b;
+  });
+  function sync() { btns.forEach((b) => b.classList.toggle('on', typeof st.ttl === 'number' && Number(b.dataset.v) === st.ttl)); }
+  own.addEventListener('input', () => { st.ttl = own.value.trim() || 0; sync(); });
+  if (typeof st.ttl === 'string') own.value = st.ttl;
+  sync();
+  return h('div', { class: 'chips ac-ttl-pick' }, h('span', { class: 'faint' }, 'срок'), btns, own);
+}
+
+/* Окно «срок»: поменять срок уже выданного (продлить, сократить, сделать бессрочным). */
+function acTermModal(label, expires, onSave) {
+  const st = { ttl: 0 };
+  const now = expires ? 'сейчас: ' + (expires > Date.now() / 1000 ? 'ещё ' + acDur(expires - Date.now() / 1000) + ' (до ' + acUntil(expires) + ')' : 'истёк')
+    : 'сейчас: бессрочно';
+  modal('срок · ' + label, h('div', { class: 'stack' }, h('div', { class: 'faint' }, now), acTtlChips(st),
+    h('div', { class: 'faint' }, 'новый срок считается от текущего момента')),
+  (cl) => [h('button', { class: 'btn', type: 'button', onclick: () => cl() }, 'отмена'),
+    h('button', { class: 'btn primary', type: 'button', onclick: () => act(async () => { await onSave(st.ttl); cl(); }) }, 'сохранить')]);
+}
+
+/* Список выдач (класса или пользователя) с кнопкой «отозвать» у каждой; onTerm — кнопка «срок» (у пользователя). */
+function acGrantRows(grants, onRevoke, emptyText, onTerm) {
   if (!grants.length) return [empty(emptyText)];
-  return grants.map((g) => row(
-    nameSub(h('span', {}, g.label, h('span', { class: 'tag' }, AC_KIND[g.kind]), acDangerTag(g.danger)), g.sub + (g.danger.length ? ' · ' + g.danger.join('; ') : '')),
-    onRevoke ? confirmBtn('отозвать', () => onRevoke(g)) : null));
+  return grants.map((g) => {
+    const end = [onTerm ? h('button', { class: 'btn small', type: 'button', onclick: (e) => { e.stopPropagation(); onTerm(g); } }, 'срок') : null,
+      onRevoke ? confirmBtn('отозвать', () => onRevoke(g)) : null].filter(Boolean);
+    return row(
+      nameSub(h('span', {}, g.label, h('span', { class: 'tag' }, AC_KIND[g.kind]), acDangerTag(g.danger), acTtlTag(g.expires)),
+        g.sub + (g.expires ? ' · до ' + acUntil(g.expires) : '') + (g.danger.length ? ' · ' + g.danger.join('; ') : '')),
+      end.length ? end : null);
+  });
 }
 
 /* ------------------------------------------------------------------ окно «+ выдать доступ» ------------------------------------------------------------------
@@ -38,7 +99,7 @@ function acGrantRows(grants, onRevoke, emptyText) {
  * выдачи: можно выдать несколько вещей подряд. */
 function acGrantPicker(opts) {
   const d = opts.d, pfx = d.prefix;
-  const st = { q: '', open: null, confirm: null };
+  const st = { q: '', open: null, confirm: null, ttl: 0 };
   const box = h('div', { class: 'ac-pick' });
   const search = h('input', { class: 'field', placeholder: 'найти модуль или команду', spellcheck: 'false', autocomplete: 'off' });
   search.addEventListener('input', () => { st.q = search.value.trim().toLowerCase(); st.open = null; draw(); });
@@ -48,9 +109,9 @@ function acGrantPicker(opts) {
       st.confirm = { kind, value, label, danger }; draw(); return;
     }
     act(async () => {
-      await opts.onPick(kind, value);
+      await opts.onPick(kind, value, opts.ttl ? st.ttl : undefined);
       st.confirm = null;
-      toast('выдано: ' + label, 'ok');
+      toast('выдано' + (opts.ttl && st.ttl ? ' ' + acTtlLabel(st.ttl) : '') + ': ' + label, 'ok');
       draw();
     });
   };
@@ -107,7 +168,7 @@ function acGrantPicker(opts) {
   }
 
   draw();
-  acModal(opts.title, h('div', { class: 'stack' }, search, box));
+  acModal(opts.title, h('div', { class: 'stack' }, opts.ttl ? acTtlChips(st) : null, search, box));
   setTimeout(() => search.focus(), 50);
 }
 
@@ -122,7 +183,8 @@ async function accessView(T) {
         const danger = u.grants.some((g) => g.danger.length) || (u.class && (d.classes.find((c) => c.idn === u.class) || { grants: [] }).grants.some((g) => g.danger.length));
         const what = [u.class ? 'класс ' + u.class : null, u.grants.length ? `${u.grants.length} ${plural(u.grants.length, 'разрешение', 'разрешения', 'разрешений')}` : null].filter(Boolean).join(' + ');
         return row(
-          nameSub(h('span', {}, u.name || u.id, danger ? acDangerTag(['есть критически опасный доступ'], true) : null), acWho(u) + ` · доступно ${u.allowed} из ${u.total} команд`),
+          nameSub(h('span', {}, u.name || u.id, danger ? acDangerTag(['есть критически опасный доступ'], true) : null, acTtlTag(u.next_expiry)),
+            acWho(u) + ` · доступно ${u.allowed} из ${u.total} команд` + (u.timed ? ` · со сроком: ${u.timed}` : '')),
           h('span', { class: 'val' }, what),
           { click: () => { location.hash = '#/access/user/' + acEnc(u.id); } });
       })
@@ -200,7 +262,7 @@ function acNewClass(d) {
 /* ------------------------------------------------------------------ пользователь ------------------------------------------------------------------ */
 
 function acPickClass(d, current, onPick) {
-  const st = { sel: null };
+  const st = { sel: null, ttl: 0 };
   const box = h('div', {});
   function draw() {
     if (st.sel) {
@@ -213,8 +275,9 @@ function acPickClass(d, current, onPick) {
           h('div', {}, 'даёт: ', c.grants.length ? c.grants.map((g) => g.label).join(', ') : 'пока ничего (настройте класс)'),
           danger.length ? [h('div', { class: 'name', style: 'margin-top:10px' }, '⚠ критически опасный доступ'), h('ul', {}, [...new Set(danger)].map((x) => h('li', {}, x)))] : null,
           current ? h('div', { class: 'faint', style: 'margin-top:8px' }, `текущий класс ${current} будет заменён; личные разрешения останутся`) : null,
+          h('div', { style: 'margin-top:12px' }, acTtlChips(st)),
           h('div', { class: 'inline', style: 'margin-top:14px' },
-            h('button', { class: 'btn primary' + (danger.length ? ' danger' : ''), type: 'button', onclick: () => onPick(c.idn, close) }, 'выдать класс ' + c.idn),
+            h('button', { class: 'btn primary' + (danger.length ? ' danger' : ''), type: 'button', onclick: () => onPick(c.idn, close, st.ttl) }, 'выдать класс ' + c.idn),
             h('button', { class: 'btn', type: 'button', onclick: () => { st.sel = null; draw(); } }, 'назад'))));
       return;
     }
@@ -240,22 +303,22 @@ async function accessUser(T, id) {
   const reload = () => route();
   const body = { id, name: who.name, username: who.username };
 
-  const giveClass = () => acPickClass(d, r.user && r.user.class, (idn, close) => act(async () => {
-    await api('/access/user_class', { ...body, class: idn });
-    close(); toast('класс ' + idn + ' выдан', 'ok'); reload();
+  const giveClass = () => acPickClass(d, r.user && r.user.class, (idn, close, ttl) => act(async () => {
+    await api('/access/user_class', { ...body, class: idn, ttl: ttl || 0 });
+    close(); toast('класс ' + idn + ' выдан ' + acTtlLabel(ttl), 'ok'); reload();
   }));
   const givePerm = () => {
     let u = r.user;
     acGrantPicker({
-      title: 'выдать разрешение · ' + (who.name || id), d, scopes: true,
+      title: 'выдать разрешение · ' + (who.name || id), d, scopes: true, ttl: true,
       has: (kind, value) => {
         if (!u) return false;
         if (u.grants.some((g) => g.kind === kind && g.value === value)) return true;
         if (kind === 'command') return u.grants.some((g) => g.kind === 'module' && g.value === value.split(':')[0]);
         return false;
       },
-      onPick: async (kind, value) => {
-        await api('/access/grant', { ...body, target: 'user', kind, value });
+      onPick: async (kind, value, ttl) => {
+        await api('/access/grant', { ...body, target: 'user', kind, value, ttl: ttl || 0 });
         r = await api('/access/user?id=' + acEnc(id)); u = r.user;
       },
     });
@@ -288,9 +351,15 @@ async function accessUser(T, id) {
       row(nameSub('проверить команду', 'доступна ли команда и почему'), h('div', { class: 'inline' }, chk, h('button', { class: 'btn small', type: 'button', onclick: check }, 'проверить'), chkOut))));
     sections.push(h('div', { class: 'h2', style: 'padding-left:6px' }, 'класс'));
     sections.push(glass(cls
-      ? row(nameSub(h('span', {}, cls.idn, h('span', { class: 'tag' }, cls.title), cls.grants.some((g) => g.danger.length) ? acDangerTag(cls.grants.flatMap((g) => g.danger)) : null),
-          [cls.description, cls.grants.length ? 'даёт: ' + cls.grants.map((g) => g.label).join(', ') : 'пока ничего не даёт'].filter(Boolean).join(' · ')),
+      ? row(nameSub(h('span', {}, cls.idn, h('span', { class: 'tag' }, cls.title), cls.grants.some((g) => g.danger.length) ? acDangerTag(cls.grants.flatMap((g) => g.danger)) : null,
+            acTtlTag(u.class_expires)),
+          [cls.description, cls.grants.length ? 'даёт: ' + cls.grants.map((g) => g.label).join(', ') : 'пока ничего не даёт',
+            u.class_expires ? 'до ' + acUntil(u.class_expires) : null].filter(Boolean).join(' · ')),
         [h('a', { class: 'link', href: '#/access/class/' + acEnc(cls.idn) }, 'открыть'),
+          h('button', { class: 'btn small', type: 'button', onclick: () => acTermModal('класс ' + cls.idn, u.class_expires, async (ttl) => {
+            await api('/access/user_class', { ...body, class: cls.idn, ttl: ttl || 0 });
+            toast('срок класса: ' + acTtlLabel(ttl), 'ok'); reload();
+          }) }, 'срок'),
           confirmBtn('снять класс', () => act(async () => { await api('/access/user_class', { id, class: null }); toast('класс снят', 'ok'); reload(); }))])
       : empty('класса нет')));
     sections.push(h('div', { class: 'h2', style: 'padding-left:6px' }, 'написание команд'));
@@ -300,7 +369,11 @@ async function accessUser(T, id) {
     sections.push(glass(acGrantRows(u.grants, (g) => act(async () => {
       await api('/access/revoke', { target: 'user', id, kind: g.kind, value: g.value });
       toast('отозвано: ' + g.label, 'ok'); reload();
-    }), 'личных разрешений нет — «+ выдать разрешение» выше')));
+    }), 'личных разрешений нет — «+ выдать разрешение» выше',
+    (g) => acTermModal(g.label, g.expires, async (ttl) => {
+      await api('/access/grant', { ...body, target: 'user', kind: g.kind, value: g.value, ttl: ttl || 0 });
+      toast('срок: ' + g.label + ' — ' + acTtlLabel(ttl), 'ok'); reload();
+    }))));
   }
 
   const side = u ? [confirmBtn('отозвать весь доступ', () => act(async () => { await api('/access/user_del', { id }); toast('доступ отозван', 'ok'); reload(); }), 'btn danger')] : [];
