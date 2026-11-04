@@ -168,33 +168,92 @@ def _link_lines(meta):
     return lines
 
 
-async def _after_install(info, join_data):
+_INSTALLED_CMDS_MAX = 25
+
+
+async def _installed_text(info, verb='установлен') -> str:
     """
-    После установки — как в Hikka: ссылки автора кнопками, а если у модуля есть канал (TG_URL) и вы на него не
-    подписаны — кнопка «Подписаться на канал автора». -> (строки текста, ряды кнопок).
+    Карточка установленного модуля — как .help <модуль> (общая для .lm, .dlm и каталога .ml):
+        🟥 FastNotes
+        Быстрые заметки в избранном
+
+        🔶 установлен · версия 1.0
+        ▸ id  fastnotes
+        ▸ автор  @someone
+        ▸ канал  t.me/someone
+        ▸ исходник  github.com/…/fastnotes.py
+
+        🟧 Команды (3)
+        ▸ .nadd .na — добавить заметку
+        ▸ .ndel — удалить заметку
     """
-    rows = list(engine.module_links(info.module_name))
-    lines = []
+    prefix = html.escape(await engine.get_prefix())
+    try:
+        meta = engine.get_module_info(info.module_name)
+    except Exception:
+        meta = {}
+    description = (meta.get('description') or info.description or '').strip()
+    lines = [visual.title(html.escape(info.name), description or None),
+             visual.ok(f"{verb} · версия {html.escape(str(info.version))}"),
+             visual.field('id', html.escape(info.module_name))]
+    if info.author:
+        lines.append(visual.field('автор', html.escape(info.author), code=False))
+    if info.tg_url:                                      # как в .help: ссылки автора текстом (канал — ещё и кнопкой)
+        lines.append(visual.field('канал', _short_link(info.tg_url), code=False))
+    if info.git_url:
+        lines.append(visual.field('исходник', _short_link(info.git_url), code=False))
+    note = _broken_note(info)
+    if note:
+        lines.append(note.lstrip("\n"))
+
+    commands = meta.get('commands') or []
+    lines.append("")
+    if commands:
+        lines.append(visual.section(f"Команды ({len(commands)})"))
+        for c in commands[:_INSTALLED_CMDS_MAX]:
+            name = f"<code>{prefix}{html.escape(c['command'])}</code>"
+            if c.get('aliases'):
+                name += " " + visual.hint(', '.join(prefix + html.escape(a) for a in c['aliases']))
+            desc = (c.get('description') or '').strip().split('\n')[0]
+            lines.append(visual.item(name + (f" — {desc}" if desc else '')))
+        if len(commands) > _INSTALLED_CMDS_MAX:
+            lines.append(visual.hint(f"… ещё {len(commands) - _INSTALLED_CMDS_MAX} — "
+                                     f"<code>{prefix}help {html.escape(info.module_name)}</code>"))
+    else:
+        lines.append(visual.hint('команд нет — модуль работает сам (вотчеры, циклы, инлайн)'))
+    return "\n".join(lines)
+
+
+async def _after_install(info, join_data, tail=None):
+    """
+    Кнопки под карточкой: одной строкой «✚ Подписаться» (если не подписаны на канал автора) · «↗ Канал автора»
+    · tail (например «◂ К списку»). -> (доп. строки текста, ряды кнопок).
+    """
+    row = list(engine.module_links(info.module_name, row=False))
     if info.tg_url:
         try:
             _entity, joined = await engine.channel_subscription(info.tg_url)
         except Exception:
             joined = None
         if joined is False:
-            lines = ["", visual.hint('вы не подписаны на канал автора модуля — там обновления и новости')]
-            rows.insert(0, [(visual.btn('Подписаться на канал автора'), f"{join_data}{info.module_name}", "primary")])
-    return lines, rows
+            row.insert(0, ("✚ Подписаться", f"{join_data}{info.module_name}", "primary"))
+    if tail:
+        row = [tail] + row
+    if len(row) > 2:                                     # три кнопки в ряд не влезают — «назад» отдельной строкой
+        return [], [row[1:], [row[0]]]
+    return [], ([row] if row else [])
 
 
-async def _join_author(click, form, module_name, text):
-    """Клик «Подписаться на канал автора»: подписка от текущего аккаунта, кнопка исчезает."""
+async def _join_author(click, form, module_name, text, tail=None):
+    """Клик «Подписаться»: подписка от текущего аккаунта, кнопка исчезает."""
     info = engine.modules.get(module_name)
     if info is None or not info.tg_url:
         await click.answer("Модуль не найден")
         return
     if await engine.join_channel(info.tg_url):
-        await click.answer("Подписка оформлена ✓")
-        await form.edit(text + "\n\n" + visual.ok('Вы подписаны на канал автора'), buttons=engine.module_links(module_name) or None)
+        await click.answer("Вы подписаны ✓")
+        row = ([tail] if tail else []) + engine.module_links(module_name, row=False)
+        await form.edit(text, buttons=[row] if row else None)
     else:
         await click.answer("Не получилось — откройте канал по кнопке", show_alert=True)
 
@@ -217,21 +276,9 @@ def _requirements_lines(meta):
 
 async def _do_load_now(event, source: str, is_update: bool = False):
     """Фолбэк без инлайна (стационарный бот не подключён) — грузит/обновляет сразу, без превью."""
-    verb = "обновлён" if is_update else "загружен"
     try:
         info = await engine._load_from_source(source, target='loaded')
-        await engine.answer(
-            event,
-            "\n".join([
-                visual.ok(f"Модуль {verb}"),
-                visual.field('название', info.name, code=False),
-                visual.field('id', info.module_name),
-                visual.field('версия', info.version),
-                visual.field('автор', info.author, code=False),
-                *_link_lines({'tg_url': info.tg_url, 'git_url': info.git_url}),
-                visual.item(f"описание  {info.description or '—'}"),
-            ]) + _broken_note(info),
-        )
+        await engine.answer(event, await _installed_text(info, 'обновлён' if is_update else 'установлен'))
     except Exception as e:
         await engine.answer(
             event,
@@ -282,13 +329,9 @@ async def _offer_source(event, source: str, file_name: str, origin: str = None):
         rows = None
         try:
             info = await engine._load_from_source(source, target='loaded')
-            text = "\n".join([visual.ok(f"Модуль {'обновлён' if is_update else 'загружен'}"),
-                              visual.field('название', info.name, code=False), visual.field('id', info.module_name),
-                              visual.field('версия', info.version), visual.field('автор', info.author, code=False)]
-                             + _link_lines({'tg_url': info.tg_url, 'git_url': info.git_url})) + _broken_note(info)
+            text = await _installed_text(info, 'обновлён' if is_update else 'установлен')
             state['text'] = text
-            extra, rows = await _after_install(info, "loader_join:")
-            text += "\n".join(extra)
+            _extra, rows = await _after_install(info, "loader_join:")
         except Exception as e:
             text = visual.err('Ошибка при загрузке модуля') + f"\n<code>{html.escape(str(e))}</code>"
             engine.tlog(f"Ошибка загрузки модуля: {e}")
@@ -1342,7 +1385,7 @@ async def _catalog_form(event, repos, query='', scope=None, preset=None):
             return
         kind, _sep, arg = d.partition(':')
         if kind == 'ml_j':                                # подписаться на канал автора установленного модуля
-            await _join_author(click, form, arg, st.get('installed_text') or visual.ok('Модуль установлен'))
+            await _join_author(click, form, arg, st.get('installed_text') or visual.ok('Модуль установлен'), tail=_ML_BACK)
             return
         if kind == 'ml_r':
             i = int(arg)
@@ -1372,14 +1415,16 @@ async def _catalog_form(event, repos, query='', scope=None, preset=None):
             rows = []
             try:
                 info = await engine._load_from_source(await _source(e), target='loaded')
-                text = "\n".join([visual.ok('Модуль установлен'), visual.field('название', info.name, code=False),
-                                  visual.field('id', info.module_name), visual.field('версия', info.version)])
+                text = await _installed_text(info)
                 st['installed_text'] = text
-                extra, rows = await _after_install(info, "ml_j:")
-                text += "\n".join(extra)
+                _extra, rows = await _after_install(info, "ml_j:", tail=_ML_BACK)
             except Exception as ex:
                 text = visual.err('Ошибка при загрузке модуля') + f"\n<code>{html.escape(str(ex))}</code>"
-            await form.edit(text, buttons=rows + [[(visual.btn('К списку', 'back'), "ml_b")]])
+                rows = [[_ML_BACK]]
+            await form.edit(text, buttons=rows)
+
+
+_ML_BACK = (visual.btn('К списку', 'back'), "ml_b")
 
 
 async def _pick_list(event, entries, title):

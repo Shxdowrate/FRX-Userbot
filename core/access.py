@@ -18,7 +18,13 @@ core/access.py — доступ к юзерботу для других люде
     класс        = {title, description, scopes: [...], modules: [...], commands: [...], system}
                    ключ класса — его idn: одно слово (буквы, цифры, _), например FULL, helpers, my_friends
     пользователь = {name, username, class (idn или None), scopes, modules, commands, added,
-                    ignore_case, ignore_space}
+                    ignore_case, ignore_space, expires}
+
+СРОК (таймер). Выдачу пользователю (и выданный ему класс) можно дать на время: expires = {ключ: unix-время},
+ключ — «scope:all», «module:<модуль>», «command:<модуль:команда>» или «class». Истёкшая выдача перестаёт действовать
+сразу (check() её не видит), а sweep() (движок зовёт его раз в 30 с) убирает её из списка. Выдача без срока —
+бессрочная; повторная выдача того же без срока снимает таймер, со сроком — ставит новый.
+Срок пишется как «30m», «2h», «1d», «1w», «1d12h», «1д», «2ч», «1 день», «3 часа» — см. parse_duration().
 
 Команда разрешена гостю, если её покрывает хоть одна выдача — его личная или его класса. Исключения:
 модули из PROTECTED_MODULES и команды из PROTECTED_COMMANDS (управление доступом, алиасами, автозапуском и полный
@@ -203,6 +209,57 @@ def _normalize_grants(obj):
     return obj
 
 
+_DURATION_UNITS = (                         # (начало слова, секунд) — порядок важен: «мес» раньше «м», «нед» раньше «н»
+    ('мес', 30 * 86400), ('mo', 30 * 86400),
+    ('нед', 7 * 86400), ('week', 7 * 86400), ('w', 7 * 86400), ('н', 7 * 86400),
+    ('дн', 86400), ('ден', 86400), ('day', 86400), ('d', 86400), ('д', 86400),
+    ('час', 3600), ('hour', 3600), ('h', 3600), ('ч', 3600),
+    ('мин', 60), ('min', 60), ('m', 60), ('м', 60),
+    ('сек', 1), ('sec', 1), ('s', 1), ('с', 1),
+)
+_DURATION_PART = re.compile(r'(\d+)\s*([a-zа-яё]+)', re.I)
+MAX_DURATION = 366 * 86400
+
+
+def parse_duration(text):
+    """«1d», «2h30m», «1д», «1 день», «3 часа», «на 2 недели» → секунды; не срок — None."""
+    t = (text or '').strip().lower()
+    t = re.sub(r'^(на|for)\s+', '', t)
+    if not t:
+        return None
+    total, pos = 0, 0
+    for m in _DURATION_PART.finditer(t):
+        if t[pos:m.start()].strip() not in ('', 'и', ','):
+            return None
+        word = m.group(2)
+        sec = next((v for stem, v in _DURATION_UNITS if word.startswith(stem)), None)
+        if sec is None:
+            return None
+        total += int(m.group(1)) * sec
+        pos = m.end()
+    if pos == 0 or t[pos:].strip() or total <= 0:
+        return None
+    return min(total, MAX_DURATION)
+
+
+def format_duration(seconds) -> str:
+    """3725 → «1 ч 2 мин»; меньше минуты — «меньше минуты»."""
+    seconds = int(max(0, seconds))
+    parts = []
+    for size, name in ((86400, 'д'), (3600, 'ч'), (60, 'мин')):
+        if seconds >= size:
+            parts.append(f"{seconds // size} {name}")
+            seconds %= size
+        if len(parts) == 2:
+            break
+    return ' '.join(parts) or 'меньше минуты'
+
+
+def grant_key(kind, value) -> str:
+    """Ключ выдачи в expires: «module:loader», «command:userbot:ping», «scope:all»; класс — «class»."""
+    return 'class' if kind == 'class' else f"{kind}:{value}"
+
+
 def describe_grant(kind, value, prefix='.') -> str:
     if kind == 'scope':
         return SCOPE_TITLES.get(value, value)
@@ -244,6 +301,9 @@ class AccessManager:
             u.setdefault('added', time.time())
             for opt in USER_OPTIONS:
                 u[opt] = bool(u.get(opt, False))
+            exp = u.get('expires')
+            u['expires'] = {str(k): float(v) for k, v in exp.items() if isinstance(v, (int, float))} \
+                if isinstance(exp, dict) else {}
             if u['class'] not in classes:
                 u['class'] = None
             _normalize_grants(u)
@@ -289,15 +349,64 @@ class AccessManager:
     def has_grants(obj) -> bool:
         return bool(obj and (obj.get('scopes') or obj.get('modules') or obj.get('commands')))
 
+    @staticmethod
+    def _alive(u, key, now=None) -> bool:
+        ts = (u.get('expires') or {}).get(key)
+        return ts is None or ts > (now or time.time())
+
+    def expires_at(self, user_id, kind, value=None):
+        """Когда истекает выдача пользователя (unix-время) или None — бессрочно / нет такой выдачи."""
+        u = self.get_user(user_id)
+        return (u.get('expires') or {}).get(grant_key(kind, value)) if u else None
+
     def _layers(self, user_id):
         u = self.get_user(user_id)
         if not u:
             return []
-        layers = [('личная выдача', u)]
-        cls = self.get_class(u['class']) if u.get('class') else None
+        now = time.time()
+        if u.get('expires'):                      # истёкшие выдачи не действуют, даже если sweep() ещё не убрал их
+            live = {'scopes': [], 'modules': [], 'commands': []}
+            for kind, bucket in _BUCKET.items():
+                live[bucket] = [v for v in u.get(bucket, []) if self._alive(u, grant_key(kind, v), now)]
+            layers = [('личная выдача', live)]
+        else:
+            layers = [('личная выдача', u)]
+        cls = self.get_class(u['class']) if u.get('class') and self._alive(u, 'class', now) else None
         if cls:
             layers.append((f"класс {u['class']}", cls))
         return layers
+
+    async def sweep(self) -> list:
+        """
+        Убирает истёкшие выдачи. → [(user_id, имя, [что истекло (kind, value)], доступ снят целиком: bool)].
+        Пользователь, у которого не осталось ни класса, ни выдач, исчезает из списка.
+        """
+        if self._data is None:
+            return []
+        now, out = time.time(), []
+        for uid, u in list(self.users().items()):
+            exp = u.get('expires') or {}
+            gone = []
+            for key, ts in list(exp.items()):
+                if ts > now:
+                    continue
+                exp.pop(key, None)
+                if key == 'class':
+                    if u.get('class'):
+                        gone.append(('class', u['class']))
+                    u['class'] = None
+                    continue
+                kind, _, value = key.partition(':')
+                bucket = u.get(_BUCKET.get(kind, ''), None)
+                if bucket is not None and value in bucket:
+                    bucket.remove(value)
+                    gone.append((kind, value))
+            if gone:
+                self._prune(uid)
+                out.append((uid, u.get('name') or uid, gone, self.get_user(uid) is None))
+        if out:
+            await self._save()
+        return out
 
     @staticmethod
     def _scope_covers(scopes, is_builtin):
@@ -350,7 +459,7 @@ class AccessManager:
         if u is None:
             u = users[key] = {'name': name or '', 'username': username or '', 'class': cls,
                               'scopes': [], 'modules': [], 'commands': [], 'added': time.time(),
-                              **{opt: False for opt in USER_OPTIONS}}
+                              'expires': {}, **{opt: False for opt in USER_OPTIONS}}
         else:
             if name:
                 u['name'] = name
@@ -383,14 +492,22 @@ class AccessManager:
         await self._save()
         return u
 
+    @staticmethod
+    def _set_expiry(u, key, ttl):
+        exp = u.setdefault('expires', {})
+        if ttl:
+            exp[key] = time.time() + float(ttl)
+        else:
+            exp.pop(key, None)
+
     def _prune(self, user_id):
         """Пользователь без класса и без выдач больше не гость — убираем запись."""
         u = self.get_user(user_id)
         if u is not None and not u.get('class') and not self.has_grants(u):
             self.users().pop(_uid(user_id), None)
 
-    async def set_user_class(self, user_id, cls, name='', username=''):
-        """Выдать класс (cls=None — снять класс). Пользователя без записи заводит."""
+    async def set_user_class(self, user_id, cls, name='', username='', ttl=None):
+        """Выдать класс (cls=None — снять класс). Пользователя без записи заводит. ttl — срок в секундах."""
         if cls is not None and cls not in self.classes():
             raise AccessError(f"Класса «{cls}» нет")
         u = self.get_user(user_id)
@@ -398,12 +515,16 @@ class AccessManager:
             if cls is None:
                 raise AccessError("У этого пользователя нет доступа")
             u = await self.add_user(user_id, name, username, cls)
+            if ttl:
+                self._set_expiry(u, 'class', ttl)
+                await self._save()
             return u
         if name:
             u['name'] = name
         if username:
             u['username'] = username
         u['class'] = cls
+        self._set_expiry(u, 'class', ttl if cls is not None else None)
         self._prune(user_id)
         await self._save()
         return self.get_user(user_id)
@@ -439,9 +560,14 @@ class AccessManager:
         if kind == 'command' and value in PROTECTED_COMMANDS:
             raise AccessError("Эта команда — только для владельца (доступ, алиасы, автозапуск, полный лог)")
 
-    async def grant(self, target, ident, kind, value, name='', username=''):
-        """Выдать доступ (scope / модуль / команду) классу или пользователю (пользователя заводит при надобности)."""
+    async def grant(self, target, ident, kind, value, name='', username='', ttl=None):
+        """
+        Выдать доступ (scope / модуль / команду) классу или пользователю (пользователя заводит при надобности).
+        ttl — срок в секундах (только пользователю): выдача сама исчезнет по его истечении; None — бессрочно.
+        """
         self._check_grant(kind, value)
+        if ttl and target != 'user':
+            raise AccessError("Срок можно ставить только выдачам пользователю, не классу")
         obj = self._target(target, ident, create=True)
         if obj is None:
             obj = await self.add_user(ident, name, username)
@@ -449,7 +575,12 @@ class AccessManager:
         if value not in bucket:
             bucket.append(value)
         if kind == 'module':                      # выдачи отдельных команд этого модуля больше не нужны
-            obj['commands'] = [c for c in obj['commands'] if c.split(':', 1)[0] != value]
+            dropped = [c for c in obj['commands'] if c.split(':', 1)[0] == value]
+            obj['commands'] = [c for c in obj['commands'] if c not in dropped]
+            for c in dropped:
+                (obj.get('expires') or {}).pop(grant_key('command', c), None)
+        if target == 'user':
+            self._set_expiry(obj, grant_key(kind, value), ttl)
         await self._save()
         return obj
 
@@ -462,6 +593,7 @@ class AccessManager:
             raise AccessError("Такой выдачи нет")
         bucket.remove(value)
         if target == 'user':
+            (obj.get('expires') or {}).pop(grant_key(kind, value), None)
             self._prune(ident)
         await self._save()
         return obj

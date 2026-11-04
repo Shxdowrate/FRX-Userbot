@@ -3,8 +3,10 @@ core/web/access_api.py — HTTP-слой вкладки «доступ» (#/acce
 Логика прав и алиасов — core/access.py; все запросы идут через WebPanel.api() (Host / Origin / X-FRX).
 """
 
+import time
+
 from ..access import (AccessError, PROTECTED_COMMANDS, PROTECTED_MODULES, SCOPES, SCOPE_TITLES, USER_OPTIONS, command_key,
-                      describe_grant)
+                      describe_grant, format_duration, grant_key, parse_duration)
 
 
 def register(panel, router):
@@ -67,7 +69,12 @@ class AccessApi:
                  and (scope == 'all' or (scope == 'builtin') == m['builtin'])]
         return ['включает критически опасные модули: ' + ', '.join(names)] if names else []
 
-    def _grant_out(self, kind, value, modules, prefix):
+    def _grant_out(self, kind, value, modules, prefix, expires=None):
+        out = self._grant_out_base(kind, value, modules, prefix)
+        out['expires'] = expires                          # unix-время окончания срока (только у выдач пользователю)
+        return out
+
+    def _grant_out_base(self, kind, value, modules, prefix):
         by = {m['module']: m for m in modules}
         if kind == 'scope':
             danger = self._scope_danger(value, modules)
@@ -85,7 +92,8 @@ class AccessApi:
                 'danger': danger, 'module': mod}
 
     def _grants(self, obj, modules, prefix):
-        return [self._grant_out(k, v, modules, prefix) for k, v in self._am().grants_of(obj)]
+        exp = obj.get('expires') or {}                    # у класса сроков нет — пусто
+        return [self._grant_out(k, v, modules, prefix, exp.get(grant_key(k, v))) for k, v in self._am().grants_of(obj)]
 
     def _count(self, uid, modules):
         allowed = total = 0
@@ -97,7 +105,10 @@ class AccessApi:
 
     def _user_out(self, uid, u, modules, prefix):
         allowed, total = self._count(uid, modules)
+        exp = [ts for ts in (u.get('expires') or {}).values() if ts]
         return {'id': uid, 'name': u.get('name') or '', 'username': u.get('username') or '', 'class': u.get('class'),
+                'class_expires': (u.get('expires') or {}).get('class') if u.get('class') else None,
+                'timed': len(exp), 'next_expiry': min(exp) if exp else None,
                 'grants': self._grants(u, modules, prefix), 'added': u.get('added'), 'allowed': allowed, 'total': total,
                 'options': [{'key': k, 'label': label, 'description': desc, 'on': bool(u.get(k))}
                             for k, (label, desc) in USER_OPTIONS.items()]}
@@ -175,14 +186,39 @@ class AccessApi:
             if mod not in self.core.modules:
                 raise self.Err(f'модуля «{mod}» нет')
 
+    def _ttl(self, b, uid, key):
+        """
+        Срок из запроса: ttl — секунды или строка («2h30m», «3д»); 0 / '' / null — бессрочно. Ключа ttl нет (старая
+        страница из кэша браузера) — оставляем прежний срок выдачи, а не снимаем его молча.
+        """
+        if 'ttl' not in b:
+            u = self._am().get_user(uid) if uid else None
+            old = ((u or {}).get('expires') or {}).get(key)
+            return max(1.0, old - time.time()) if old else None
+        v = b.get('ttl')
+        if v in (None, '', 0, '0', False):
+            return None
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v) if v > 0 else None
+        text = str(v).strip()
+        if text.isdigit():
+            return float(text) or None
+        sec = parse_duration(text)
+        if sec is None:
+            raise self.Err(f'срок «{text}» не понят — например 30m, 2h, 1d, 1w, 2ч 30мин, 3 дня')
+        return float(sec)
+
     async def grant(self, request):
         b = await self._body(request)
         target, kind, value = b.get('target'), b.get('kind'), str(b.get('value') or '')
+        uid = str(b.get('id') or '')
         self._check_value(kind, value)
-        await self._call(self._am().grant(target, str(b.get('id') or ''), kind, value,
-                                          name=str(b.get('name') or ''), username=str(b.get('username') or '')))
+        ttl = self._ttl(b, uid, grant_key(kind, value)) if target == 'user' else None
+        await self._call(self._am().grant(target, uid, kind, value,
+                                          name=str(b.get('name') or ''), username=str(b.get('username') or ''), ttl=ttl))
         prefix = await self.core.get_prefix()
-        self.core.tlog(f"[access] {target} {b.get('id')}: выдано — {describe_grant(kind, value, prefix)}")
+        self.core.tlog(f"[access] {target} {uid}: выдано — {describe_grant(kind, value, prefix)}"
+                       + (f" на {format_duration(ttl)}" if ttl else ''))
         return {'ok': True}
 
     async def revoke(self, request):
@@ -192,8 +228,12 @@ class AccessApi:
 
     async def user_class(self, request):
         b = await self._body(request)
-        await self._call(self._am().set_user_class(str(b.get('id') or ''), b.get('class') or None,
-                                                   name=str(b.get('name') or ''), username=str(b.get('username') or '')))
+        uid = str(b.get('id') or '')
+        cls = b.get('class') or None
+        same = ((self._am().get_user(uid) or {}).get('class') == cls)
+        ttl = self._ttl(b if (same or 'ttl' in b) else {**b, 'ttl': None}, uid, 'class') if cls else None
+        await self._call(self._am().set_user_class(uid, cls, name=str(b.get('name') or ''),
+                                                   username=str(b.get('username') or ''), ttl=ttl))
         return {'ok': True}
 
     async def user_option(self, request):

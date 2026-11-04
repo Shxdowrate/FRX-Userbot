@@ -45,7 +45,7 @@ from telethon import TelegramClient, events
 from telethon.errors import BotInlineDisabledError, MessageNotModifiedError
 from telethon.tl.functions.contacts import UnblockRequest
 
-from .context import current_event, current_module, current_emulation, current_guest
+from .context import current_event, current_module, current_emulation, current_guest, current_command
 from .access import AccessManager, AliasManager, AccessError, command_key, danger_reasons
 from .database import Database, DynamicDB
 from .cache import MemoryCache, DynamicCache
@@ -57,6 +57,7 @@ from .time_utils import parse_interval
 from .files import FileRegistry
 from .waiters import Waiter, WaiterCancelled
 from .accounts import AccountManager
+from .inline_forms import INPUT_ECHO
 from .inline_forms import (
     InlineForm, InlineClick, InputButton, SearchButton, InlineInput, TokenBucket, resolve_form_reply, search_items,
     PAGE_PREV, PAGE_NEXT, PAGE_NOOP, paginate_button_rows, render_page_rows,
@@ -66,6 +67,7 @@ from .inline_forms import (
 from .stationary_bot import BotFacade
 from . import textpages as textpages_module
 from . import fulllog as fulllog_module
+from . import error_reports as error_reports_module
 from .inline_results import InlineResult, InlineQueryEvent, InlineQueryClick, link_preview_options
 from .html_utils import safe_html, html_with_entities, install_telethon_emoji_tags, split_button_emoji
 install_telethon_emoji_tags()    # parse_mode="html" у Telethon понимает и <emoji document_id=…>
@@ -93,7 +95,7 @@ from .paths import ASSETS_DIR, BUILTIN_DIR, FILES_DIR, MODULES_DIR, SESSION_PATH
 # Версия ЯДРА FRX (не путать с VERSION отдельных модулей, см. ModuleInfo) —
 # правится вручную при каждом обновлении движка. Показывается в .about
 # (modules/builtin/Helper.py) и в баннере запуска (main.py).
-FRX_VERSION = "1.0.7"
+FRX_VERSION = "1.0.8"
 
 # Встроенные модули, слитые в modules/builtin/Userbot.py (1.0.6). Если их файлы остались в modules/builtin/ —
 # движок их не грузит и удаляет (см. _load_folder).
@@ -398,6 +400,9 @@ class Core:
         self._bot_username = None
         self._bot_id = None                          # кэш id стационарного бота, см. _get_bot_id()
         self._owner_id = None                        # (await client.get_me()).id, кешируется в start()
+        self._owner_usernames = set()                # юзернеймы аккаунта (без @, в нижнем регистре) — для .cmd@username
+        self._owner_names_at = 0.0                   # когда их последний раз брали из get_me() (time.monotonic)
+        self._error_reports = None                   # id -> отчёт об ошибке (core/error_reports.py), см. error_report()
         self._prefix_cache = (self.config or {}).get('prefix', '.') if isinstance(self.config, dict) else '.'   # последний известный префикс — для синхронного get_args()
         self._dialog_lock = asyncio.Lock()            # bot_send_to_owner() -> _open_bot_dialog()
         self._bot_ready = False                       # True после set_bot(bot, dp) — "все инициализации" завершены
@@ -436,7 +441,7 @@ class Core:
         self._click_bucket = TokenBucket(rate=5)        # обновляется modules/builtin/Userbot.py (clicks_per_second)
 
         # кнопки "Введите значение" (InputButton, core/inline_forms.py) —
-        # user_id -> {'form', 'data', 'chat_id', 'created_at'}; см.
+        # user_id -> {ID поля: {'form', 'data', 'chat_id', 'hint', 'title', 'token', 'created_at'}}; см.
         # _register_input_targets()/dispatch_inline_input() ниже
         self._pending_inputs: dict[int, dict] = {}
 
@@ -793,7 +798,13 @@ class Core:
     # ------------------------------------------------------------------ #
 
     async def start(self):
+        try:
+            self._install_task_error_hook()           # ошибки фоновых задач модулей → чат команды и ЛС
+        except Exception as e:
+            print(f"[FRX] [WARN] перехват ошибок фоновых задач не установлен: {e}")
         await self.access.load()
+        if getattr(self, '_access_sweeper', None) is None or self._access_sweeper.done():
+            self._access_sweeper = asyncio.ensure_future(self._access_sweep_loop())
         await self.aliases.load()
         await self._adopt_legacy_file_session()
         self.client = await self.accounts.get_active_client()
@@ -835,7 +846,7 @@ class Core:
             except Exception as e:
                 print(f"[FRX] [WARN] Не удалось внести первый аккаунт в список аккаунтов: {e}")
 
-        self._owner_id = (await self.client.get_me()).id
+        self._remember_me(await self.client.get_me())
         self._attach_handlers(self.client)
 
         # embedded (встроенные) модули — идут "в комплекте", папка modules/builtin
@@ -1119,7 +1130,9 @@ class Core:
         m = _FIRST_WORD_RE.match(text)
         if not m:
             return None
-        word = m.group(1).lower()
+        # «юзштп@username» — адрес юзербота (см. _dispatch_command) не переводим, только саму команду
+        word, at, target = m.group(1).partition('@')
+        word = word.lower()
         if word.isascii():                               # обычная команда или латиница — дальше не смотрим
             return None
         if word.startswith(prefix) and self._is_command(word[len(prefix):]):
@@ -1135,7 +1148,7 @@ class Core:
                 return None
         except KeyError:
             pass                                         # модуль Userbot ещё не объявил настройку — по умолчанию вкл
-        return prefix + cmd + m.group(2)
+        return prefix + cmd + at + target + m.group(2)
 
     def _is_command(self, name):
         return bool(name) and (name in self.command_map or (self.aliases._data is not None and self.aliases.get(name) is not None))
@@ -1151,6 +1164,18 @@ class Core:
             return
         parts = rest.split(maxsplit=1)
         typed = parts[0]                      # как набрано (переключатели гостя ignore_case / ignore_space, core/access.py)
+        # «.cmd@username» / «.cmd@123456789» — команда для одного юзербота: когда доступ к своим юзерботам дали
+        # несколько человек, без адреса команду выполнили бы все. Не наш адрес — молча пропускаем; наш — модуль
+        # получает текст уже без «@адреса», как будто его не было.
+        name, at, target = typed.partition('@')
+        if at and name and target:
+            if not await self._addressed_to_me(target):
+                return
+            body = text[len(prefix):]
+            text = prefix + body.replace(typed, name, 1)
+            event = CommandEvent(event, text)
+            typed = name
+            parts = [name] + parts[1:]
         cmd = typed.lower()
         run_event = event
         # «. cmd аргументы» — пробелы между префиксом и командой: модуль получает текст «.cmd аргументы»,
@@ -1201,8 +1226,16 @@ class Core:
             if st['log']:
                 self.tlog(f"[access] {who} ({guest}): {prefix}{cmd} ({why})")
 
+        real = (getattr(func, '_frx_commands', None) or [cmd])[0]   # алиас на .eval — тоже без аргументов
+        shown = fulllog_module.command_text(prefix, real, parts[1] if len(parts) > 1 else '')
+        if real != cmd:
+            shown = f"{prefix}{cmd} → {shown}"
+        # всё, что упадёт во время команды (сама команда, её ожидания, запущенные ею фоновые задачи), покажется
+        # в чате этой команды — см. _dispatch_error(); показ — один раз за запуск
+        cmd_ctx = {'event': event, 'guest': guest, 'shown': shown, 'module': module_name, 'reported': False}
         etoken = current_event.set(run_event)
         gtoken = current_guest.set(guest)
+        ctoken = current_command.set(cmd_ctx)
         t0 = time.monotonic()
         outcome = {'error': None}
 
@@ -1216,17 +1249,183 @@ class Core:
         try:
             await self._safe_call(module_name, tracked, run_event)
         finally:
+            current_command.reset(ctoken)
             current_guest.reset(gtoken)
             current_event.reset(etoken)
             who = 'владелец' if guest is None else f"гость {guest}"
-            real = (getattr(func, '_frx_commands', None) or [cmd])[0]   # алиас на .eval — тоже без аргументов
-            shown = fulllog_module.command_text(prefix, real, parts[1] if len(parts) > 1 else '')
-            if real != cmd:
-                shown = f"{prefix}{cmd} → {shown}"
             fulllog_module.event('cmd', (
                 f"{shown} · модуль {module_name}"
                 f" · {who} · чат {getattr(event, 'chat_id', '?')} · {time.monotonic() - t0:.2f} с · "
                 + (f"ОШИБКА {outcome['error']}" if outcome['error'] else "ок")))
+
+    async def _addressed_to_me(self, target) -> bool:
+        """
+        Адрес из «.cmd@адрес» — это владелец этого юзербота? Адрес — юзернейм (с @ или без, регистр не важен,
+        подходит любой из юзернеймов аккаунта) или числовой id. Юзернейм могли сменить после запуска: при
+        несовпадении берём свежий get_me(), но не чаще раза в минуту.
+        """
+        t = str(target).strip().lstrip('@').lower()
+        if not t:
+            return False
+        if t.isdigit():
+            return self._owner_id is not None and int(t) == self._owner_id
+        if t in self._owner_usernames:
+            return True
+        if time.monotonic() - self._owner_names_at < 60 or self.client is None:
+            return False
+        try:
+            self._remember_me(await self.client.get_me())
+        except Exception as e:
+            self.tlog(f"[cmd@] не удалось обновить юзернеймы аккаунта: {e}")
+            self._owner_names_at = time.monotonic()
+        return t in self._owner_usernames
+
+    def _remember_me(self, me):
+        """Запоминает id и все юзернеймы аккаунта (основной и коллекционные) — для .cmd@адрес."""
+        if me is None:
+            return
+        self._owner_id = me.id
+        names = set()
+        if getattr(me, 'username', None):
+            names.add(me.username.lower())
+        for u in getattr(me, 'usernames', None) or ():
+            if getattr(u, 'username', None) and getattr(u, 'active', True):
+                names.add(u.username.lower())
+        self._owner_usernames = names
+        self._owner_names_at = time.monotonic()
+
+    async def _show_command_error(self, ctx, report):
+        """
+        Ошибка во время команды — показываем её в чате команды (настройка errors_in_chat модуля Userbot): что
+        упало, почему (суть простыми словами), где. Своё сообщение с командой заменяем текстом ошибки, гостю
+        отвечаем реплаем (чужое сообщение не отредактировать) — без кода модуля. Полный разбор уходит в ЛС ботом.
+        """
+        if not await self._botlog_cfg('errors_in_chat', True):
+            return
+        event, guest = ctx['event'], ctx['guest']
+        text = error_reports_module.chat_text(report, guest=guest is not None)
+        try:
+            if guest is None:
+                try:
+                    await event.edit(text, parse_mode='html', link_preview=False)
+                    return
+                except MessageNotModifiedError:
+                    return
+                except Exception:
+                    pass                                 # сообщение удалено / не редактируется — пишем новым
+                await event.respond(text, parse_mode='html', link_preview=False)
+            else:
+                await event.reply(text, parse_mode='html', link_preview=False)
+        except Exception as e:
+            self.tlog(f"[ERROR] не удалось показать ошибку команды {ctx['shown']} в чате: {e}")
+
+    # ------------------------------------------------------------------ #
+    # Отчёты об ошибках (core/error_reports.py): для кнопок «Подробнее» в ЛС
+    # ------------------------------------------------------------------ #
+
+    _ERROR_REPORTS_MAX = 40
+
+    def _module_source(self, name):
+        info = self.modules.get(name) or self.modules.get(str(name).lower())
+        return getattr(info, 'source', None) if info is not None else None
+
+    async def _load_error_reports(self):
+        if self._error_reports is None:
+            from collections import OrderedDict
+            self._error_reports = OrderedDict()
+            try:
+                for rep in await self.db.get('core:error_reports', []) or []:
+                    if isinstance(rep, dict) and rep.get('id'):
+                        self._error_reports[rep['id']] = rep
+            except Exception as e:
+                self.tlog(f"[errors] сохранённые отчёты об ошибках не прочитались: {e}")
+        return self._error_reports
+
+    async def _store_error_report(self, rep):
+        reports = await self._load_error_reports()
+        reports[rep['id']] = rep
+        while len(reports) > self._ERROR_REPORTS_MAX:
+            reports.popitem(last=False)
+        try:
+            await self.db.set('core:error_reports', list(reports.values()))
+        except Exception as e:
+            self.tlog(f"[errors] отчёт об ошибке не сохранился: {e}")
+
+    async def error_report(self, report_id):
+        """Отчёт об ошибке по id (dict, см. core/error_reports.py) или None — уже вытеснен более новыми."""
+        return (await self._load_error_reports()).get(str(report_id))
+
+    def _install_task_error_hook(self):
+        """
+        Необработанная ошибка в фоновой задаче, которую запустил модуль (asyncio.create_task внутри команды или
+        хэндлера), раньше печаталась только в терминал как «Task exception was never retrieved». Теперь она
+        идёт тем же путём, что и ошибки команд: в чат команды (если задачу запустила команда) и в ЛС с разбором.
+        Модуль задачи берётся из её контекста — нужен Python 3.12+ (Task.get_context); на старых — как раньше.
+        """
+        loop = asyncio.get_running_loop()
+        if getattr(loop, '_frx_task_hook', False):
+            return
+        previous = loop.get_exception_handler()
+
+        def handler(lp, context):
+            exc = context.get('exception')
+            task = context.get('future') or context.get('task')
+            get_ctx = getattr(task, 'get_context', None)
+            if isinstance(exc, Exception) and get_ctx is not None:
+                try:
+                    tctx = get_ctx()
+                    module = tctx.get(current_module)
+                except Exception:
+                    module = None
+                if module and module != '__loading__':
+                    coro = getattr(task, 'get_coro', lambda: None)()
+                    fname = getattr(coro, '__qualname__', None) or getattr(coro, '__name__', None) or 'задача'
+                    func = types.SimpleNamespace(__name__=fname)
+                    try:
+                        tctx.copy().run(lambda: asyncio.ensure_future(
+                            self._dispatch_error(module, func, exc, origin='фоновая задача')))
+                        return
+                    except Exception:
+                        pass
+            if previous is not None:
+                previous(lp, context)
+            else:
+                lp.default_exception_handler(context)
+
+        loop.set_exception_handler(handler)
+        try:
+            loop._frx_task_hook = True
+        except Exception:
+            pass
+
+    async def _access_sweep_loop(self):
+        """
+        Раз в 30 с убирает истёкшие выдачи доступа (core/access.py, срок у выдачи) и сообщает владельцу в ЛС, у кого
+        что истекло. Действовать они перестают сразу по сроку — check() истёкшее не видит; здесь только уборка.
+        """
+        from .access import describe_grant
+        while True:
+            try:
+                await asyncio.sleep(30)
+                expired = await self.access.sweep()
+                if not expired:
+                    continue
+                prefix = await self.get_prefix()
+                for uid, name, gone, whole in expired:
+                    what = ', '.join(f"класс {v}" if k == 'class' else describe_grant(k, v, prefix) for k, v in gone)
+                    self.tlog(f"[access] {name} ({uid}): срок вышел — {what}" + (" · доступа больше нет" if whole else ""))
+                    fulllog_module.event('access', f"{name} ({uid}): срок вышел — {what}")
+                    if await self._botlog_cfg('notify_access_expired', True):
+                        self.botlog_raw("\n".join([
+                            visual_module.warn("<b>Срок доступа вышел</b>"),
+                            visual_module.field('кто', _html.escape(str(name), quote=False)),
+                            visual_module.field('id', uid),
+                            visual_module.field('истекло', _html.escape(what, quote=False)),
+                        ] + ([visual_module.hint("других выдач не осталось — доступа у него больше нет")] if whole else [])))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.tlog(f"[access] уборка истёкших выдач упала: {type(e).__name__}: {e}")
 
     def guest_id(self):
         """id гостя, по чьей команде (или клику в форме) сейчас выполняется код; None — владелец."""
@@ -1318,10 +1517,29 @@ class Core:
         finally:
             current_module.reset(mtoken)
 
-    async def _dispatch_error(self, module_name, func, exc: Exception):
+    async def _dispatch_error(self, module_name, func, exc: Exception, origin=None):
         text = f"{type(exc).__name__}: {exc}"
         context = {'module': module_name, 'function': getattr(func, '__name__', str(func))}
         self.tlog(f"[ERROR] модуль={module_name} функция={context['function']}: {text}")
+        cmd = current_command.get()
+        report = None
+        try:
+            report = error_reports_module.build(
+                exc, module=module_name, function=context['function'],
+                command=cmd['shown'] if cmd else None,
+                chat_id=getattr(cmd['event'] if cmd else current_event.get(), 'chat_id', None),
+                guest=cmd['guest'] if cmd else current_guest.get(),
+                origin=origin or ('команда' if cmd else 'модуль'),
+                get_source=self._module_source)
+            await self._store_error_report(report)
+            context['report_id'] = report['id']       # Userbot: кнопки «Подробнее» в ЛС
+            context['report'] = report
+        except Exception as e:
+            self.tlog(f"[errors] не удалось разобрать ошибку: {type(e).__name__}: {e}")
+        # ошибка случилась во время команды — показываем её в чате команды (один раз за запуск)
+        if cmd is not None and report is not None and not cmd['reported']:
+            cmd['reported'] = True
+            await self._show_command_error(cmd, report)
         for m, handler in list(self.on_error_handlers):
             mtoken = current_module.set(m)
             try:
@@ -2087,22 +2305,28 @@ class Core:
             f"{body}"
         )
 
-    def botlog_raw(self, message: str):
-        """То же, что botlog(), но для УЖЕ оформленного HTML-текста: только лимитер + доставка (см. botlog())."""
+    def botlog_raw(self, message: str, buttons=None):
+        """
+        То же, что botlog(), но для УЖЕ оформленного HTML-текста: только лимитер + доставка (см. botlog()).
+        buttons — кнопки под сообщением, как у engine.bot.send_message; клики по ним получит @bot.callback модуля,
+        который вызвал botlog_raw.
+        """
         try:
             asyncio.get_running_loop()
         except RuntimeError:
             self.tlog(f"[botlog] {re.sub(r'<[^>]+>', '', _html.unescape(message))}")
             return None
-        return asyncio.ensure_future(self._botlog_pipeline(message))
+        item = (message, buttons, current_module.get()) if buttons else message
+        return asyncio.ensure_future(self._botlog_pipeline(item))
 
-    async def _botlog_pipeline(self, message: str) -> str:
+    async def _botlog_pipeline(self, item) -> str:
         if not await self._botlog_cfg('logs_enabled', True):
             return 'disabled'
         if self._aiogram_bot is None:
+            message = item[0] if isinstance(item, tuple) else item
             self.tlog(f"[botlog] бот не подключён: {re.sub(r'<[^>]+>', '', _html.unescape(message))}")
             return 'no_bot'
-        return await self._botlog.submit(message)
+        return await self._botlog.submit(item)
 
     async def _botlog_cfg(self, key, default):
         try:
@@ -2119,14 +2343,17 @@ class Core:
             'wait': bool(await self._botlog_cfg('botlog_wait', True)),
         }
 
-    async def _botlog_deliver(self, text: str):
+    async def _botlog_deliver(self, item):
+        text, buttons, owner = item if isinstance(item, tuple) else (item, None, None)
         chat_id = await self._botlog_cfg('log_chat_id', 0) or self._owner_id
         if chat_id == self._owner_id:
             # в ЛС владельцу — как bot_send_to_owner: нет диалога / бот в ЧС → юзербот сам пишет боту /start и повторяет.
             # Раньше такое сообщение (в т.ч. «Юзербот запущен») молча терялось, оставалась строка в терминале.
-            await self.bot_send_to_owner(text)
+            msg = await self.bot_send_to_owner(text, buttons=buttons)
         else:
-            await self.bot.send_message(chat_id, text)
+            msg = await self.bot.send_message(chat_id, text, buttons=buttons)
+        if buttons and owner:
+            self.note_bot_message(msg, owner)        # клики по кнопкам — модулю, который отправил лог
 
     # ------------------------------------------------------------------ #
     # отправка владельцу ОТ ИМЕНИ стационарного бота (в ЛС бота)
@@ -2211,24 +2438,24 @@ class Core:
             except Exception:
                 pass
 
-    def module_links(self, module_name_or_meta, row: bool = True):
+    def module_links(self, module_name_or_meta, row: bool = True, git: bool = False):
         """
-        Кнопки-ссылки автора модуля (TG_URL / GIT_URL из шапки) для инлайн-формы:
-        [[('↗ Канал автора', 'url:https://t.me/…'), ('↗ GitHub', 'url:https://github.com/…')]] — один ряд
-        (row=False — плоский список кнопок). Ссылок нет — []. Принимает MODULE_NAME или dict с 'tg_url'/'git_url'
-        (результат get_module_info() / parse_module_meta()).
+        Кнопка-ссылка на канал автора модуля (TG_URL из шапки) для инлайн-формы: [[('↗ Канал автора', 'url:…')]]
+        (row=False — плоский список кнопок). Ссылки нет — []. Принимает MODULE_NAME или dict с 'tg_url'/'git_url'
+        (результат get_module_info() / parse_module_meta()). Кнопки на GitHub по умолчанию нет — исходник и так
+        ссылкой в тексте («исходник»); git=True — добавить и её.
         """
         if isinstance(module_name_or_meta, dict):
-            tg, git = module_name_or_meta.get('tg_url') or '', module_name_or_meta.get('git_url') or ''
+            tg, gitu = module_name_or_meta.get('tg_url') or '', module_name_or_meta.get('git_url') or ''
         else:
             info = self.modules.get(module_name_or_meta)
-            tg, git = (info.tg_url, info.git_url) if info else ('', '')
+            tg, gitu = (info.tg_url, info.git_url) if info else ('', '')
         link = visual_module.visual('link')
         buttons = []
         if tg:
             buttons.append((f"{link} Канал автора", 'url:' + tg))
-        if git:
-            buttons.append((f"{link} " + ('GitHub' if 'github.com' in git.lower() else 'Исходник'), 'url:' + git))
+        if git and gitu:
+            buttons.append((f"{link} " + ('GitHub' if 'github.com' in gitu.lower() else 'Исходник'), 'url:' + gitu))
         return ([buttons] if buttons else []) if row else buttons
 
     async def channel_subscription(self, url):
@@ -3452,7 +3679,7 @@ class Core:
         if old is not None and old is not client:
             self._detach_handlers(old)                 # старый аккаунт сразу перестаёт отвечать на команды
         self.client = client
-        self._owner_id = me.id
+        self._remember_me(me)
         self._attach_handlers(self.client)
         # даём знать модулям (см. decorators.on_account_switch(),
         # modules/builtin/Startup.py), что юзербот перешёл на другой аккаунт —
@@ -4318,7 +4545,9 @@ class Core:
                         "либо один ряд без вложенности: buttons=[('Ок', 'ok'), ('Отмена', 'cancel', 'danger')]"
                     )
                 if b['kind'] == 'input':
-                    keyboard_row.append(make(b['style'], text=b['text'], switch_inline_query_current_chat=b.get('prefill') or ''))
+                    token = self._input_token(b['button'])           # «@бот k7mx » — по ID ввод найдёт своё поле
+                    keyboard_row.append(make(b['style'], text=b['text'],
+                                             switch_inline_query_current_chat=f"{token} {b.get('prefill') or ''}"))
                 elif b['kind'] == 'url':
                     keyboard_row.append(make(b['style'], text=b['text'], url=b['url']))   # кнопка-ссылка
                 elif b['kind'] == 'copy':                                                 # «скопировать»: клика нет
@@ -4361,10 +4590,40 @@ class Core:
 
     # --- InputButton ("Введите значение") — регистрация/диспетчеризация ---- #
 
+    _INPUT_TOKEN_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789'     # без похожих символов: l/1, o/0, i
+    _INPUT_TOKEN_LEN = 4
+
+    def _input_token(self, btn) -> str:
+        """
+        ID поля ввода: 4 случайных символа, уникальных среди полей, которые сейчас ждут ввода (и выданных недавно,
+        но ещё не зарегистрированных). Занят — подбирается другой. Выдаётся кнопке один раз (btn.token).
+        """
+        if getattr(btn, 'token', None):
+            return btn.token
+        import secrets
+        now = time.monotonic()
+        reserved = self.__dict__.setdefault('_input_tokens_reserved', {})
+        for tok, ts in list(reserved.items()):
+            if now - ts > 3600:
+                reserved.pop(tok, None)
+        busy = set(reserved)
+        for entries in self._pending_inputs.values():
+            busy.update(entries)
+        for _ in range(1000):
+            tok = ''.join(secrets.choice(self._INPUT_TOKEN_ALPHABET) for _ in range(self._INPUT_TOKEN_LEN))
+            if tok not in busy:
+                break
+        reserved[tok] = now
+        btn.token = tok
+        return tok
+
     def _clear_input_targets_for_form(self, form):
         """Снимает все зарегистрированные InputButton-цели, указывающие на эту форму."""
-        for user_id, pending in list(self._pending_inputs.items()):
-            if pending['form'] is form:
+        for user_id, entries in list(self._pending_inputs.items()):
+            for tok, pending in list(entries.items()):
+                if pending['form'] is form:
+                    entries.pop(tok, None)
+            if not entries:
                 self._pending_inputs.pop(user_id, None)
 
     def _resolve_input_targets(self, form, btn: 'InputButton'):
@@ -4405,31 +4664,49 @@ class Core:
         кнопок мог поменяться или потерять InputButton вовсе), а потом
         регистрируются заново по свежему списку buttons.
 
-        На один user_id может существовать только ОДНА ожидаемая
-        InputButton одновременно (по любой форме) — это не искусственное
-        ограничение движка, а следствие самого Telegram-клиента: он не
-        даст пользователю одновременно "переключиться" в инлайн-режим по
-        двум разным кнопкам сразу. Поэтому регистрация новой цели для
-        уже занятого user_id молча перекрывает старую.
+        У каждого поля свой ID (btn.token, см. _input_token()): «@бот <ID> значение» попадает ровно в своё поле,
+        поэтому один человек может одновременно держать сколько угодно форм с вводом. Без ID (стёрли) значение
+        уходит в поле, которое он получил последним.
         """
         self._clear_input_targets_for_form(form)
         for row in self._normalize_button_rows(buttons):
             for btn in row:
                 if not isinstance(btn, InputButton):
                     continue
+                token = self._input_token(btn)
+                self.__dict__.setdefault('_input_tokens_reserved', {}).pop(token, None)
                 for user_id in self._resolve_input_targets(form, btn):
-                    self._pending_inputs[user_id] = {
+                    entries = self._pending_inputs.setdefault(user_id, {})
+                    entries.pop(token, None)                     # перевыдача — в конец: «последнее» поле
+                    entries[token] = {
                         'form': form, 'data': btn.data, 'chat_id': form.chat_id, 'hint': btn.hint, 'title': btn.text,
-                        'created_at': time.monotonic(),
+                        'token': token, 'created_at': time.monotonic(),
                     }
 
-    def get_pending_input(self, user_id):
+    def _match_pending_input(self, user_id, query):
+        """(ID, запись ожидания, значение без ID) по «<ID> значение»; без ID — последнее поле человека. Нет — None."""
+        entries = self._pending_inputs.get(user_id)
+        if not entries:
+            return None
+        query = query or ''
+        parts = query.split(maxsplit=1)
+        if parts and parts[0].lower() in entries:
+            tok = parts[0].lower()
+            return tok, entries[tok], (parts[1] if len(parts) > 1 else '')
+        tok = next(reversed(entries))
+        return tok, entries[tok], query.strip()
+
+    def get_pending_input(self, user_id, query=None):
         """
-        Вызывается ботом (aiobot/bot.py, handle_inline_query) — есть ли у
-        этого user_id ожидаемый ввод значения через InputButton прямо
-        сейчас. Возвращает dict {'form','data','chat_id','created_at'} | None.
+        Вызывается ботом (aiobot/bot.py, handle_inline_query) — ждёт ли этот user_id ввода значения через
+        InputButton. query — набранное после «@бот» (ID поля + значение). Возвращает dict ожидания
+        {'form','data','chat_id','hint','title','token','created_at'} + 'value' (значение без ID) | None.
         """
-        return self._pending_inputs.get(user_id)
+        found = self._match_pending_input(user_id, query)
+        if found is None:
+            return None
+        _tok, pending, value = found
+        return {**pending, 'value': value}
 
     async def dispatch_inline_input(self, chosen):
         """
@@ -4444,22 +4721,26 @@ class Core:
         user_id = chosen.from_user.id if chosen.from_user else None
         if user_id is None:
             return
-        pending = self._pending_inputs.get(user_id)
-        if pending is None:
+        found = self._match_pending_input(user_id, chosen.query)
+        if found is None:
             return
+        token, pending, value = found
 
         form = pending['form']
-        # разовый ввод — снимаем цель сразу; если хэндлеру снова нужен
+        # разовый ввод — снимаем это поле сразу; если хэндлеру снова нужен
         # ввод (например, невалидное значение), он сам перевешивает
         # InputButton через form.edit(...), что заново её зарегистрирует
-        self._pending_inputs.pop(user_id, None)
+        entries = self._pending_inputs.get(user_id) or {}
+        entries.pop(token, None)
+        if not entries:
+            self._pending_inputs.pop(user_id, None)
         if form._closed:
             return
 
         await self._click_bucket.acquire()
         from_user = await self._resolve_clicker(user_id, form.chat_id)
         inp = InlineInput(
-            data=pending['data'], value=chosen.query, from_user=from_user,
+            data=pending['data'], value=value, from_user=from_user,
             chat_id=form.chat_id, form=form,
         )
         await self._register_input_echo_for_deletion(form.chat_id, chosen.query)
@@ -4497,7 +4778,7 @@ class Core:
 
     async def _register_input_echo_for_deletion(self, chat_id, value):
         """См. блок комментариев выше. Вызывается из dispatch_inline_input()."""
-        echo_text = value if value else "…"  # пустая query -> aiobot/bot.py шлёт "…" (см. handle_inline_query)
+        echo_text = INPUT_ECHO      # в чат бот публикует не значение, а только этот знак (aiobot/bot.py, input_result)
 
         # сообщение уже могло прилететь раньше нас (гонка Bot API vs MTProto) —
         # если нашли совпадение в буфере "увиденных" эхо-сообщений, удаляем
